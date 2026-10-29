@@ -27,7 +27,8 @@ static int usage() {
             "                [--update update.nsp] -o <out dir> [--verify-nca] [--list]\n"
             "  writes <out dir>/01007EF00011E000/exefs and .../romfs (as hactool extracts them)\n"
             "  --verify-nca  also check each NCA's SHA-256 against the package metadata (reads the packages once more)\n"
-            "  --list        print what would be extracted, write nothing\n");
+            "  --list        print what would be extracted, write nothing\n"
+            "  --programs    print the Program NCAs used (\"base <file>\", \"update <file>\"), write nothing\n");
     return 2;
 }
 
@@ -44,7 +45,7 @@ int main(int argc, char **argv) {
     g_pt = lang && !strncmp(lang, "pt", 2);
     std::string keys, title_keys, base, update, out;
     nx::PackageKind kind = nx::PackageKind::NSP;
-    bool verify = false, list = false;
+    bool verify = false, list = false, programs = false;
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
         auto next = [&]() -> std::string { return i + 1 < argc ? argv[++i] : ""; };
@@ -56,9 +57,10 @@ int main(int argc, char **argv) {
         else if (a == "-o") out = next();
         else if (a == "--verify-nca") verify = true;
         else if (a == "--list") list = true;
+        else if (a == "--programs") programs = true;
         else return usage();
     }
-    if (keys.empty() || base.empty() || (out.empty() && !list)) return usage();
+    if (keys.empty() || base.empty() || (out.empty() && !list && !programs)) return usage();
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
 
@@ -72,16 +74,24 @@ int main(int argc, char **argv) {
         if (!update.empty()) in.update = nx::open_file(update);
         nx::Importer imp(in);
         for (auto &line : imp.describe()) fprintf(stderr, "[nximport] %s\n", line.c_str());
+        if (programs) {
+            printf("base %s\n", imp.base_program().c_str());
+            if (imp.has_update()) printf("update %s\n", imp.update_program().c_str());
+            return 0;
+        }
         if (list) {
             for (auto &e : imp.exefs()) printf("exefs/%s %llu\n", e.name.c_str(), (unsigned long long)e.data->size());
             for (auto &f : imp.romfs().files) printf("romfs/%s %llu\n", f.path.c_str(), (unsigned long long)f.size);
             return 0;
         }
         int last = -1;
+        const bool tty = isatty(2);
         auto progress = [&](uint64_t done, uint64_t total) {
             int pct = total ? int(done * 100 / total) : 100;
-            if (pct != last) fprintf(stderr, "\r[nximport] %3d%% (%llu / %llu MiB)", last = pct,
-                                     (unsigned long long)(done >> 20), (unsigned long long)(total >> 20));
+            // (a terminal: one line redrawn; a log: a line every 10%)
+            if (pct == last || (!tty && pct % 10 && pct != 100)) return;
+            fprintf(stderr, tty ? "\r[nximport] %3d%% (%llu / %llu MiB)" : "[nximport] %3d%% (%llu / %llu MiB)\n", last = pct,
+                    (unsigned long long)(done >> 20), (unsigned long long)(total >> 20));
         };
         if (verify) {
             fprintf(stderr, "[nximport] checking the NCAs' SHA-256...\n");
