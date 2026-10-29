@@ -45,8 +45,11 @@ if(NXIMPORT_TOOLS)
     add_executable(nximport_tests tests/test_main.cpp tests/synth.cpp tests/test_crypto.cpp tests/test_keys.cpp
                    tests/test_containers.cpp tests/test_import.cpp tests/test_corrupt.cpp tests/test_update.cpp
                    tests/test_feed.cpp ${CMAKE_CURRENT_SOURCE_DIR}/../../runtime/romfs_build.c)
-    # (runtime/romfs_build.c as it is: the app's romfs.bin builder, fed by RomfsFeed in test_feed.cpp)
-    target_include_directories(nximport_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../runtime)
+    # (runtime/romfs_build.c as it is: the app's romfs.bin builder, fed by RomfsFeed in test_feed.cpp; and the app's
+    # transactional import, test_package_import.cpp)
+    set(APP_CPP ${CMAKE_CURRENT_SOURCE_DIR}/../../android/totkrecompandroid/app/src/main/cpp)
+    target_sources(nximport_tests PRIVATE tests/test_package_import.cpp ${APP_CPP}/package_import.cpp)
+    target_include_directories(nximport_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../runtime ${APP_CPP})
     target_link_libraries(nximport_tests nximport)
     add_test(NAME nximport_tests COMMAND nximport_tests)
 endif()

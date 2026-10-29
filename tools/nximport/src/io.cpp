@@ -1,5 +1,8 @@
 #include "io.h"
 
+#include "crypto.h"
+
+#include <algorithm>
 #include <cerrno>
 #include <cstring>
 #include <fcntl.h>
@@ -63,6 +66,42 @@ ReaderPtr open_file(const std::string &path) {
 SubReader::SubReader(ReaderPtr parent, uint64_t base, uint64_t size, std::string what)
     : Reader(std::move(what)), parent_(std::move(parent)), base_(base), size_(size) {
     check_range(base, size, parent_->size(), this->what().c_str());
+}
+
+MemReader::~MemReader() {
+    if (secret_ && !data_.empty()) wipe(data_.data(), data_.size());
+}
+
+std::shared_ptr<MemReader> MemReader::from_fd(int fd, size_t max, std::string what, bool secret) {
+    std::vector<uint8_t> v;
+    uint8_t buf[16384];
+    for (;;) {
+        ssize_t r = ::read(fd, buf, sizeof buf);
+        if (r < 0 && errno == EINTR) continue;
+        if (r < 0) {
+            std::string e = strerror(errno);
+            close(fd);
+            if (secret) wipe(v.data(), v.size());
+            fail(what + ": read error (" + e + ")", what + ": erro de leitura (" + e + ")");
+        }
+        if (r == 0) break;
+        if (v.size() + size_t(r) > max) {
+            close(fd);
+            if (secret) wipe(v.data(), v.size());
+            fail(what + " is too large to be a keys file", what + " é grande demais para ser um arquivo de chaves");
+        }
+        if (secret && v.capacity() < v.size() + size_t(r)) {  // (no copy of the secret left behind in a freed block)
+            std::vector<uint8_t> bigger;
+            bigger.reserve(std::max(v.capacity() * 2, v.size() + size_t(r)));
+            bigger.assign(v.begin(), v.end());
+            wipe(v.data(), v.size());
+            v.swap(bigger);
+        }
+        v.insert(v.end(), buf, buf + r);
+    }
+    wipe(buf, sizeof buf);
+    close(fd);
+    return std::make_shared<MemReader>(std::move(v), std::move(what), secret);
 }
 
 void MemReader::read_impl(void *dst, uint64_t n, uint64_t off) const { memcpy(dst, data_.data() + off, size_t(n)); }

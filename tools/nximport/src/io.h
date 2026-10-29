@@ -73,17 +73,23 @@ private:
     uint64_t base_, size_;
 };
 
-// A reader over bytes in memory (tests, small decrypted tables)
+// A reader over bytes in memory (tests, small decrypted tables; a keys file's text: secret, wiped when it goes)
 class MemReader : public Reader {
 public:
-    MemReader(std::vector<uint8_t> data, std::string what) : Reader(std::move(what)), data_(std::move(data)) {}
+    MemReader(std::vector<uint8_t> data, std::string what, bool secret = false)
+        : Reader(std::move(what)), data_(std::move(data)), secret_(secret) {}
+    ~MemReader() override;
     uint64_t size() const override { return data_.size(); }
+    // A descriptor's whole content (a keys file handed over by Android's file picker: maybe not seekable), at most
+    // max bytes; the descriptor is closed
+    static std::shared_ptr<MemReader> from_fd(int fd, size_t max, std::string what, bool secret);
 
 protected:
     void read_impl(void *dst, uint64_t n, uint64_t off) const override;
 
 private:
     std::vector<uint8_t> data_;
+    bool secret_;
 };
 
 // Little-endian fields of headers read into memory
