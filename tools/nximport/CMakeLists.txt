@@ -30,9 +30,10 @@ endif()
 
 add_library(nximport STATIC
     src/io.cpp src/crypto.cpp src/keys.cpp src/container.cpp src/integrity.cpp src/nca.cpp src/romfs.cpp
-    src/cnmt.cpp src/bktr.cpp src/nximport.cpp)
+    src/cnmt.cpp src/bktr.cpp src/nximport.cpp src/romfs_feed.cpp)
 target_include_directories(nximport PUBLIC src)
-target_link_libraries(nximport PUBLIC nximport_mbedtls)
+find_package(Threads REQUIRED)
+target_link_libraries(nximport PUBLIC nximport_mbedtls Threads::Threads)
 target_compile_options(nximport PRIVATE -Wall -Wextra)
 
 if(NXIMPORT_TOOLS)
@@ -42,7 +43,10 @@ if(NXIMPORT_TOOLS)
 
     enable_testing()
     add_executable(nximport_tests tests/test_main.cpp tests/synth.cpp tests/test_crypto.cpp tests/test_keys.cpp
-                   tests/test_containers.cpp tests/test_import.cpp tests/test_corrupt.cpp tests/test_update.cpp)
+                   tests/test_containers.cpp tests/test_import.cpp tests/test_corrupt.cpp tests/test_update.cpp
+                   tests/test_feed.cpp ${CMAKE_CURRENT_SOURCE_DIR}/../../runtime/romfs_build.c)
+    # (runtime/romfs_build.c as it is: the app's romfs.bin builder, fed by RomfsFeed in test_feed.cpp)
+    target_include_directories(nximport_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../runtime)
     target_link_libraries(nximport_tests nximport)
     add_test(NAME nximport_tests COMMAND nximport_tests)
 endif()
