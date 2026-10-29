@@ -57,6 +57,11 @@ public:
     // SHA-256 of each NCA used against its CNMT record (a whole extra read of the packages; optional)
     void verify_ncas(const Progress &progress, const std::atomic<bool> *cancel) const;
 
+    // The Program NCAs used, by their file names in the packages ("" for the update without one): verify.sh hands
+    // the same NCAs to hactool
+    std::string base_program() const;
+    std::string update_program() const;
+
     // What was opened, for logs (titles, versions, NCA names; never keys)
     std::vector<std::string> describe() const;
 

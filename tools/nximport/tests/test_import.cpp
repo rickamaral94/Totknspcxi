@@ -203,19 +203,30 @@ TEST(import_cancel) {
     rm_tree(dir);
 }
 
-// nximport_tests --write-sample <dir> [romfs MiB]: a synthetic base.nsp and its test prod.keys on disk, for the CLI
-// and verify.sh by hand (random test keys: nothing of Nintendo's)
+// nximport_tests --write-sample <dir> [romfs MiB]: a synthetic base.nsp, an update.nsp patching it (BKTR) and their
+// test prod.keys on disk, for the CLI and verify.sh by hand (random test keys: nothing of Nintendo's)
+static bool write_bytes(const std::string &path, const void *p, size_t n) {
+    FILE *f = fopen(path.c_str(), "wb");
+    bool ok = f && fwrite(p, 1, n, f) == n;
+    return f && fclose(f) == 0 && ok;
+}
+
 int write_sample(const std::string &dir, int mib) {
     Fixture fx;
     for (int i = 0; i < mib; i++) fx.romfs.push_back({"Pack/Big" + std::to_string(i) + ".pack", synth::random_bytes(fx.rng, (1u << 20) - 13 * i)});
     auto g = synth::game(fx.keys, fx.spec(), fx.rng);
-    synth::Bytes nsp = synth::pfs0(g.package);
+    synth::GameSpec u = fx.spec();
+    u.title_id = BOTW_PATCH_ID, u.meta_type = 0x81, u.version = 786432, u.rights = true, u.keygen = 3;
+    u.exefs = synth::sample_exefs(fx.rng);
+    u.romfs[0].second = {'1', '.', '6', '.', '0'};
+    for (size_t i = 0; i < u.romfs[1].second.size(); i += 4096) u.romfs[1].second[i] ^= 0x33;
+    u.romfs.push_back({"Pack/New.pack", synth::random_bytes(fx.rng, 77777)});
+    u.base_romfs = &fx.romfs;
+    auto up = synth::game(fx.keys, u, fx.rng);
+    synth::Bytes nsp = synth::pfs0(g.package), unsp = synth::pfs0(up.package);
     std::string k = fx.keys.prod_keys();
-    FILE *f = fopen((dir + "/base.nsp").c_str(), "wb");
-    FILE *p = fopen((dir + "/prod.keys").c_str(), "wb");
-    if (!f || !p) return 1;
-    fwrite(nsp.data(), 1, nsp.size(), f);
-    fwrite(k.data(), 1, k.size(), p);
-    fclose(f), fclose(p);
-    return 0;
+    return write_bytes(dir + "/base.nsp", nsp.data(), nsp.size()) && write_bytes(dir + "/update.nsp", unsp.data(), unsp.size()) &&
+                   write_bytes(dir + "/prod.keys", k.data(), k.size())
+               ? 0
+               : 1;
 }

@@ -193,7 +193,7 @@ static Bytes block_hashes(const Bytes &data, size_t block, bool padded) {
 }
 
 // A section's plain bytes and its FS header hash data
-static Bytes section_plain(const SectionSpec &s, uint32_t log2, uint8_t hash_data[0xF8]) {
+Bytes section_plain(const SectionSpec &s, uint32_t log2, uint8_t hash_data[0xF8]) {
     memset(hash_data, 0, 0xF8);
     if (!s.is_romfs) {
         const size_t block = 0x200;
@@ -236,6 +236,104 @@ static Bytes section_plain(const SectionSpec &s, uint32_t log2, uint8_t hash_dat
     return b;
 }
 
+Bytes bucket_tree(const std::vector<Bytes> &entries, const std::vector<uint64_t> &offsets, uint64_t end, size_t entry_size) {
+    const size_t node = 0x4000, per_set = (node - 0x10) / entry_size, sets = (entries.size() + per_set - 1) / per_set;
+    Bytes b((sets + 1) * node, 0);
+    put32(b, 4, uint32_t(sets));
+    put64(b, 8, end);
+    for (size_t i = 0; i < sets; i++) {
+        size_t first = i * per_set, count = std::min(per_set, entries.size() - first);
+        put64(b, 0x10 + 8 * i, offsets[first]);
+        size_t at = (i + 1) * node;
+        put32(b, at, uint32_t(i));
+        put32(b, at + 4, uint32_t(count));
+        put64(b, at + 8, first + count < entries.size() ? offsets[first + count] : end);
+        for (size_t k = 0; k < count; k++) memcpy(&b[at + 0x10 + k * entry_size], entries[first + k].data(), entry_size);
+    }
+    return b;
+}
+
+static void bktr_header(Bytes &fs, size_t at, uint64_t off, uint64_t size, size_t count) {
+    put64(fs, at, off);
+    put64(fs, at + 8, size);
+    memcpy(&fs[at + 0x10], "BKTR", 4);
+    put32(fs, at + 0x14, 1);
+    put32(fs, at + 0x18, uint32_t(count));
+}
+
+// The update's RomFS section, encrypted; fills its FS header
+static Bytes patch_section(const PatchSpec &p, uint32_t log2, const nx::Key128 &key, uint64_t at, Bytes &fs, std::mt19937_64 &rng) {
+    uint8_t hd[0xF8];
+    Bytes virt = section_plain({true, p.new_romfs}, log2, hd);
+    // the base's chunks by content (first offset wins)
+    std::map<Bytes, uint64_t> base_chunks;
+    for (size_t o = 0; o + p.chunk <= p.base_plain.size(); o += p.chunk)
+        base_chunks.emplace(Bytes(p.base_plain.begin() + o, p.base_plain.begin() + o + p.chunk), o);
+    struct Ind { uint64_t virt, phys; uint32_t storage; };
+    std::vector<Ind> ind;
+    Bytes data;
+    for (size_t o = 0; o < virt.size(); o += p.chunk) {
+        size_t n = std::min(p.chunk, virt.size() - o);
+        Bytes c(virt.begin() + o, virt.begin() + o + n);
+        Ind e{o, 0, 1};
+        auto it = n == p.chunk ? base_chunks.find(c) : base_chunks.end();
+        if (it != base_chunks.end()) e.storage = 0, e.phys = it->second;
+        else e.phys = data.size(), data.insert(data.end(), c.begin(), c.end());
+        if (!p.split && !ind.empty() && ind.back().storage == e.storage && ind.back().phys + (o - ind.back().virt) == e.phys) continue;
+        ind.push_back(e);
+    }
+    data.resize(align(data.size(), 16), 0);
+    // AesCtrEx ranges over the data
+    struct Ex { uint64_t off; bool enc; uint32_t gen; };
+    std::vector<Ex> ex;
+    size_t piece = align(p.piece, 16);
+    for (size_t o = 0, i = 0; o < data.size() || ex.empty(); o += piece, i++) ex.push_back({o, i % 3 != 2, uint32_t(0x10000 + 7 * i)});
+    // layout: data, the indirect table, the AesCtrEx table
+    std::vector<Bytes> ie, ee;
+    std::vector<uint64_t> io, eo;
+    for (auto &e : ind) {
+        Bytes b(0x14, 0);
+        put64(b, 0, e.virt), put64(b, 8, e.phys), put32(b, 16, e.storage);
+        ie.push_back(b), io.push_back(e.virt);
+    }
+    for (auto &e : ex) {
+        Bytes b(0x10, 0);
+        put64(b, 0, e.off), b[8] = e.enc ? 0 : 1, put32(b, 12, e.gen);
+        ee.push_back(b), eo.push_back(e.off);
+    }
+    Bytes itab = bucket_tree(ie, io, virt.size(), 0x14), etab = bucket_tree(ee, eo, data.size(), 0x10);
+    uint64_t ind_off = align(data.size(), 0x200), ex_off = ind_off + itab.size();
+    Bytes sec = data;
+    sec.resize(ind_off, 0);
+    sec.insert(sec.end(), itab.begin(), itab.end());
+    sec.insert(sec.end(), etab.begin(), etab.end());
+    sec.resize(align(sec.size(), 0x200), 0);
+
+    put16(fs, 0, 2);
+    fs[2] = nx::FS_ROMFS, fs[3] = nx::HASH_IVFC, fs[4] = nx::ENC_CTR_EX;
+    memcpy(&fs[8], hd, 0xF8);
+    bktr_header(fs, 0x100, ind_off, itab.size(), ind.size());
+    bktr_header(fs, 0x120, ex_off, etab.size(), ex.size());
+    put32(fs, 0x140, 0x0F);  // (the tables' generation)
+    put32(fs, 0x144, uint32_t(rng()));
+    uint8_t upper[8], ctr[16];
+    for (int k = 0; k < 8; k++) upper[k] = fs[0x147 - k];
+    nx::AesCtr aes(key);
+    // tables and padding: the header's counter; each data range: its generation's (plain ranges left as they are)
+    nx::make_counter(ctr, upper, at + data.size());
+    aes.crypt(sec.data() + data.size(), sec.size() - data.size(), ctr);
+    for (size_t i = 0; i < ex.size(); i++) {
+        uint64_t end = i + 1 < ex.size() ? ex[i + 1].off : data.size();
+        if (!ex[i].enc || end == ex[i].off) continue;
+        uint8_t u[8];
+        memcpy(u, upper, 4);
+        for (int k = 0; k < 4; k++) u[4 + k] = uint8_t(ex[i].gen >> (24 - 8 * k));
+        nx::make_counter(ctr, u, at + ex[i].off);
+        aes.crypt(sec.data() + ex[i].off, size_t(end - ex[i].off), ctr);
+    }
+    return sec;
+}
+
 Nca nca(const Keys &keys, const NcaSpec &spec, std::mt19937_64 &rng) {
     Nca out;
     Bytes h(0xC00, 0);
@@ -264,9 +362,19 @@ Nca nca(const Keys &keys, const NcaSpec &spec, std::mt19937_64 &rng) {
     Bytes body;
     uint64_t at = 0xC00;
     for (size_t i = 0; i < spec.sections.size(); i++) {
+        Bytes fs(0x200, 0);
+        if (spec.sections[i].patch) {
+            Bytes enc = patch_section(*spec.sections[i].patch, spec.ivfc_block_log2, section_key, at, fs, rng);
+            put32(h, 0x240 + 0x10 * i, uint32_t(at / 0x200));
+            put32(h, 0x244 + 0x10 * i, uint32_t((at + enc.size()) / 0x200));
+            nx::sha256(fs.data(), 0x200, &h[0x280 + 0x20 * i]);
+            memcpy(&h[0x400 + 0x200 * i], fs.data(), 0x200);
+            body.insert(body.end(), enc.begin(), enc.end());
+            at += enc.size();
+            continue;
+        }
         uint8_t hd[0xF8];
         Bytes plain = section_plain(spec.sections[i], spec.ivfc_block_log2, hd);
-        Bytes fs(0x200, 0);
         put16(fs, 0, 2);
         fs[2] = spec.sections[i].is_romfs ? nx::FS_ROMFS : nx::FS_PFS0;
         fs[3] = spec.sections[i].is_romfs ? nx::HASH_IVFC : nx::HASH_SHA256;
@@ -343,7 +451,17 @@ Game game(const Keys &keys, const GameSpec &spec, std::mt19937_64 &rng) {
     p.keygen = spec.keygen;
     p.rights = spec.rights;
     p.nca2 = spec.nca2;
-    p.sections = {{false, pfs0(spec.exefs)}, {true, romfs(spec.romfs)}};
+    PatchSpec patch;
+    if (spec.base_romfs) {  // an update: its RomFS as a patch over the base's section
+        uint8_t hd[0xF8];
+        patch.base_plain = section_plain({true, romfs(*spec.base_romfs)}, p.ivfc_block_log2, hd);
+        patch.new_romfs = romfs(spec.romfs);
+        patch.chunk = spec.patch_chunk;
+        patch.split = spec.patch_split;
+        p.sections = {{false, pfs0(spec.exefs)}, {true, {}, &patch}};
+    } else {
+        p.sections = {{false, pfs0(spec.exefs)}, {true, romfs(spec.romfs)}};
+    }
     Nca program = nca(keys, p, rng);
     g.program_nca = program.bytes;
     g.title_key = program.title_key;

@@ -30,7 +30,7 @@ endif()
 
 add_library(nximport STATIC
     src/io.cpp src/crypto.cpp src/keys.cpp src/container.cpp src/integrity.cpp src/nca.cpp src/romfs.cpp
-    src/cnmt.cpp src/nximport.cpp)
+    src/cnmt.cpp src/bktr.cpp src/nximport.cpp)
 target_include_directories(nximport PUBLIC src)
 target_link_libraries(nximport PUBLIC nximport_mbedtls)
 target_compile_options(nximport PRIVATE -Wall -Wextra)
@@ -42,7 +42,7 @@ if(NXIMPORT_TOOLS)
 
     enable_testing()
     add_executable(nximport_tests tests/test_main.cpp tests/synth.cpp tests/test_crypto.cpp tests/test_keys.cpp
-                   tests/test_containers.cpp tests/test_import.cpp tests/test_corrupt.cpp)
+                   tests/test_containers.cpp tests/test_import.cpp tests/test_corrupt.cpp tests/test_update.cpp)
     target_link_libraries(nximport_tests nximport)
     add_test(NAME nximport_tests COMMAND nximport_tests)
 endif()

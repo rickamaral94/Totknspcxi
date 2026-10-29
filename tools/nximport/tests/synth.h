@@ -33,10 +33,28 @@ Bytes xci(const Files &secure, bool key_area_prefix);
 // A RomFS image of the files (paths with '/'), its data at 0x200 and its tables after it
 Bytes romfs(const Files &files);
 
+// An update's RomFS section (BKTR): the new section's ranges taken from the base section where some C-aligned
+// chunk of it holds the same bytes (at any offset), else from the update's own data, split into AesCtrEx ranges of
+// varied generations (every third one stored plain)
+struct PatchSpec {
+    Bytes base_plain;        // the base game's RomFS section, as nca() lays it out
+    Bytes new_romfs;         // the update's RomFS image
+    size_t chunk = 0x200;    // granularity of the indirect ranges
+    bool split = false;      // one indirect entry per chunk (no merging): many entries, several entry sets
+    size_t piece = 0x1230;   // AesCtrEx range size (rounded to 16)
+};
+
 struct SectionSpec {
     bool is_romfs;  // RomFS + IVFC, else PFS0 + HierarchicalSha256
     Bytes data;     // the PFS0 or the RomFS image
+    const PatchSpec *patch = nullptr;  // an update's RomFS (BKTR) instead
 };
+
+// A section's plain bytes as nca() lays it out, and its FS header hash data
+Bytes section_plain(const SectionSpec &s, uint32_t log2, uint8_t hash_data[0xF8]);
+
+// A bucket tree (as bktr.h reads it): entries of entry_size bytes, each starting at offsets[i], ending at end
+Bytes bucket_tree(const std::vector<Bytes> &entries, const std::vector<uint64_t> &offsets, uint64_t end, size_t entry_size);
 
 struct NcaSpec {
     nx::ContentType type = nx::ContentType::Program;
@@ -77,6 +95,10 @@ struct GameSpec {
     bool with_ticket = true;
     bool nca2 = false;
     uint8_t keygen = 0;
+    // an update (meta_type 0x81): the base's RomFS it patches, and how
+    const Files *base_romfs = nullptr;
+    size_t patch_chunk = 0x200;
+    bool patch_split = false;
 };
 struct Game {
     Files package;  // the NSP's files (or the XCI's secure partition)

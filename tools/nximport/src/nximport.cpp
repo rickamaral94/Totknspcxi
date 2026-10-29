@@ -1,5 +1,6 @@
 #include "nximport.h"
 
+#include "bktr.h"
 #include "cnmt.h"
 #include "nca.h"
 
@@ -33,6 +34,7 @@ struct Picked {
     Cnmt meta;
     const Package *package;
     std::shared_ptr<Nca> program;
+    std::string program_name;
 };
 
 struct Importer::Impl {
@@ -121,7 +123,7 @@ struct Importer::Impl {
         // (an update's program may carry the application's id or the patch's: the CNMT already said which content it is)
         if (nca->content_type() != ContentType::Program || (nca->title_id() != BOTW_TITLE_ID && nca->title_id() != found->title_id))
             corrupt(e->name + " (not the game's program)");
-        return {*found, &p, nca};
+        return {*found, &p, nca, e->name};
     }
 
     void open_exefs(const Nca &program) {
@@ -136,17 +138,22 @@ struct Importer::Impl {
         corrupt(program.what() + " (no exefs)");
     }
 
+    static const Section *romfs_section(const Nca &nca) {
+        for (auto &s : nca.sections())
+            if (s.fs_type == FS_ROMFS) return &s;
+        corrupt(nca.what() + " (no RomFS)");
+    }
+
     void open_romfs() {
         const Nca &nca = *base.program;
-        for (auto &s : nca.sections())
-            if (s.fs_type == FS_ROMFS) {
-                if (has_update)
-                    fail("Updates (patched RomFS) are not supported in this build yet", "Updates (RomFS com patch) ainda não são suportados nesta versão");
-                romfs_image = nca.open_romfs(s);
-                romfs = list_romfs(*romfs_image);
-                return;
-            }
-        corrupt(nca.what() + " (no RomFS)");
+        const Section *bs = romfs_section(nca);
+        if (has_update) {  // (the base's section raw: the patch's ranges point into it, bktr.h)
+            const Nca &p = *update.program;
+            romfs_image = open_patched_romfs(p, *romfs_section(p), nca.raw_section(*bs));
+        } else {
+            romfs_image = nca.open_romfs(*bs);
+        }
+        romfs = list_romfs(*romfs_image);
     }
 };
 
@@ -279,6 +286,9 @@ void Importer::verify_ncas(const Progress &progress, const std::atomic<bool> *ca
                  e->name + ": o SHA-256 não bate com os metadados do pacote (arquivo corrompido ou modificado)");
     }
 }
+
+std::string Importer::base_program() const { return impl_->base.program_name; }
+std::string Importer::update_program() const { return impl_->has_update ? impl_->update.program_name : ""; }
 
 std::vector<std::string> Importer::describe() const {
     std::vector<std::string> d;
