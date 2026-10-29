@@ -15,7 +15,7 @@ arquivos que a extração do hactool entregaria. O recompilador, o loader e a de
 | Versão do jogo | build id do NSO `main` em +0x40: `runtime/loader.c` `game_version_of_build` (app: `nativeGameVersion`) e `tools/botw_dump.py` | Sem mudança. O nximport não tem lista de versões própria: só confere o title ID pelo CNMT. |
 | App, "Game files" | `importGame()` (Java), depois `nativeImportBegin` (`runtime/ui/launcher.mm`), que **apaga o setup anterior na hora**, copia `exefs/` e monta o `romfs.bin` com `romfs_build_entries` | Fluxo novo e transacional (Fase 3): staging, validação e promoção. |
 | Builder do `romfs.bin` | `runtime/romfs_build.c`: `fdopen` + `fread` sequencial de `entries[i].size` bytes, depois `fgetc == EOF`. Sem seek, sem fstat. Três tentativas por arquivo. Uma thread. | Alimentado por socketpair (Fase 3; precisa da prova de compatibilidade antes). |
-| Scripts | `android/build_gamelib.sh <exefs>`, `android/push_game.sh <pasta com exefs/ e romfs/>` | Aceitam `--nsp/--xci … --keys …` e chamam o CLI antes (Fase 2). |
+| Scripts | `android/build_gamelib.sh <exefs>`, `android/push_game.sh <pasta com exefs/ e romfs/>` | Também aceitam `--nsp/--xci … [--update …] --keys … [--title-keys …]`. Chamam `android/nximport_dump.sh`, que roda o CLI e depois o `tools/botw_dump.py`, e seguem o fluxo de sempre. |
 
 Layout gerado pelo CLI: `Dump/01007EF00011E000/exefs/{main,main.npdm,rtld,sdk,subsdk*}` e
 `Dump/01007EF00011E000/romfs/…`. Ele grava primeiro em `01007EF00011E000.partial` e só renomeia no fim.
@@ -29,7 +29,21 @@ build/nximport/nximport --keys prod.keys --xci jogo.xci -o Dump --verify-nca   #
 build/nximport/nximport --keys prod.keys --nsp base.nsp --list                 # só lista
 ```
 
-As mensagens saem em português quando `LANG` começa com `pt`.
+As mensagens saem em português quando `LANG` começa com `pt`. `--programs` imprime as NCAs Program usadas, que o
+`verify.sh` entrega ao hactool.
+
+### Scripts de desenvolvedor
+
+```bash
+android/build_gamelib.sh --nsp base.nsp --update update.nsp --keys prod.keys   # importa e compila o game code
+android/push_game.sh --nsp base.nsp --update update.nsp --keys prod.keys       # importa e envia ao aparelho
+NXIMPORT_OUT=Dump/v160 android/push_game.sh --xci jogo.xci --update u160.nsp --keys prod.keys
+```
+
+`android/nximport_dump.sh`:
+- compila o CLI em `build/nximport-host` na primeira vez;
+- grava em `${NXIMPORT_OUT:-Dump}/01007EF00011E000`, e se recusa a sobrescrever um dump que já existe;
+- roda o `tools/botw_dump.py` quando há um Python com lz4 (`tools/venv`). É ele quem diz a versão.
 
 ## Chaves
 
@@ -86,9 +100,35 @@ As mensagens saem em português quando `LANG` começa com `pt`.
 | romfs | IVFC completo: master hash → níveis 1-5 (em memória, ~32 MiB por 16 GiB) → **cada bloco do nível 6** lido. O bloco parcial no fim é aceito com hash sobre os bytes ou com padding de zeros. |
 | NCA inteira (opcional) | SHA-256 contra o registro do CNMT e o content ID (`--verify-nca`) |
 
-Para o update (Fase 2), a árvore IVFC da NCA patch cobre o RomFS **já com o patch**. Por isso a verificação dela é a
+Para o update, a árvore IVFC da NCA patch cobre o RomFS **já com o patch**. Por isso a verificação dela é a
 prova independente de que IndirectStorage + AesCtrEx reconstruíram o conteúdo da Nintendo. Ela não depende dos
 nossos geradores de teste.
+
+### Update (BKTR)
+
+A seção RomFS da NCA Program do update (criptografia AesCtrEx, tipo 4) traz no fim duas árvores de buckets. Os
+offsets e tamanhos delas estão no patch info do FS header (0x100 e 0x120):
+
+- **IndirectStorage**: para cada faixa da seção virtual (já com o patch), diz se os bytes vêm da seção RomFS **da
+  base** (storage 0, lida decifrada mas sem conferir os hashes da base) ou dos dados **do update** (storage 1), e em
+  qual offset. Entrada de 0x14 bytes: virtual, físico, storage.
+- **AesCtrEx**: para cada faixa dos dados do update, a *generation* que o contador AES-CTR usou. Ela substitui os
+  bytes 4-7 do contador; os bytes 0-3 continuam sendo o secure value do FS header. Entrada de 0x10 bytes: offset,
+  cifrado (0) ou não (1), generation. As próprias tabelas usam o contador do FS header.
+- **Layout da árvore** (um nível):
+  - um nó de 0x4000 bytes: `{índice, nº de conjuntos, offset final, início de cada conjunto}`;
+  - em seguida, os conjuntos de 0x4000 bytes: `{índice, nº de entradas, offset final, entradas}`.
+- **Validação estrutural**:
+  - magic `BKTR` v1, e o nº de entradas igual ao do FS header;
+  - início e fim de cada conjunto coerentes com o nó;
+  - offsets começando em 0 e estritamente crescentes até o fim;
+  - storage só 0 ou 1; faixas AesCtrEx alinhadas a 16 e terminando antes das tabelas;
+  - cada faixa indireta dentro da base ou dos dados do update.
+  
+  Árvores de dois níveis são recusadas com mensagem clara (não foram vistas em patches de jogos).
+- **Prova**: o RomFS reconstruído é lido pela árvore IVFC **do update**, cujos hashes cobrem o resultado já com o
+  patch. Uma base de outra versão ou um patch mal aplicado falha com "falha na verificação de integridade … um update
+  que não é deste jogo base".
 
 ### Parsers defensivos
 
@@ -114,14 +154,31 @@ ctest --test-dir build/nximport-asan --output-on-failure
   - NSP, XCI, NCA2 e keygen 3;
   - title key via ticket, via `title.keys`, com fallback e com as duas erradas;
   - ticket personalizado, outro jogo, NCA ausente, `header_key` errada, `key_area_key` ausente, cancelamento.
+- **Update**: base + update NSP e base XCI + update com title key. Os pacotes sintéticos usam entradas indiretas que
+  apontam para a base em outro offset, faixas AesCtrEx com várias generations (uma em cada três sem criptografia) e
+  mais de 818 entradas (vários conjuntos). Também cobrem a base errada, os pacotes trocados, árvores malformadas
+  (ordem, início, storage, contagem, conjunto, truncagem, magic) e 1.200 bit flips no update.
 - **Corrupção**: 3.000 bit flips (headers densamente, depois em qualquer lugar) e truncamentos progressivos. Cada caso
   precisa falhar com erro ou extrair **exatamente** os arquivos originais.
 
 Os testes sintéticos não bastam sozinhos para dar o BKTR por validado: o gerador e o leitor podem repetir o mesmo
-erro. A validação final é o `verify.sh` com o hactool sobre os arquivos do próprio jogador (Fase 2).
+erro. A validação final é o `verify.sh` com o hactool sobre os arquivos do próprio jogador:
 
-`nximport_tests --write-sample <pasta> [MiB]` grava um `base.nsp` sintético e o `prod.keys` de teste (chaves
-aleatórias, nada da Nintendo), para exercitar o CLI à mão.
+```bash
+tools/nximport/verify.sh --keys prod.keys --nsp base.nsp [--update update.nsp] [--hactool /caminho/hactool]
+```
+
+- O script extrai com o nximport e com o hactool, e depois compara a **lista de caminhos, os tamanhos e o SHA-256**
+  de cada arquivo. Pastas vazias diferentes viram só um aviso.
+- Saída 0: idêntico. Saída 1: diferente (mostra as primeiras diferenças e guarda a pasta de trabalho). Saída 2:
+  **"COMPARAÇÃO DE REFERÊNCIA NÃO EXECUTADA"**, quando não há hactool. Isso **não** é aprovação.
+- O hactool lê as title keys de `~/.switch/title.keys`, então conteúdo com rights ID precisa delas lá.
+- A pasta de trabalho guarda duas extrações (~2 × 16 GB) e é apagada no fim (`--keep` mantém).
+- A lógica de comparação foi testada com um substituto do hactool (idêntico → 0; um byte a mais → 1). A comparação
+  com o hactool de verdade ainda não foi feita.
+
+`nximport_tests --write-sample <pasta> [MiB]` grava um `base.nsp` sintético, um `update.nsp` com patch BKTR sobre ele
+e o `prod.keys` de teste (chaves aleatórias, nada da Nintendo), para exercitar o CLI e o `verify.sh` à mão.
 
 ## Dependência
 
@@ -136,6 +193,6 @@ aleatórias, nada da Nintendo), para exercitar o CLI à mão.
 | Fase | Conteúdo | Estado |
 | --- | --- | --- |
 | 1 | CLI com base (NSP/XCI, chaves, NCA, integridade, romfs, testes) | **feita** |
-| 2 | Update (BKTR: IndirectStorage + AesCtrEx), `verify.sh`, scripts | pendente |
+| 2 | Update (BKTR: IndirectStorage + AesCtrEx), `verify.sh`, scripts | **feita**: BKTR implementado; **falta validar** com arquivos reais e o hactool |
 | 3 | App Android (SAF, instalação transacional, serviço, chaves) | pendente |
 | 4 | APK compilado e importação completa no aparelho | pendente |
