@@ -13,8 +13,8 @@ arquivos que a extração do hactool entregaria. O recompilador, o loader e a de
 | Peça | Hoje | Com o nximport |
 | --- | --- | --- |
 | Versão do jogo | build id do NSO `main` em +0x40: `runtime/loader.c` `game_version_of_build` (app: `nativeGameVersion`) e `tools/botw_dump.py` | Sem mudança. O nximport não tem lista de versões própria: só confere o title ID pelo CNMT. |
-| App, "Game files" | `importGame()` (Java), depois `nativeImportBegin` (`runtime/ui/launcher.mm`), que **apaga o setup anterior na hora**, copia `exefs/` e monta o `romfs.bin` com `romfs_build_entries` | Fluxo novo e transacional (Fase 3): staging, validação e promoção. |
-| Builder do `romfs.bin` | `runtime/romfs_build.c`: `fdopen` + `fread` sequencial de `entries[i].size` bytes, depois `fgetc == EOF`. Sem seek, sem fstat. Três tentativas por arquivo. Uma thread. | Alimentado por socketpair (Fase 3; precisa da prova de compatibilidade antes). |
+| App, "Game files" | `importGame()` (Java), depois `nativeImportBegin` (`runtime/ui/launcher.mm`), que **apaga o setup anterior na hora**, copia `exefs/` e monta o `romfs.bin` com `romfs_build_entries` | Seção nova **Importar NSP/XCI**, com fluxo transacional próprio (`package_import.cpp`). A importação por pasta continua como era. |
+| Builder do `romfs.bin` | `runtime/romfs_build.c`: `fdopen` + `fread` sequencial de `entries[i].size` bytes, depois `fgetc == EOF`. Sem seek, sem fstat. Três tentativas por arquivo. Uma thread. | **Sem alteração**, alimentado pela `nx::RomfsFeed` (socketpair). A prova de compatibilidade está em `tests/test_feed.cpp`. |
 | Scripts | `android/build_gamelib.sh <exefs>`, `android/push_game.sh <pasta com exefs/ e romfs/>` | Também aceitam `--nsp/--xci … [--update …] --keys … [--title-keys …]`. Chamam `android/nximport_dump.sh`, que roda o CLI e depois o `tools/botw_dump.py`, e seguem o fluxo de sempre. |
 
 Layout gerado pelo CLI: `Dump/01007EF00011E000/exefs/{main,main.npdm,rtld,sdk,subsdk*}` e
@@ -180,6 +180,64 @@ tools/nximport/verify.sh --keys prod.keys --nsp base.nsp [--update update.nsp] [
 `nximport_tests --write-sample <pasta> [MiB]` grava um `base.nsp` sintético, um `update.nsp` com patch BKTR sobre ele
 e o `prod.keys` de teste (chaves aleatórias, nada da Nintendo), para exercitar o CLI e o `verify.sh` à mão.
 
+## App Android
+
+### Na tela: Game Files, seção "Importar NSP/XCI"
+
+- **Campos**:
+  - Pacote do jogo (`.nsp`/`.xci`);
+  - Update (`.nsp`, opcional);
+  - `prod.keys`, que aparece como "Lembradas" quando o app guardou as chaves;
+  - `title.keys` (opcional).
+  
+  Cada um abre o seletor do Android (SAF, `ACTION_OPEN_DOCUMENT`). Cancelar o seletor de um campo opcional o limpa.
+- **Lembrar as chaves** (ligado por padrão): guarda as chaves em `getNoBackupFilesDir()/keys`. Esse é o
+  armazenamento interno privado (só o app lê), fora do Auto Backup. `res/xml/data_extraction_rules.xml` e
+  `backup_rules.xml` também excluem esse diretório do backup na nuvem e da transferência entre aparelhos.
+  `allowBackup="false"` sozinho não cobre a transferência entre aparelhos no Android 12+, e o resto do app continua
+  como era.
+  - Desligado: as chaves são lidas só nesta importação e nada vai para o disco.
+  - **Apagar as chaves** remove a cópia.
+  - O Java nunca transforma uma chave em `String`: copia bytes de um descritor para um arquivo (escrito como `.tmp`
+    e renomeado) ou passa o próprio descritor.
+- **Importar**: os pacotes são lidos **onde estão**, por descritor (`openFileDescriptor(...).detachFd()`).
+  - Se o provedor não permite leitura em posições aleatórias (nuvem, streaming), o app diz qual arquivo é e oferece
+    copiá-lo antes para o cache externo. A cópia precisa da confirmação do jogador, mostra o tamanho e o espaço
+    livre, e é apagada no fim. Se o app for morto, ela é apagada no próximo início.
+- **Progresso**: aparece no overlay de sempre, com o botão **Cancelar** (toque, B ou Esc), e na notificação do
+  `BuildService` ("Importando os arquivos do jogo").
+  - O serviço sabe em que fase está, então o fim da importação não derruba a compilação do game code que começa
+    logo depois.
+  - `onTimeout` (Android 15+, limite de 6 h/24 h para `dataSync`) cancela a importação de forma limpa e tira o
+    serviço do foreground.
+
+### Instalação transacional (`android/totkrecompandroid/app/src/main/cpp/package_import.cpp`)
+
+1. Abre os pacotes. Um descritor sem acesso aleatório é recusado antes de qualquer outra coisa.
+2. **Versão**: `game_version_of_build` sobre o `main` importado (a decisão é do loader).
+3. `romfs_check_set` da versão, igual ao da pasta.
+4. **Espaço**: `romfs.bin` com limite superior pelo layout do builder, mais os filmes soltos, o `exefs/` e uma
+   margem de max(512 MiB, 2%), contra o `statvfs` da raiz da versão. A mensagem traz o valor exato.
+5. Grava em `<raiz da versão>/extracted.importing/`, no mesmo sistema de arquivos: `exefs/`, depois o `romfs.bin`
+   via `RomfsFeed` (com os filmes soltos em `romfs/`).
+6. **Confere**: `romfs_image_ok` e a versão do `main` gravado. Aí escreve `COMPLETE` com fsync.
+7. **Promove**: remove os arquivos do setup anterior (`rt_remove_game_files_for_setup`; os objetos compilados
+   ficam) e renomeia `exefs/`, `romfs/` e `romfs.bin` para `extracted/`.
+8. O fluxo segue como o de uma pasta escolhida: o game code (ou o modo nativo), depois a checagem final.
+
+Cancelamento, falha ou o app morto antes do `COMPLETE` deixam o setup anterior **intacto**. No próximo início,
+`package_import_recover` apaga um staging incompleto ou termina uma promoção interrompida (cada passo pode ser refeito).
+
+Testes de host (`tests/test_package_import.cpp`, com o `romfs_build.c` de verdade e substitutos pequenos de
+`paths.c`/loader):
+- import sobre um setup antigo, com o mesmo `romfs.bin` que a pasta gera;
+- cancelamento e falha de integridade preservando o setup antigo;
+- descritor sem seek;
+- versão desconhecida;
+- chaves erradas;
+- a checagem real de arquivos recusando um RomFS incompleto;
+- recuperação de staging incompleto, completo e com promoção interrompida.
+
 ## Dependência
 
 - **mbedTLS 3.6.7** (LTS), submodule em `third_party/mbedtls`, commit `068ff080b3`. Licença Apache-2.0, a opção que
@@ -194,5 +252,5 @@ e o `prod.keys` de teste (chaves aleatórias, nada da Nintendo), para exercitar 
 | --- | --- | --- |
 | 1 | CLI com base (NSP/XCI, chaves, NCA, integridade, romfs, testes) | **feita** |
 | 2 | Update (BKTR: IndirectStorage + AesCtrEx), `verify.sh`, scripts | **feita**: BKTR implementado; **falta validar** com arquivos reais e o hactool |
-| 3 | App Android (SAF, instalação transacional, serviço, chaves) | pendente |
+| 3 | App Android (SAF, instalação transacional, serviço, chaves) | **feita**: compila (NDK e javac); **falta** a build do APK e o teste no aparelho |
 | 4 | APK compilado e importação completa no aparelho | pendente |

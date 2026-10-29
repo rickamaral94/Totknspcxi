@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 11 and older (allowBackup is off as well): the player's keys (<data>/no_backup/keys) never backed up -->
+<full-backup-content>
+    <exclude domain="root" path="no_backup/" />
+</full-backup-content>

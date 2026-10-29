@@ -83,6 +83,17 @@ public class TOTKRecompAndroidActivity extends SDLActivity {
     private static native void nativeSaveDone(int result, String detail);
     private static final int REQ_GAME = 0x4c41, REQ_DRIVER = 0x4c42, REQ_MOD = 0x4c46, REQ_LOG = 0x4c47,
             REQ_DRIVER_RECOVER = 0x4c48, REQ_SAVE_IN = 0x4c49, REQ_SAVE_OUT = 0x4c4a, REQ_SAVE_IN_TREE = 0x4c4c;
+    // Import from NSP/XCI (runtime/ui/launcher.mm, package_import.cpp; docs/IMPORT-NSP-XCI.md)
+    private static native void nativePackagePicked(int slot, String name);
+    private static native void nativeKeysRemembered(boolean on);
+    private static native int nativePackageImport(int baseFd, boolean xci, int updateFd, int prodKeysFd, int titleKeysFd);
+    static native void nativePackageCancel();
+    private static native void nativePackageStep(String step);
+    private static native void nativePackageFailed(int kind, String detail);
+    private static final int REQ_PKG = 0x4c50;  // + slot: 0 base .nsp/.xci, 1 update .nsp, 2 prod.keys, 3 title.keys
+    private static final int PKG_NOT_SEEKABLE = 2, PKG_FAILED_NOT_SEEKABLE = 1, PKG_FAILED_OTHER = 3, PKG_FAILED_SPACE = 4;
+    private static final Uri[] pkgUri = new Uri[4];
+    private static final String[] pkgName = new String[4];
     private static TOTKRecompAndroidActivity self;
 
     @Override
@@ -135,6 +146,7 @@ public class TOTKRecompAndroidActivity extends SDLActivity {
         } catch (IOException | ErrnoException e) {
             Log.e(TAG, "setup: " + e);
         }
+        cleanImportLeftovers();
         self = this;
         setShowWhenLocked(true);
         setTurnScreenOn(true);
@@ -343,6 +355,15 @@ public class TOTKRecompAndroidActivity extends SDLActivity {
 
     @Override
     protected void onActivityResult(int req, int result, Intent data) {
+        if (req >= REQ_PKG && req < REQ_PKG + 4) {
+            int slot = req - REQ_PKG;
+            Uri u = result == Activity.RESULT_OK && data != null ? data.getData() : null;
+            if (u == null && (slot == 0 || slot == 2)) return;  // (cancelled: the base and prod.keys stay as chosen)
+            pkgUri[slot] = u;  // (the optional ones: cancelling the picker takes them away)
+            pkgName[slot] = u == null ? "" : displayName(this, u);
+            nativePackagePicked(slot, pkgName[slot]);
+            return;
+        }
         if (req == REQ_GAME) {
             Uri tree = result == Activity.RESULT_OK && data != null ? data.getData() : null;
             if (tree == null) nativeImportDone(1);
@@ -1297,6 +1318,188 @@ public class TOTKRecompAndroidActivity extends SDLActivity {
             nativeModImportDone("0|" + e.getMessage());
         } finally {
             if (stage != null) deleteTree(stage);
+        }
+    }
+
+    // ---- Import from NSP/XCI: the files picked one at a time from the Game Files page (launcher.mm), the import on its
+    // own thread with the descriptors handed to the native side (nothing copied: read where they are). The keys never
+    // become a String here: bytes from a descriptor to a file, or the descriptor itself.
+
+    // The app's own copy of the keys: internal, private, outside Auto Backup (no_backup) and device transfers
+    // (res/xml/data_extraction_rules.xml)
+    private File keysDir() { return new File(getNoBackupFilesDir(), "keys"); }
+
+    private void cleanImportLeftovers() {
+        File[] tmp = keysDir().listFiles((d, n) -> n.endsWith(".tmp"));
+        if (tmp != null) for (File f : tmp) f.delete();
+        File cache = getExternalCacheDir();
+        File[] copies = cache == null ? null : cache.listFiles((d, n) -> n.startsWith("import-") && n.endsWith(".tmp"));
+        if (copies != null) for (File f : copies) f.delete();
+    }
+
+    private static String displayName(Context ctx, Uri u) {
+        try (Cursor c = ctx.getContentResolver().query(u, new String[] {OpenableColumns.DISPLAY_NAME}, null, null, null)) {
+            if (c != null && c.moveToFirst() && c.getString(0) != null) return c.getString(0);
+        } catch (Exception e) {
+            Log.w(TAG, "file name: " + e);
+        }
+        String p = u.getLastPathSegment();
+        return p != null ? p : "?";
+    }
+
+    private static long fileSize(Context ctx, Uri u) {
+        try (Cursor c = ctx.getContentResolver().query(u, new String[] {OpenableColumns.SIZE}, null, null, null)) {
+            if (c != null && c.moveToFirst() && !c.isNull(0)) return c.getLong(0);
+        } catch (Exception e) {
+            Log.w(TAG, "file size: " + e);
+        }
+        return -1;
+    }
+
+    public static void pickPackageFile(int slot) {
+        self.runOnUiThread(() -> {
+            Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+            i.addCategory(Intent.CATEGORY_OPENABLE);
+            i.setType("*/*");  // (.nsp, .xci and .keys have no MIME type of their own)
+            try {
+                self.startActivityForResult(i, REQ_PKG + slot);
+            } catch (Exception e) {
+                Log.e(TAG, "file picker: " + e);
+            }
+        });
+    }
+
+    public static boolean keysRemembered() { return self != null && new File(self.keysDir(), "prod.keys").isFile(); }
+
+    public static void forgetKeys() {
+        deleteTree(self.keysDir());
+        nativeKeysRemembered(false);
+        Log.i(TAG, "keys forgotten");
+    }
+
+    public static void importPackages(int remember) {
+        Uri[] u = pkgUri.clone();
+        new Thread(() -> self.runPackageImport(u, remember != 0), "package-import").start();
+    }
+
+    // A picked keys file into the app's keys folder (written beside it, then renamed: never half a file)
+    private void rememberKey(Uri u, String name) throws IOException {
+        File dir = keysDir();
+        if (!dir.isDirectory() && !dir.mkdirs()) throw new IOException("can't create " + dir);
+        File tmp = new File(dir, name + ".tmp"), dst = new File(dir, name);
+        try (InputStream in = getContentResolver().openInputStream(u); OutputStream o = new FileOutputStream(tmp)) {
+            if (in == null) throw new IOException("can't read " + name);
+            byte[] buf = new byte[16384];
+            for (int r; (r = in.read(buf)) > 0; ) o.write(buf, 0, r);
+            java.util.Arrays.fill(buf, (byte) 0);
+        }
+        if (!tmp.renameTo(dst)) throw new IOException("can't store " + name);
+    }
+
+    private int openFd(Uri u) throws IOException {
+        android.os.ParcelFileDescriptor p = getContentResolver().openFileDescriptor(u, "r");
+        if (p == null) throw new IOException("can't open " + displayName(this, u));
+        return p.detachFd();  // (the native side owns and closes it)
+    }
+
+    private int openFd(File f) throws IOException {
+        return android.os.ParcelFileDescriptor.open(f, android.os.ParcelFileDescriptor.MODE_READ_ONLY).detachFd();
+    }
+
+    // Asks on the UI thread and waits for the answer (the import thread)
+    private boolean ask(String title, String message) {
+        final boolean[] answer = {false, false};  // yes, answered
+        runOnUiThread(() -> new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                .setTitle(title).setMessage(message).setCancelable(false)
+                .setPositiveButton(R.string.import_copy_yes, (d, w) -> { synchronized (answer) { answer[0] = true; answer[1] = true; answer.notifyAll(); } })
+                .setNegativeButton(R.string.import_copy_no, (d, w) -> { synchronized (answer) { answer[1] = true; answer.notifyAll(); } })
+                .show());
+        synchronized (answer) {
+            while (!answer[1]) {
+                try { answer.wait(); } catch (InterruptedException e) { return false; }
+            }
+        }
+        return answer[0];
+    }
+
+    // A package whose provider can't read at any offset (a cloud or streaming provider), copied into the app's cache
+    // folder first - only with the player's yes, the extra space said and checked. null: not copied (copyReported: and
+    // the failure already said).
+    private boolean copyReported;
+    private File copyForImport(Uri u, int slot) {
+        copyReported = false;
+        File cache = getExternalCacheDir();
+        long size = fileSize(this, u);
+        if (cache == null || size <= 0) return null;
+        long need = size + (512L << 20), free = cache.getUsableSpace();
+        String gb = String.format(java.util.Locale.ROOT, "%.1f", size / 1e9), freeGb = String.format(java.util.Locale.ROOT, "%.1f", free / 1e9);
+        if (!ask(getString(R.string.import_copy_title), getString(R.string.import_copy_text, displayName(this, u), gb, freeGb)))
+            return null;
+        if (free < need) {
+            nativePackageFailed(PKG_FAILED_SPACE, "the copy needs " + gb + " GB; " + freeGb + " GB free");
+            copyReported = true;
+            return null;
+        }
+        File f = new File(cache, "import-" + slot + ".tmp");
+        nativePackageStep("Copying the package to the phone...");
+        long done = 0, reported = 0;
+        try (InputStream in = getContentResolver().openInputStream(u); OutputStream o = new FileOutputStream(f)) {
+            if (in == null) throw new IOException("can't read it");
+            byte[] buf = new byte[1 << 20];
+            for (int r; (r = in.read(buf)) > 0; ) {
+                o.write(buf, 0, r);
+                done += r;
+                if (done - reported > (64 << 20)) {
+                    reported = done;
+                    nativeImportProgress(done, size);
+                }
+            }
+        } catch (IOException e) {
+            f.delete();
+            nativePackageFailed(PKG_FAILED_OTHER, "copying " + displayName(this, u) + ": " + e.getMessage());
+            copyReported = true;
+            return null;
+        }
+        return f;
+    }
+
+    private void runPackageImport(Uri[] u, boolean remember) {
+        File[] copies = new File[2];
+        try {
+            if (remember) {
+                if (u[2] != null) rememberKey(u[2], "prod.keys");
+                if (u[3] != null) rememberKey(u[3], "title.keys");
+                nativeKeysRemembered(keysRemembered());
+            }
+            File kept = new File(keysDir(), "prod.keys"), keptTitle = new File(keysDir(), "title.keys");
+            if (u[0] == null || (u[2] == null && !kept.isFile())) {
+                nativePackageFailed(PKG_FAILED_OTHER, "choose the game package and prod.keys");
+                return;
+            }
+            String base = displayName(this, u[0]).toLowerCase(java.util.Locale.ROOT);
+            BuildService.startImport(this);
+            for (int attempt = 0; attempt < 3; attempt++) {
+                int baseFd = copies[0] != null ? openFd(copies[0]) : openFd(u[0]);
+                int updFd = copies[1] != null ? openFd(copies[1]) : u[1] != null ? openFd(u[1]) : -1;
+                int prodFd = u[2] != null ? openFd(u[2]) : openFd(kept);
+                int titleFd = u[3] != null ? openFd(u[3]) : keptTitle.isFile() ? openFd(keptTitle) : -1;
+                int r = nativePackageImport(baseFd, base.endsWith(".xci"), updFd, prodFd, titleFd);
+                if ((r & 0xff) != PKG_NOT_SEEKABLE) return;  // (done, or the native side said why)
+                int slot = r >> 8;
+                Log.w(TAG, "package import: " + pkgName[slot] + " can't be read in place");
+                File c = slot < 2 && copies[slot] == null && u[slot] != null ? copyForImport(u[slot], slot) : null;
+                if (c == null) {
+                    if (!copyReported) nativePackageFailed(PKG_FAILED_NOT_SEEKABLE, displayName(this, u[slot]));
+                    return;
+                }
+                copies[slot] = c;
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "package import: " + e);
+            nativePackageFailed(PKG_FAILED_OTHER, e.getClass().getSimpleName() + (e.getMessage() != null ? ": " + e.getMessage() : ""));
+        } finally {
+            for (File c : copies) if (c != null) c.delete();
+            BuildService.stopImport(this);
         }
     }
 

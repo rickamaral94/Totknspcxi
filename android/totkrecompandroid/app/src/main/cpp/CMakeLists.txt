@@ -18,6 +18,9 @@ include(${R}/android/gamelib_id.cmake)  # (GAMELIB_ID: the same as totkgame.so's
 message(STATUS "GAMELIB_ID ${GAMELIB_ID}")
 
 add_subdirectory(${R}/third_party/libadrenotools ${CMAKE_BINARY_DIR}/adrenotools)
+# Import from NSP/XCI (docs/IMPORT-NSP-XCI.md): tools/nximport, the library only (with mbedTLS: third_party/mbedtls)
+set(NXIMPORT_TOOLS OFF CACHE BOOL "" FORCE)
+add_subdirectory(${R}/tools/nximport ${CMAKE_BINARY_DIR}/nximport)
 
 add_library(SDL3 SHARED IMPORTED)
 set_target_properties(SDL3 PROPERTIES IMPORTED_LOCATION ${DEPS}/lib/libSDL3.so)
@@ -49,14 +52,16 @@ set(IMGUI_SRC ${IMGUI}/imgui.cpp ${IMGUI}/imgui_draw.cpp ${IMGUI}/imgui_tables.c
     ${IMGUI}/backends/imgui_impl_sdl3.cpp ${IMGUI}/backends/imgui_impl_vulkan.cpp)
 
 add_library(main SHARED ${RT_SRC} ${R}/runtime/platform/android.c ${VK_SRC} ${UI_SRC} ${IMGUI_SRC}
-            ${DEPS}/volk/volk.c ${R}/android/common/guest_window.c ${R}/runtime/native_gate.S)
+            ${DEPS}/volk/volk.c ${R}/android/common/guest_window.c ${R}/runtime/native_gate.S
+            ${CMAKE_CURRENT_SOURCE_DIR}/package_import.cpp)
 # the UI sources are plain C++ apart from __APPLE__ blocks (compiled as C++ on Android)
 set_source_files_properties(${UI_SRC} PROPERTIES LANGUAGE CXX COMPILE_OPTIONS "-xc++")
 set_source_files_properties(${R}/runtime/gamelib.c PROPERTIES COMPILE_DEFINITIONS "GAMELIB_ID=\"${GAMELIB_ID}\"")
 set_source_files_properties(${R}/runtime/gamebuild.c PROPERTIES COMPILE_DEFINITIONS "GAMELIB_ID=\"${GAMELIB_ID}\"")
 
 target_include_directories(main PRIVATE ${R}/runtime ${R}/runtime/nvn ${IMGUI} ${IMGUI}/backends ${FFMPEG}/include ${DEPS}/include
-                           ${DEPS}/volk ${TOTK_GEN_DIR} ${R}/third_party/smaa/Textures ${R}/android/common)
+                           ${DEPS}/volk ${TOTK_GEN_DIR} ${R}/third_party/smaa/Textures ${R}/android/common
+                           ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_definitions(main PRIVATE
     VK_NO_PROTOTYPES VK_USE_PLATFORM_ANDROID_KHR IMGUI_IMPL_VULKAN_USE_VOLK   # Vulkan from the loaded driver (volk)
     VMA_STATIC_VULKAN_FUNCTIONS=0 VMA_DYNAMIC_VULKAN_FUNCTIONS=1)
@@ -69,6 +74,6 @@ endif()
 # game thread's time
 target_compile_options(main PRIVATE -O2 -g -fno-strict-aliasing -Wall -Wno-unused-function -Wno-format  # (as on Linux: %llx for uint64_t)
     $<$<COMPILE_LANGUAGE:CXX>:-std=c++17>)
-target_link_libraries(main PRIVATE SDL3 shaderc_shared adrenotools android log dl m)
+target_link_libraries(main PRIVATE SDL3 shaderc_shared adrenotools nximport android log dl m)
 # (runtime/hle.h, ipc.h, main.c: tables in named sections found through __start_ / __stop_ symbols)
 target_link_options(main PRIVATE -Wl,-z,nostart-stop-gc)
