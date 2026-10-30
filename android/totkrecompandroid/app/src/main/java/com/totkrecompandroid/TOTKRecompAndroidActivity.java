@@ -86,7 +86,8 @@ public class TOTKRecompAndroidActivity extends SDLActivity {
     // Import from NSP/XCI (runtime/ui/launcher.mm, package_import.cpp; docs/IMPORT-NSP-XCI.md)
     private static native void nativePackagePicked(int slot, String name);
     private static native void nativeKeysRemembered(boolean on);
-    private static native int nativePackageImport(int baseFd, boolean xci, int updateFd, int prodKeysFd, int titleKeysFd);
+    private static native int nativePackageImport(int baseFd, boolean xci, int updateFd, int prodKeysFd, int titleKeysFd,
+                                                  boolean verify);
     static native void nativePackageCancel();
     private static native void nativePackageStep(String step);
     private static native void nativePackageFailed(int kind, String detail);
@@ -1379,7 +1380,13 @@ public class TOTKRecompAndroidActivity extends SDLActivity {
 
     public static void importPackages(int remember) {
         Uri[] u = pkgUri.clone();
-        new Thread(() -> self.runPackageImport(u, remember != 0), "package-import").start();
+        new Thread(() -> self.runPackageImport(u, remember != 0, false), "package-import").start();
+    }
+
+    // Verify packages: the same packages read whole, each content against the SHA-256 in their own metadata; nothing set up
+    public static void verifyPackages(int remember) {
+        Uri[] u = pkgUri.clone();
+        new Thread(() -> self.runPackageImport(u, remember != 0, true), "package-verify").start();
     }
 
     // A picked keys file into the app's keys folder (written beside it, then renamed: never half a file)
@@ -1463,7 +1470,7 @@ public class TOTKRecompAndroidActivity extends SDLActivity {
         return f;
     }
 
-    private void runPackageImport(Uri[] u, boolean remember) {
+    private void runPackageImport(Uri[] u, boolean remember, boolean verify) {
         File[] copies = new File[2];
         try {
             if (remember) {
@@ -1483,7 +1490,7 @@ public class TOTKRecompAndroidActivity extends SDLActivity {
                 int updFd = copies[1] != null ? openFd(copies[1]) : u[1] != null ? openFd(u[1]) : -1;
                 int prodFd = u[2] != null ? openFd(u[2]) : openFd(kept);
                 int titleFd = u[3] != null ? openFd(u[3]) : keptTitle.isFile() ? openFd(keptTitle) : -1;
-                int r = nativePackageImport(baseFd, base.endsWith(".xci"), updFd, prodFd, titleFd);
+                int r = nativePackageImport(baseFd, base.endsWith(".xci"), updFd, prodFd, titleFd, verify);
                 if ((r & 0xff) != PKG_NOT_SEEKABLE) return;  // (done, or the native side said why)
                 int slot = r >> 8;
                 Log.w(TAG, "package import: " + pkgName[slot] + " can't be read in place");

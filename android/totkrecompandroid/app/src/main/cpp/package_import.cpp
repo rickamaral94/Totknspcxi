@@ -172,6 +172,19 @@ PackageImportOutcome package_import_run(const PackageImportInputs &in, const Pac
         out.result = PKG_UNUSABLE, out.detail = say(e);
         return out;
     }
+    if (h.verify_only) {
+        if (h.step) h.step("Verifying the packages...");
+        try {
+            imp->verify_ncas(h.progress, cancel);
+        } catch (const nx::Cancelled &) {
+            return out.result = PKG_CANCELLED, out;
+        } catch (const nx::Error &e) {
+            fprintf(stderr, "[import] verify: %s\n", e.en().c_str());
+            return out.result = PKG_UNUSABLE, out.detail = say(e), out;
+        }
+        fprintf(stderr, "[import] verify: every NCA matches the SHA-256 its package's metadata records\n");
+        return out.result = PKG_DONE, out;
+    }
 
     // the game version: the loader's decision, from the main module's build id
     const nx::Entry *main = nx::find_entry(imp->exefs(), "main");

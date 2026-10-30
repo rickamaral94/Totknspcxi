@@ -44,6 +44,9 @@ struct PackageImportHooks {
     std::function<void(uint64_t done, uint64_t total)> progress;  // bytes of the whole import
     bool (*keep_loose)(const char *rel) = nullptr;              // the romfs files kept loose beside romfs.bin
     bool portuguese = false;                                    // the detail in Portuguese
+    // Verify packages: nothing written - each NCA's SHA-256 against the one its package's own metadata (CNMT) records,
+    // a check independent of the import's hash trees: PKG_DONE when all match, PKG_UNUSABLE naming the one that doesn't
+    bool verify_only = false;
     // the files against the version's (default: runtime/romfs_build.c's romfs_check_set; the host tests' stand-in)
     int (*check_set)(int version, const char *const *paths, int n, const char *version_txt, char *why, size_t why_size) = nullptr;
 };

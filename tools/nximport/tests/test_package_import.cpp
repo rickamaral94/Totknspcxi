@@ -258,3 +258,23 @@ TEST(pkg_import_recovery) {
         CHECK(get(d + "/romfs.bin") == "NEWER IMAGE");
     }
 }
+
+TEST(pkg_verify_packages) {
+    PkgFixture fx;
+    PackageImportHooks h = hooks();
+    h.verify_only = true;
+    uint64_t last = 0, total = 0;
+    h.progress = [&](uint64_t d, uint64_t t) { last = d, total = t; };
+    PackageImportOutcome o = package_import_run(fx.inputs(), h, nullptr);
+    CHECK(o.result == PKG_DONE);
+    CHECK(total > 10000000 && last == total);
+    CHECK(!exists(g_root + "/extracted") && !exists(g_root + "/extracted.importing"));  // (nothing written)
+    // a byte changed deep in the program NCA: named, as the package's own metadata disagrees with it
+    synth::Bytes bad = fx.nsp_bytes;
+    bad[bad.size() - 3000000] ^= 0x10;
+    std::string p = fx.dir + "/bad.nsp";
+    put(p, std::string(bad.begin(), bad.end()));
+    o = package_import_run(fx.inputs(p), h, nullptr);
+    CHECK(o.result == PKG_UNUSABLE);
+    CHECK(contains(o.detail, ".nca: its SHA-256 doesn't match"));
+}

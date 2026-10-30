@@ -877,7 +877,7 @@ static void pkg_progress(uint64_t done, uint64_t total) {
 // The import, on the activity's import thread: the descriptors are owned from here on. Returns a PackageImportResult,
 // with the package's slot in the bits above 8 for PKG_NOT_SEEKABLE (the activity offers to copy it to the phone first).
 extern "C" JNIEXPORT jint JNICALL Java_com_totkrecompandroid_TOTKRecompAndroidActivity_nativePackageImport(
-        JNIEnv *, jclass, jint base_fd, jboolean xci, jint update_fd, jint prod_fd, jint title_fd) {
+        JNIEnv *, jclass, jint base_fd, jboolean xci, jint update_fd, jint prod_fd, jint title_fd, jboolean verify) {
     pthread_mutex_lock(&g_lock);
     g_busy = true;
     g_src.clear();
@@ -891,9 +891,23 @@ extern "C" JNIEXPORT jint JNICALL Java_com_totkrecompandroid_TOTKRecompAndroidAc
     h.progress = pkg_progress;
     h.keep_loose = keep_loose;
     h.portuguese = settings_host_portuguese();
+    h.verify_only = verify;
     PackageImportOutcome o = package_import_run(in, h, &g_pkg_cancel);
     g_pkg_importing = false;
-    fprintf(stderr, "[launcher] package import: %d %s\n", (int)o.result, o.detail.c_str());
+    fprintf(stderr, "[launcher] package %s: %d %s\n", verify ? "verify" : "import", (int)o.result, o.detail.c_str());
+    if (verify && (o.result == PKG_DONE || o.result == PKG_UNUSABLE)) {  // (nothing set up: only the answer)
+        pthread_mutex_lock(&g_lock);
+        g_busy = false;
+        pthread_mutex_unlock(&g_lock);
+        if (o.result == PKG_DONE)
+            set_job("Packages verified: each one matches the SHA-256 its own metadata records.");
+        else
+            set_job("The package is damaged", true,
+                    "Its contents differ from the SHA-256 its own metadata records. Copy it again from the original, or "
+                    "dump it again from the game card or the console.");
+        set_job_detail(o.detail);
+        return (jint)o.result;
+    }
     if (o.result == PKG_DONE) {  // as a picked folder's setup: the game code next (extract_thread)
         pthread_mutex_lock(&g_lock);
         g_dest = o.dest;
@@ -2289,6 +2303,11 @@ extern "C" void launcher_run(const char *root) {
                                    "for that version are replaced only once the new ones are complete. It needs about 16 "
                                    "GB free (the exact amount is checked first) and may take a while.", true))
                         android_call_int("importPackages", g_pkg_remember ? 1 : 0);
+                    if (!can) opt_disable_next();
+                    if (opt_action("Verify packages", "",
+                                   "Reads the chosen packages whole and checks each of their contents against the SHA-256 "
+                                   "the package's own metadata records. Nothing is written. A damaged copy is named.", true))
+                        android_call_int("verifyPackages", g_pkg_remember ? 1 : 0);
                 }
 #endif
                 if (!ready || !src.empty()) {  // (Android: picking the folder sets it up at once)
