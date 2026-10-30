@@ -82,3 +82,55 @@ TEST(corrupt_truncation) {
         CHECK(c.run(b) == 0);
     }
 }
+
+namespace {
+
+// A package whose bytes at [at, at + 1) come back wrong: on the first read only (flaky storage), or differently on
+// every read (unreliable storage)
+class FlakyReader : public Reader {
+public:
+    FlakyReader(synth::Bytes b, uint64_t at, bool every_time)
+        : Reader("base.nsp"), b_(std::move(b)), at_(at), every_(every_time) {}
+    uint64_t size() const override { return b_.size(); }
+    mutable int hits = 0;
+
+protected:
+    void read_impl(void *dst, uint64_t n, uint64_t off) const override {
+        memcpy(dst, b_.data() + off, size_t(n));
+        if (at_ >= off && at_ < off + n && (every_ || hits == 0))
+            static_cast<uint8_t *>(dst)[at_ - off] ^= uint8_t(1 + hits++);
+    }
+
+private:
+    synth::Bytes b_;
+    uint64_t at_;
+    bool every_;
+};
+
+}  // namespace
+
+TEST(flaky_read_recovered_by_reread) {
+    Case c(false);
+    std::string k = c.keys.prod_keys(), out = c.dir + "/flaky";
+    auto run = [&](uint64_t at, bool every, std::shared_ptr<FlakyReader> *keep) {
+        ImportInput in;
+        auto flaky = std::make_shared<FlakyReader>(c.nsp, at, every);
+        in.base = flaky;
+        in.prod_keys = std::make_shared<MemReader>(synth::Bytes(k.begin(), k.end()), "prod.keys");
+        rm_tree(out);
+        if (keep) *keep = flaky;
+        return ERROR_OF(Importer(in).extract_to(out, nullptr, nullptr));
+    };
+    // a byte the RomFS hash tree covers: the first offset (past the headers) where wrong bytes every time fail it
+    uint64_t at = 0;
+    for (uint64_t o = 0x8000; o < c.nsp.size() && !at; o += 997)
+        if (contains(run(o, true, nullptr), "different bytes each time")) at = o;
+    REQUIRE(at);
+    CHECK(contains(run(at, true, nullptr), "bytes diferentes a cada vez"));
+    // wrong on the first read only: read again, the right bytes, the files as they were
+    std::shared_ptr<FlakyReader> flaky;
+    CHECK(run(at, false, &flaky).empty());
+    CHECK(flaky->hits == 1);
+    for (auto &f : c.romfs) CHECK(read_file(out + "/romfs/" + f.first) == f.second);
+    for (auto &f : c.exefs) CHECK(read_file(out + "/exefs/" + f.first) == f.second);
+}

@@ -2,6 +2,7 @@
 
 #include "crypto.h"
 
+#include <cstdio>
 #include <cstring>
 
 namespace nx {
@@ -34,12 +35,47 @@ static bool block_ok(const uint8_t *data, size_t n, size_t pad_to, const uint8_t
     return false;
 }
 
-[[noreturn]] static void mismatch(const std::string &what, uint64_t off) {
+[[noreturn]] static void mismatch(const std::string &what, uint64_t off, bool same_each_time) {
     std::string o = std::to_string(off);
+    if (same_each_time)
+        fail(what + ": integrity check failed at offset " + o +
+                 " (read 3 times, the same bytes each time: the file is damaged there - copy it again - or a wrong title "
+                 "key, or an update that doesn't belong to this base game)",
+             what + ": falha na verificação de integridade no offset " + o +
+                 " (lido 3 vezes, os mesmos bytes a cada vez: o arquivo está danificado aí - copie-o de novo - ou title "
+                 "key errada, ou um update que não é deste jogo base)");
     fail(what + ": integrity check failed at offset " + o +
-             " (a wrong title key, a corrupt or incomplete file, or an update that doesn't belong to this base game)",
+             " (read 3 times, different bytes each time: the storage or the file provider returns inconsistent data - "
+             "copy the file to the device's internal storage and try again)",
          what + ": falha na verificação de integridade no offset " + o +
-             " (title key errada, arquivo corrompido ou incompleto, ou um update que não é deste jogo base)");
+             " (lido 3 vezes, bytes diferentes a cada vez: o armazenamento ou o provedor de arquivos devolve dados "
+             "inconsistentes - copie o arquivo para o armazenamento interno do aparelho e tente de novo)");
+}
+
+// A block whose hash didn't match, read again from the storage (twice more): Android's file providers have returned
+// wrong bytes once in tens of thousands of reads (upstream issue #17; runtime/romfs_build.c retries for it). A re-read
+// that matches is used (into out, n bytes); else the failure says whether the bytes were the same each time (the
+// file itself is damaged there) or not (the storage is unreliable).
+static void recheck(const Reader &r, uint64_t off, uint64_t n, size_t pad_to, const uint8_t expect[32], const std::string &what,
+                    uint8_t *out) {
+    uint8_t first[32], h[32];
+    sha256(out, size_t(n), first);
+    bool same = true;
+    std::vector<uint8_t> again(static_cast<size_t>(n));
+    for (int attempt = 2; attempt <= 3; attempt++) {
+        r.read(again.data(), n, off);
+        if (block_ok(again.data(), size_t(n), pad_to, expect)) {
+            fprintf(stderr, "[nximport] %s: the block at %llu matched when read again (attempt %d): a read returned wrong bytes\n",
+                    what.c_str(), (unsigned long long)off, attempt);
+            memcpy(out, again.data(), size_t(n));
+            return;
+        }
+        sha256(again.data(), size_t(n), h);
+        same &= !memcmp(h, first, 32);
+    }
+    fprintf(stderr, "[nximport] %s: the block at %llu (%llu bytes) fails its hash 3 times, %s\n", what.c_str(),
+            (unsigned long long)off, (unsigned long long)n, same ? "the same bytes each time" : "different bytes each time");
+    mismatch(what, off, same);
 }
 
 ReaderPtr open_sha256_region(const ReaderPtr &section, const uint8_t hd[0xF8], bool quick) {
@@ -54,7 +90,7 @@ ReaderPtr open_sha256_region(const ReaderPtr &section, const uint8_t hd[0xF8], b
     std::vector<uint8_t> table = section->read_vec(table_size, table_off);
     uint8_t h[32];
     sha256(table.data(), table.size(), h);
-    if (memcmp(h, hd, 32) != 0) mismatch(what, table_off);
+    if (memcmp(h, hd, 32) != 0) recheck(*section, table_off, table_size, 0, hd, what, table.data());
     uint64_t blocks = (data_size + block - 1) / block;
     if (blocks * 32 > table_size) corrupt(what + " (hash table)");
     auto data = std::make_shared<SubReader>(section, data_off, data_size, what);
@@ -64,7 +100,7 @@ ReaderPtr open_sha256_region(const ReaderPtr &section, const uint8_t hd[0xF8], b
         uint64_t off = b * block, n = data_size - off < block ? data_size - off : block;
         buf.resize(n);
         data->read(buf.data(), n, off);
-        if (!block_ok(buf.data(), n, 0, &table[b * 32])) mismatch(what, data_off + off);
+        if (!block_ok(buf.data(), n, 0, &table[b * 32])) recheck(*data, off, n, 0, &table[b * 32], what, buf.data());
     }
     return data;
 }
@@ -97,7 +133,7 @@ static std::vector<uint8_t> read_level(const Reader &storage, const Level &l, co
     std::vector<uint8_t> v = storage.read_vec(l.size, l.off);
     for (uint64_t off = 0, b = 0; off < l.size; off += l.block, b++) {
         uint64_t n = l.size - off < l.block ? l.size - off : l.block;
-        if (!block_ok(v.data() + off, n, l.block, above + 32 * b)) mismatch(what, l.off + off);
+        if (!block_ok(v.data() + off, n, l.block, above + 32 * b)) recheck(storage, l.off + off, n, l.block, above + 32 * b, what, v.data() + off);
     }
     return v;
 }
@@ -146,7 +182,8 @@ void IvfcReader::read_impl(void *dst, uint64_t n, uint64_t off) const {
         storage_->read(buf.data(), end - start, data_off_ + start);
         for (uint64_t i = 0; i < nb; i++) {
             uint64_t bo = i * bs, bn = (end - start) - bo < bs ? (end - start) - bo : bs;
-            if (!block_ok(buf.data() + bo, bn, bs, &hashes_[(b + i) * 32])) mismatch(what(), data_off_ + start + bo);
+            if (!block_ok(buf.data() + bo, bn, bs, &hashes_[(b + i) * 32]))
+                recheck(*storage_, data_off_ + start + bo, bn, bs, &hashes_[(b + i) * 32], what(), buf.data() + bo);
         }
         uint64_t from = off > start ? off - start : 0, to = off + n - start < end - start ? off + n - start : end - start;
         memcpy(out + (start + from - off), buf.data() + from, size_t(to - from));
