@@ -427,11 +427,11 @@ static void stat_line(const char *what, const uint64_t *v, int n, const uint8_t 
 }
 
 typedef struct { char name[24]; uint64_t base, end; char build_id[48]; } Mod;
-static Mod g_mods[64];
+static Mod g_mods[1024];  // (an app process maps several hundred libraries: libmain.so came after the first 64)
 static int g_nmods;
 static int on_phdr(struct dl_phdr_info *info, size_t size, void *arg) {
     (void)size, (void)arg;
-    if (g_nmods >= 64) return 1;
+    if (g_nmods >= 1024) return 1;
     Mod *m = &g_mods[g_nmods];
     const char *nm = info->dlpi_name && *info->dlpi_name ? strrchr(info->dlpi_name, '/') : NULL;
     snprintf(m->name, sizeof m->name, "%s", nm ? nm + 1 : info->dlpi_name && *info->dlpi_name ? info->dlpi_name : "(main)");
@@ -501,7 +501,9 @@ static void top_list(const char *what, const Slot *s, uint32_t n, bool lr) {
     if (!e || !v) { free(e); free(v); return; }
     for (uint32_t i = 0; i < n; i++) v[i] = ((lr ? s->ring[i].lr : s->ring[i].pc) << 8) | (s->ring[i].cat < DG_N ? s->ring[i].cat : 0);
     qsort(v, n, sizeof *v, cmp_addr);  // (each address named once)
-    uint32_t mod_n[64] = {0}, other = 0;
+    static uint32_t mod_n[1024];
+    uint32_t other = 0;
+    memset(mod_n, 0, sizeof mod_n);
     char nm[80];
     int k = -1;
     for (uint32_t i = 0; i < n; i++) {
@@ -621,7 +623,9 @@ static void *report_main(void *arg) {
     stat_line("acquire (vkAcquireNextImageKHR), gameplay", f_acquire, f_n, f_flags, 1, 1);
     stat_line("present call (vkQueuePresentKHR), gameplay", f_present, f_n, f_flags, 1, 1);
     out("-- GPU (timestamps at each submission's start and end, idle excluded)");
-    stat_line("GPU busy per present interval, gameplay", f_gpu, f_n, f_flags, 1, 1);
+    // (the busy time arrives in batches, as submissions' timestamps are read back: the mean is the GPU's time per frame,
+    // the percentiles are those of the batches)
+    stat_line("GPU busy per present interval, gameplay (use the mean)", f_gpu, f_n, f_flags, 1, 1);
     stat_line("final composition (the game image into the window + the menus / overlay)", f_comp, f_ncomp, NULL, 0, 0);
     out("-- device (every 2 s)");
     if (cl_samples && cl_n) {
