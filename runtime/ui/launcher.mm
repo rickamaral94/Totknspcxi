@@ -204,7 +204,7 @@ static std::string romfs_link_target(const std::string &root) {
 static std::string check_copied_files(const std::string &root) {
     int v = main_version(root + "/exefs/main"), want = rt_game_dir_version(root.c_str());
     if (v < 0) return "No game files";
-    if (!v || (want && v != want)) return "Wrong game version (needs v1.4.3)";
+    if (!v || (want && v != want)) return "Wrong game version (needs v1.4.3 or v1.4.2)";
     // (the game reads its data through romfs.bin alone: on Android it's built straight from the picked folder, and romfs/
     // holds only the movies, opened by path)
     std::string linked = romfs_link_target(root);
@@ -226,8 +226,8 @@ static std::string check_game_files(const std::string &root) {
 }
 
 // The game versions this app runs, and which of them are set up (their copied files there; checked again once a second)
-static const int k_versions[] = {GAME_V_MAIN};
-enum { N_VERSIONS = 1 };
+static const int k_versions[] = {GAME_V_MAIN, GAME_V_142};
+enum { N_VERSIONS = 2 };
 static bool version_set_up(int i) {
     static bool set_up[N_VERSIONS];
     static double next;
@@ -287,7 +287,7 @@ static void set_failure(int k) {
         "Choose the folder that holds the game files.",
         "Choose the folder that holds the game files.",
         "Make sure there's about 40 GB free and try again.",
-        "TOTKRecompAndroid runs The Legend of Zelda: Tears of the Kingdom with its update 1.4.3.",
+        "TOTKRecompAndroid runs The Legend of Zelda: Tears of the Kingdom with its update 1.4.3 or 1.4.2.",
         "Some files are missing. Choose the folder again; if it happens again, dump the game again.",
         "Try again: the build goes on where it stopped. If it keeps failing, report it on GitHub with the log."};
     if (k >= 1 && k <= 6) set_job(head[k], true, hint[k]);
@@ -1448,7 +1448,7 @@ static void switch_to_version(int v) {
 // and the start screen asked to build the game code the setup had just skipped (players' reports, 2026-10-28)
 static void carry_game_code(int version) {
     char vr[1024], main_root[1024];
-    if (!rt_version_root(version, vr, sizeof vr) || !rt_version_root(100, main_root, sizeof main_root)) return;
+    if (!rt_version_root(version, vr, sizeof vr) || !rt_version_root(GAME_V_MAIN, main_root, sizeof main_root)) return;
     std::string path = std::string(vr) + "/totkrecompandroid.ini", text, line;
     FILE *f = fopen(path.c_str(), "rb");
     if (!f) f = fopen((std::string(main_root) + "/totkrecompandroid.ini").c_str(), "rb");  // (as paths.c version_seed)
@@ -1471,7 +1471,11 @@ static void carry_game_code(int version) {
 // the ones not set up yet greyed - the files folder below sets them up. focus: the running one takes the cursor.
 static void version_rows(bool busy, bool focus) {
     static const char *const notes[N_VERSIONS] = {
-        "The game with its update 1.4.3, the last one."};
+        "The game with its update 1.4.3, the last one: everything this app does (60 fps, the world in real time, Native game "
+        "code).",
+        "The game with its update 1.4.2. Recompiled game code only, at 30 fps at most, without 1.4.3's fixes: below 30 fps "
+        "the game runs slower than real time, and the scene may darken for a moment when it changes size. Saves of 1.4.2 "
+        "also open in 1.4.3."};
     opt_section("Game version");
     int cur = rt_game_version();
     for (int i = 0; i < N_VERSIONS; i++) {
@@ -1654,7 +1658,8 @@ static void prelaunch_tab(float sc) {
     heading("Game files");
     ImGui::Text(tr("Game version: %s"), version_name(rt_game_version()));
     ImGui::PushTextWrapPos(0);
-    ImGui::TextDisabled("%s", tr("Tears of the Kingdom 1.4.3 (the game with its last update)."));
+    ImGui::TextDisabled("%s", tr(rt_game_version() == GAME_V_142 ? "Tears of the Kingdom 1.4.2 (recompiled game code only)."
+                                                                 : "Tears of the Kingdom 1.4.3 (the game with its last update)."));
     ImGui::PopTextWrapPos();
     if (ImGui::Button(tr("Versions and setup"))) g_open_files = true;
     static double gb = -1;
@@ -2228,7 +2233,7 @@ extern "C" void launcher_run(const char *root) {
                     dl->AddLine(ImVec2(x + u * 0.35f, cy + u * 0.35f), ImVec2(x + u, cy - u * 0.4f), g, fs * 0.11f);
                 };
                 std::string src_d = tr("The folder with your own game folders (exefs/romfs) of The Legend of Zelda: Tears of "
-                                       "the Kingdom for Nintendo Switch, with its update 1.4.3 applied. The version is told from "
+                                       "the Kingdom for Nintendo Switch, with its update 1.4.3 or 1.4.2 applied. The version is told from "
                                        "the files, and each one is set up in a place of its own, beside the others. The game "
                                        "isn't included with TOTKRecompAndroid.");
                 if (!src.empty()) src_d += std::string(tr("\n\nChosen: ")) + src;
@@ -2262,8 +2267,8 @@ extern "C" void launcher_run(const char *root) {
                                "Recompiled: the setup rebuilds the game's code for this phone from your files (once, it may "
                                "take a while). Set up this way, the game can still run natively: Video > Native game code.\n\n"
                                "Native: the game's own code runs directly on the phone's CPU, so the setup only copies the "
-                               "files - no build. An experiment. Switching to Recompiled later means building the game code "
-                               "then.");
+                               "files - no build. An experiment, for 1.4.3 only: 1.4.2 always runs recompiled. Switching to "
+                               "Recompiled later means building the game code then.");
                     if ((m == 1) != g_settings.native_code) {
                         g_settings.native_code = m == 1;
                         settings_save();
@@ -2317,8 +2322,8 @@ extern "C" void launcher_run(const char *root) {
                         android_call_int("pickPackageFile", 0);
                     if (busy) opt_disable_next();
                     if (opt_action("Update", pn[1].empty() ? "None" : pn[1].c_str(),
-                                   "Required: the 1.4.3 update as an NSP file (v720896), applied over the base game. "
-                                   "This app runs version 1.4.3 only.", true))
+                                   "Required: the 1.4.3 (v720896) or 1.4.2 (v655360) update as an NSP file, applied over the "
+                                   "base game. 1.4.3 runs everything; 1.4.2, recompiled game code only.", true))
                         android_call_int("pickPackageFile", 1);
                     if (busy) opt_disable_next();
                     if (opt_action("prod.keys", !pn[2].empty() ? pn[2].c_str() : remembered ? "Remembered" : "Choose...",
@@ -2339,10 +2344,10 @@ extern "C" void launcher_run(const char *root) {
                         if (opt_action("Forget the keys", "", "Deletes the keys TOTKRecompAndroid kept.", true)) android_call("forgetKeys");
                     }
                     bool can = !busy && !pn[0].empty() && (!pn[2].empty() || remembered);
-                    if (!can || pn[1].empty()) opt_disable_next();  // (TOTK runs as 1.4.3 only: the update is required)
+                    if (!can || pn[1].empty()) opt_disable_next();  // (TOTK runs as 1.4.3 or 1.4.2: the update is required)
                     if (opt_action("Import", busy ? "Working..." : "",
                                    "Reads the packages, checks every byte against their own hashes, and sets the game "
-                                   "files up as version 1.4.3. The game files set up before are replaced only once the new "
+                                   "files up for the version they hold (1.4.3 or 1.4.2), beside the other. The game files set up before for it are replaced only once the new "
                                    "ones are complete. It needs about 17 GB free (the exact amount is checked first) and "
                                    "may take a while.", true))
                         android_call_int("importPackages", g_pkg_remember ? 1 : 0);

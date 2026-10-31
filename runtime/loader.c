@@ -72,13 +72,16 @@ static uint64_t gnu_hash_nsyms(uint64_t h) {
 int game_version_of_build(const uint8_t id[8]) {
     static const struct { uint8_t id[8]; int version; } builds[] = {
         {{0x27, 0x71, 0x78, 0xb7, 0xdb, 0xa1, 0xb6, 0xd4}, GAME_V_143},  // TOTK 1.4.3 (update v720896, SDK 20.5.22)
+        // TOTK 1.4.2 (update v655360, SDK 20.5.6): the port's first version (1d40d9f), back beside 1.4.3 for players
+        // whose update is that one - without 1.4.3's patches (tools/patches.py, runtime/native.c: other addresses)
+        {{0x5c, 0xb4, 0x2b, 0x1c, 0xf2, 0x54, 0x69, 0xfb}, GAME_V_142},
     };
     for (unsigned i = 0; i < sizeof builds / sizeof *builds; i++)
         if (!memcmp(id, builds[i].id, 8)) return builds[i].version;
     return 0;
 }
 
-const char *game_version_name(int v) { return v == GAME_V_143 ? "1.4.3" : "?"; }
+const char *game_version_name(int v) { return v == GAME_V_143 ? "1.4.3" : v == GAME_V_142 ? "1.4.2" : "?"; }
 
 static void load_nso(Module *m, const char *path, uint64_t base) {
     size_t len;

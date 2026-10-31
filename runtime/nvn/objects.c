@@ -1617,7 +1617,7 @@ NVN(nvnWindowSetPresentInterval) {
     // presents here: at most 2. LARECOMP_MAX_INTERVAL=<n> (0: the game's own).
     static int max_interval = -1;
     if (max_interval < 0)
-        max_interval = getenv("LARECOMP_MAX_INTERVAL") ? atoi(getenv("LARECOMP_MAX_INTERVAL")) : g_game_version == GAME_V_143 ? 2 : 0;
+        max_interval = getenv("LARECOMP_MAX_INTERVAL") ? atoi(getenv("LARECOMP_MAX_INTERVAL")) : game_is_totk(g_game_version) ? 2 : 0;
     if (max_interval > 0 && (int)A(1) > max_interval) c->x[1] = (uint64_t)max_interval;
     // TOTK at Frame rate 60: always 1. Its controller (rt_fps60) went back to 2 within a second each time it tried 1
     // in the cave (2026-10-29: 6 tries in 200 s, 30.8 fps on average); held at 1 the same walk ran 35 fps there (GPU

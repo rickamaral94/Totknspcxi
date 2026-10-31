@@ -63,7 +63,7 @@ extern uint64_t g_guest_lo;
 // (GAME_V_*, game_version_of_build, game_version_name: runtime/paths.h)
 extern int g_game_version;
 // SDK 20 (BOTW 1.8.2; TOTK 1.4.3's 20.5.22): NVN 55's device info, timed-out condition variable waits
-static inline int game_new_sdk(void) { return g_game_version == 182 || g_game_version == GAME_V_143; }
+static inline int game_new_sdk(void) { return g_game_version == 182 || game_is_totk(g_game_version); }  // (1.4.2: 20.5.6)
 // The program id, from main.npdm (runtime/main.c boot; TOTK's until then): GetInfo, the add-on content base id
 extern uint64_t g_program_id;
 // The system resource size, from main.npdm (0 for BOTW, 24 MiB for TOTK): GetInfo 16. Non-zero, the SDK turns its

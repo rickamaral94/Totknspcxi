@@ -21,7 +21,7 @@ int game_version_of_build(const uint8_t id[8]);  // runtime/loader.c: GAME_V_143
 
 static const char *const STAGING = "extracted.importing", *const COMPLETE = "COMPLETE";
 static const char *const MOVED[] = {"exefs", "romfs", "romfs.bin"};  // (in this order; romfs.bin last)
-static const int VERSIONS[] = {GAME_V_143};
+static const int VERSIONS[] = {GAME_V_143, GAME_V_142};
 
 static bool exists(const std::string &p) {
     struct stat st;
@@ -199,12 +199,13 @@ PackageImportOutcome package_import_run(const PackageImportInputs &in, const Pac
     out.version = memcmp(head, "NSO0", 4) ? 0 : game_version_of_build(head + 0x40);
     char root[1024];
     if (!out.version || !rt_version_root(out.version, root, sizeof root)) {
-        // (TOTK runs as 1.4.3 only: the cartridge's or the eShop's 1.0.0 needs the update v720896 with it)
+        // (TOTK runs as 1.4.3 or 1.4.2: the cartridge's or the eShop's 1.0.0 needs one of those updates with it)
         if (in.update_fd < 0)
-            out.detail = h.portuguese ? "O jogo base sozinho é a versão 1.0.0: escolha também o update 1.4.3 (v720896)."
-                                      : "The base game alone is version 1.0.0: choose the 1.4.3 update (v720896) too.";
+            out.detail = h.portuguese ? "O jogo base sozinho é a versão 1.0.0: escolha também o update 1.4.3 (v720896) ou 1.4.2 (v655360)."
+                                      : "The base game alone is version 1.0.0: choose the 1.4.3 (v720896) or 1.4.2 (v655360) update too.";
         else
-            out.detail = h.portuguese ? "Só a versão 1.4.3 (update v720896) roda neste app." : "Only version 1.4.3 (update v720896) runs in this app.";
+            out.detail = h.portuguese ? "Só as versões 1.4.3 (update v720896) e 1.4.2 (v655360) rodam neste app."
+                                      : "Only versions 1.4.3 (update v720896) and 1.4.2 (v655360) run in this app.";
         return out.result = PKG_VERSION, out;
     }
     mkdir(root, 0755);

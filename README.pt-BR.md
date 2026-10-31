@@ -2,9 +2,15 @@
 
 [English](README.md) | **Português**
 
-Uma recompilação estática de *The Legend of Zelda: Tears of the Kingdom* (Nintendo Switch, versão **1.4.3**) para
-Android, nos primeiros passos. **Não é emulação**: o código ARM64 do jogo vira C compilado para o seu celular, e os
+Uma recompilação estática de *The Legend of Zelda: Tears of the Kingdom* (Nintendo Switch, versão **1.4.3**, e a **1.4.2**
+só recompilada) para Android, nos primeiros passos. **Não é emulação**: o código ARM64 do jogo vira C compilado para o seu celular, e os
 gráficos (NVN) são traduzidos para Vulkan.
+
+> [!NOTE]
+> A **1.4.2** fica ao lado da 1.4.3, com arquivos do jogo, saves e configurações próprios (Arquivos do jogo > Versão do
+> jogo). Ela roda só com o código do jogo recompilado, a no máximo 30 fps, sem os ajustes da 1.4.3 (os endereços deles
+> são da 1.4.3): abaixo de 30 fps o jogo fica mais lento que o tempo real, e a cena pode escurecer por um instante
+> quando muda de tamanho. Os saves da 1.4.2 abrem na 1.4.3.
 
 Feito sobre o motor do **[LAS Recomp](https://github.com/peiikai/LASRecomp)**, de peiikai (uma recompilação de
 *Link's Awakening*), do seu porte para Android **[LASRecompAndroid](https://github.com/mamcjr/LASRecompAndroid)** e do
@@ -42,15 +48,15 @@ Android.
 
 > [!NOTE]
 > **Nenhum arquivo do jogo vem incluído.** É preciso o seu próprio *Tears of the Kingdom*, obtido legalmente, com a
-> atualização 1.4.3: uma pasta extraída (`exefs` e `romfs`, com o update aplicado) ou o NSP/XCI base e o NSP do update
-> 1.4.3 do seu próprio console, junto com as chaves desse console (veja
+> atualização 1.4.3 (ou 1.4.2): uma pasta extraída (`exefs` e `romfs`, com o update aplicado) ou o NSP/XCI base e o NSP desse update
+> do seu próprio console, junto com as chaves desse console (veja
 > [Importar a partir de NSP/XCI](#importar-a-partir-de-nspxci)). Não serão dadas instruções de como obter os arquivos
 > ou as chaves.
 
 ## Importar a partir de NSP/XCI
 
-O app (e a ferramenta `nximport` no PC) monta o jogo direto do NSP ou XCI do jogo base e do NSP do update 1.4.3
-(`0100F2C0115B6800`, v720896), usando as `prod.keys` (e, quando um pacote não tem ticket, as `title.keys`) do **seu
+O app (e a ferramenta `nximport` no PC) monta o jogo direto do NSP ou XCI do jogo base e do NSP do update
+(`0100F2C0115B6800`: a 1.4.3 é a v720896, a 1.4.2 a v655360), usando as `prod.keys` (e, quando um pacote não tem ticket, as `title.keys`) do **seu
 próprio console**. Nenhuma chave vem com este projeto nem é baixada. O jogo base sozinho é a 1.0.0, que este app não
 roda: o update é obrigatório.
 

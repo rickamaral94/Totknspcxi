@@ -557,7 +557,8 @@ static void tab_display(void) {
         extern int g_game_version;
         // (before the game loads - the menu on the start screen - its version is 0: the data root's, 1.4.3, so a 60
         // isn't shown missing and set back to 30)
-        int version = g_game_version ? g_game_version : 143;
+        extern int rt_game_version(void);
+        int version = g_game_version ? g_game_version : rt_game_version();  // (1.4.2: 30 at most - no 60 fps patches)
         bool sixty = version == 182 || version == 143;
         if (!sixty && g_settings.fps_mode > 1) g_settings.fps_mode = 1;
         static const char *fr[] = {"Auto (20 / 30)", "30 fps"};

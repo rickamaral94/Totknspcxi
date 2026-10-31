@@ -38,9 +38,10 @@ extern char native_svc_gate[], native_hle_gate[];
 
 // Chosen per boot (main.c boot): the setting (Native game code), or LARECOMP_NATIVE=0/1 over it
 static bool g_on;
+// (TOTK 1.4.2: recompiled only - native's fixes below are 1.4.3's addresses; LARECOMP_NATIVE=1 still forces it, a test)
 bool native_wanted(void) {
     const char *e = getenv("LARECOMP_NATIVE");
-    return e ? atoi(e) != 0 : g_settings.native_code;
+    return e ? atoi(e) != 0 : g_settings.native_code && rt_game_version() != GAME_V_142;
 }
 void native_begin_boot(void) { g_on = native_wanted(); }
 bool native_on(void) { return g_on; }

@@ -85,8 +85,8 @@ static int g_version = GAME_V_MAIN;  // whose folder the data root is
 
 #define VERSION_FILE "game_version.txt"
 
-// A version set up in a folder of its own beside the main one (BOTWRecompAndroid's 1.6.0 / 1.8.2): none yet
-static bool other_version(int v) { (void)v; return false; }
+// A version set up in a folder of its own beside the main one (v<version>): TOTK 1.4.2, beside 1.4.3
+static bool other_version(int v) { return v == GAME_V_142; }
 
 // The one the start screen chose (game_version.txt in the main root; none = the main one)
 static int selected_version(const char *main_root) {
@@ -155,7 +155,7 @@ int rt_game_dir_version(const char *game_dir) {
         if (abs) snprintf(got, sizeof got, "%s", game_dir);
         else snprintf(got, sizeof got, "%s" SEP "%s", g_root, game_dir);
     }
-    static const int versions[] = {GAME_V_MAIN};  // (and any other_version)
+    static const int versions[] = {GAME_V_MAIN, GAME_V_142};  // (the main one and each other_version)
     for (size_t i = 0; i < sizeof versions / sizeof *versions; i++) {
         char r[1024], want[1100];
         if (!rt_version_root(versions[i], r, sizeof r)) continue;

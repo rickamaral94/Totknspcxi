@@ -5,9 +5,11 @@ O resto do projeto recebe o jogo **extraído**: `exefs/` + `romfs/`. Isso vale p
 XCI da base e, opcionalmente, o NSP do update) com as `prod.keys`/`title.keys` do console dele e entrega os mesmos
 arquivos que a extração do hactool entregaria. O recompilador, o loader e a detecção de versão não mudam.
 
-> **Tears of the Kingdom:** o app roda só a **1.4.3** (`GAME_V_143`). O cartucho e o NSP base são a 1.0.0, então a
-> importação precisa também do **NSP do update 1.4.3** (`0100F2C0115B6800`, v720896). Sem ele, o app recusa com
-> "O jogo base sozinho é a versão 1.0.0: escolha também o update 1.4.3 (v720896)." O romfs de 1.4.3 tem 304243
+> **Tears of the Kingdom:** o app roda a **1.4.3** (`GAME_V_143`, a principal) e a **1.4.2** (`GAME_V_142`, numa pasta
+> `v142` ao lado; só recompilada, sem os ajustes da 1.4.3). O cartucho e o NSP base são a 1.0.0, então a importação
+> precisa também do **NSP do update** (`0100F2C0115B6800`: 1.4.3 v720896 ou 1.4.2 v655360). Sem ele, o app recusa com
+> "O jogo base sozinho é a versão 1.0.0: escolha também o update 1.4.3 (v720896) ou 1.4.2 (v655360)." A versão vem do
+> build id do `main` importado, e os arquivos vão para a pasta dela. O romfs de 1.4.3 tem 304243
 > arquivos (~16 GB); o `romfs_check_set` confere essa contagem antes de escrever qualquer coisa. O TOTK não tem DLC,
 > então a parte de DLC do BOTWRecompAndroid não foi trazida. O importador veio do BOTWRecompAndroid (mesmo código,
 > mesmos testes), com os title IDs e a versão do TOTK.
