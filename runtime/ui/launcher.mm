@@ -43,6 +43,7 @@ extern "C" {
 #include <libswscale/swscale.h>
 #endif
 #include "platform.h"
+#include "diag.h"
 #include "paths.h"
 #include "gamebuild.h"
 #include "gamelib.h"
@@ -1603,6 +1604,20 @@ static void prelaunch_tab(float sc) {
         ImGui::PushID("logdir");
         if (ImGui::Button(tr(folder.empty() ? "Choose folder" : "Change folder"))) android_call("pickLogFolder");
         ImGui::PopID();
+        {   // the performance diagnosis (runtime/diag.c, docs/DESEMPENHO-DIAG.md)
+            ImGui::Spacing();
+            char msg[1100];
+            int st = diag_status(msg, sizeof msg);
+            if (st == 1) ImGui::TextDisabled("%s", tr("Performance measurement: waiting for 5 s of gameplay, out of the menus."));
+            else if (st == 2) ImGui::Text(tr("Measuring performance: %s s left."), msg);
+            else {
+                if (ImGui::Button(tr("Measure performance (60 s)"))) diag_request(60);
+                if (st == 3) ImGui::Text(tr("Measurement done: the report is in the log and in %s"), msg);
+            }
+            ImGui::TextDisabled("%s", tr("In the next game session, records 60 s of gameplay once you have played 5 s out of "
+                                         "the menus: where each frame's time goes (the game's threads, the GPU, the clocks). "
+                                         "A line in the corner shows it. Play the same stretch as usual, then send the log."));
+        }
         ImGui::PopTextWrapPos();
         if (changed) settings_save();
     }

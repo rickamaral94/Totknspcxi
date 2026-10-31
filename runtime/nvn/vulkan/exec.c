@@ -12,6 +12,7 @@
 #include <unistd.h>
 
 #include "../../hle.h"
+#include "../../diag.h"
 #include "../../kernel.h"
 #include "shaders.h"
 #include "vk.h"
@@ -126,7 +127,9 @@ void vk_wait_seq(uint64_t seq) {
     VkSemaphoreWaitInfo wi = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO, .semaphoreCount = 1, .pSemaphores = &g_vk.timeline,
                               .pValues = &seq};
     uint64_t t0 = SDL_GetTicksNS();
+    DIAG_PUSH(DG_GPU_WAIT, 0);
     VkResult r = vkWaitSemaphores(g_vk.dev, &wi, 10ull * 1000000000ull);
+    DIAG_POP();
     stat_wait_ns += SDL_GetTicksNS() - t0;
     cum_wait += SDL_GetTicksNS() - t0;
     wait_account(SDL_GetTicksNS() - t0);
@@ -255,6 +258,15 @@ extern __thread uint64_t g_blocked_ns;  // kernel.c: this thread's time blocked 
 static _Atomic bool pace_slow;
 static uint64_t stat_pace_over;
 static _Atomic int pace_on = -1;
+
+// (diag.c) the GPU's busy time so far
+uint64_t diag_gpu_busy_total_ns(void) {
+#ifdef __ANDROID__
+    return gpu_busy_total;
+#else
+    return 0;
+#endif
+}
 
 void vk_pace_frame(void) {
     {   // (write-backs of passes the GPU has finished since: the game may read them this frame)

@@ -8,6 +8,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "../../diag.h"
 #include "../../paths.h"
 #include "../../settings.h"
 #include "../../ui/menu.h"
@@ -1057,6 +1058,7 @@ static Frame cur_frame;
 
 // Acquire the next window image and begin rendering into it (cleared to `clear`). Returns false when there is
 // nothing to draw into (minimised window).
+static uint64_t diag_acquire_ns, diag_present_ns;  // (diag.c: the last frame's, while measuring)
 bool vk_frame_begin(const float clear[4]) {
     cur_frame.ok = false;
     int w, h;
@@ -1085,7 +1087,11 @@ bool vk_frame_begin(const float clear[4]) {
     // until the app went to the background (the surface's loss ends the wait) - TOTK froze until another window came
     // in front and back (2026-10-25). Then the swapchain is made again, as that trip does; still none: no frame now.
     const uint64_t acquire_ns = 1000000000ull;
+    uint64_t acq_t0 = g_diag_armed ? SDL_GetTicksNS() : 0;
+    DIAG_PUSH(DG_ACQUIRE, 0);
     VkResult r = vkAcquireNextImageKHR(g_vk.dev, g_vk.swapchain, acquire_ns, acquire_sem[slot], VK_NULL_HANDLE, &cur_frame.image);
+    DIAG_POP();
+    if (acq_t0) diag_acquire_ns = SDL_GetTicksNS() - acq_t0;
     if (r == VK_TIMEOUT || r == VK_NOT_READY) {
         static int nstuck;
         if (nstuck++ < 20) LOG("[vk] no window image within 1 s (%d): the swapchain made again\n", r);
@@ -1175,7 +1181,11 @@ void vk_frame_end(const char *shot_path) {
 #ifdef __ANDROID__
     uint64_t trace_start = vk_timing_trace_on() ? SDL_GetTicksNS() : 0;
 #endif
+    uint64_t pres_t0 = g_diag_armed ? SDL_GetTicksNS() : 0;
+    DIAG_PUSH(DG_PRESENT_CALL, 0);
     VkResult r = vkQueuePresentKHR(g_vk.queue, &pi);
+    DIAG_POP();
+    if (pres_t0) diag_present_ns = SDL_GetTicksNS() - pres_t0;
 #ifdef __ANDROID__
     if (trace_start) vk_timing_trace_wait(VK_TIMING_PRESENT, SDL_GetTicksNS() - trace_start);
     if (r == VK_ERROR_OUT_OF_DATE_KHR) recreate_swapchain();  // (SUBOPTIMAL: every frame of an unrotated swapchain)
@@ -1269,6 +1279,27 @@ void backend_represent(void) {
     else SDL_Delay(16);
 }
 
+// (diag.c) the final composition's GPU time: two timestamps around it, in a ring of 16 frames read 16 frames later
+static VkQueryPool diag_qp;
+static uint32_t diag_qi;
+static bool diag_qused[16];
+static bool diag_ts_reset(void) {
+    if (!g_vk.props.limits.timestampComputeAndGraphics) return false;
+    if (!diag_qp) {
+        VkQueryPoolCreateInfo qi = {.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, .queryType = VK_QUERY_TYPE_TIMESTAMP, .queryCount = 32};
+        if (vkCreateQueryPool(g_vk.dev, &qi, NULL, &diag_qp) != VK_SUCCESS) { diag_qp = VK_NULL_HANDLE; return false; }
+    }
+    diag_qi = (diag_qi + 1) % 16;
+    if (diag_qused[diag_qi]) {  // (its last use, 16 frames ago)
+        uint64_t ts[2];
+        if (vkGetQueryPoolResults(g_vk.dev, diag_qp, diag_qi * 2, 2, sizeof ts, ts, 8, VK_QUERY_RESULT_64_BIT) == VK_SUCCESS && ts[1] > ts[0])
+            diag_gpu_composition((uint64_t)((double)(ts[1] - ts[0]) * g_vk.props.limits.timestampPeriod));
+        diag_qused[diag_qi] = false;
+    }
+    vkCmdResetQueryPool(vk_cmd(), diag_qp, diag_qi * 2, 2);  // (outside the window image's rendering)
+    return true;
+}
+
 #ifdef __ANDROID__
 void vk_present_now(NvnTexture *t) {  // (the window's half of backend_present)
 #else
@@ -1280,6 +1311,7 @@ void backend_present(NvnTexture *t) {
     vk_end_pass();
     static const float black[4] = {0, 0, 0, 1};
     uint64_t t0 = SDL_GetTicksNS();
+    bool diag_ts = diag_want_gpu_ts() && diag_ts_reset();
     bool have = vk_frame_begin(black);
     uint64_t nd = SDL_GetTicksNS() - t0;
     if (nd > 30000000) {
@@ -1330,15 +1362,18 @@ void backend_present(NvnTexture *t) {
         VkCommandBuffer cb = vk_cmd();
         float pv[8] = {renderer_origin_lower_left() ? 1.0f : 0.0f, 0, 0, 0, crop[0], crop[1], crop[2], crop[3]};
         memcpy(g_shot_crop, crop, sizeof crop);
+        if (diag_ts) vkCmdWriteTimestamp2(cb, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, diag_qp, diag_qi * 2);
         vk_present_draw(cb, b, (float)vx, (float)vy, (float)vw, (float)vh, pv);
         static long menu_at = -1;
         if (menu_at < 0) menu_at = getenv("LARECOMP_MENU_AT") ? atol(getenv("LARECOMP_MENU_AT")) : 0;
         if (menu_at && (long)total_frames + 1 == menu_at) { extern void menu_test_open(void); menu_test_open(); }
         menu_render((void *)cb, g_vk.sc_extent.width, g_vk.sc_extent.height);
+        if (diag_ts) vkCmdWriteTimestamp2(cb, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, diag_qp, diag_qi * 2 + 1), diag_qused[diag_qi] = true;
         static long win_shot = -1;
         if (win_shot < 0) win_shot = getenv("LARECOMP_WINDOW_SHOT") ? atol(getenv("LARECOMP_WINDOW_SHOT")) : 0;
         bool shot = win_shot && (long)total_frames + 1 == win_shot;
         vk_frame_end(shot ? "build/window.png" : NULL);
+        diag_present(diag_acquire_ns, diag_present_ns);
         if (shot && getenv("LARECOMP_EXIT_AFTER_SHOT")) { fflush(stderr); _exit(0); }
     } else {
         renderer_submit();

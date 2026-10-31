@@ -288,6 +288,9 @@ const char *rt_host_fn_name(uint64_t pc, uint64_t *offset) {
     return name;
 }
 
+// (diag.c) a host address in the game code: its guest function
+const char *diag_function_name(uint64_t pc, uint64_t *offset) { return rt_host_fn_name(pc, offset); }
+
 static const char *host_sym(uint64_t pc, uint64_t *offset) {
     // (game functions first: they live in totkgame.dll, which the OS lookup can only name as a whole)
     const char *s = rt_host_fn_name(pc, offset);

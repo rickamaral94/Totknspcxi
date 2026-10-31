@@ -4,6 +4,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "../diag.h"
 #include "../kernel.h"
 #include "../settings.h"
 #include "../framepace.h"
@@ -1459,6 +1460,16 @@ static bool rt_cutscene(void) {
     if (now != last) LOG("[totk] %s\n", (last = now) ? "cutscene: presents held at 30 fps" : "cutscene over");
     return now;
 }
+// (diag.c) playing: TOTK's 3D scene drawn within the last 20 presents (so not the title screen, a loading screen or
+// a menu over a still image), no cutscene and no movie. BOTW's menu and event addresses (framepace.c) are 1.8.2's.
+bool diag_in_gameplay(void) {
+    extern uint64_t vk_scene_frame(void), renderer_present_count(void);
+    extern volatile int g_movie_playing;
+    uint64_t now = renderer_present_count(), seen = vk_scene_frame();
+    return !framepace_on_title() && seen && now - seen < 20 && !rt_cutscene() &&
+           __atomic_load_n(&g_movie_playing, __ATOMIC_RELAXED) <= 0;
+}
+
 // ... and the frame controller's own pick is 2 then (tools/patches.py, main+0x2db238): some of a cutscene's animation
 // steps by the interval the game believes in, not by the measured time - held at 30 while it believed 1 (a light
 // cutscene frame fits 60) they played in slow motion, and at 60 while it believed 2, fast (2026-10-29).
@@ -1631,7 +1642,10 @@ NVN(nvnQueuePresentTexture) {
     {   // (which guest thread presents: LARECOMP_PROF_SVC_TID, kernel.c)
         static uint64_t last_id = ~0ull;
         KThread *kt = kernel_current_thread();
-        if (kt && kt->id != last_id) LOG("[pace] presenting thread t%llu\n", (unsigned long long)(last_id = kt->id));
+        if (kt && kt->id != last_id) {
+            LOG("[pace] presenting thread t%llu\n", (unsigned long long)(last_id = kt->id));
+            diag_note_presenting(kt->id);
+        }
     }
     {   // Frame limiter: a present waits until N vsyncs have gone by since the previous one, as NVN does on the Switch -
         // N is the larger of the window's interval (BOTW asks for 2: its world steps 1/30 s a frame) and the Video

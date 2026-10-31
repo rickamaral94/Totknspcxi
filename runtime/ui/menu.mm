@@ -12,6 +12,7 @@
 #include <atomic>
 #include <vector>
 
+#include "diag.h"
 #include "i18n.h"
 #include "imgui.h"
 #include "option_rows.h"
@@ -1327,6 +1328,20 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
     if (g_settings.show_fps) {  // (the full performance overlay: ui/perf_overlay.mm)
         extern void perf_overlay_draw(ImVec2 display, float scale);
         perf_overlay_draw(io.DisplaySize, scale);
+    }
+    {   // the performance measurement under way (runtime/diag.c): a small line in the corner, so it's clear when it runs
+        char left[1100];
+        int st = diag_status(left, sizeof left);
+        if (st == 1 || st == 2) {
+            ImGui::SetNextWindowPos(ImVec2(16 * scale, io.DisplaySize.y - 16 * scale), 0, ImVec2(0, 1));
+            ImGui::SetNextWindowBgAlpha(0.45f);
+            ImGui::Begin("##diag", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+                                            ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing);
+            ImGui::SetWindowFontScale(0.6f);
+            if (st == 1) ImGui::TextUnformatted(tr("Performance measurement: waiting for 5 s of gameplay, out of the menus."));
+            else ImGui::Text(tr("Measuring performance: %s s left."), left);
+            ImGui::End();
+        }
     }
 #else
     if (g_settings.show_fps) {

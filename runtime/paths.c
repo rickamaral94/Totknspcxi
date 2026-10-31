@@ -241,6 +241,14 @@ void rt_paths_init(void) {
 
 const char *rt_data_root(void) { return g_root; }
 
+// (diag.c) the performance diagnosis's report, next to the log
+const char *diag_report_path(void) {
+    static char p[1100];
+    if (!g_root[0]) return NULL;
+    snprintf(p, sizeof p, "%s/perf-diag.txt", g_root);
+    return p;
+}
+
 bool rt_resource(const char *name, const char *dev_rel, char *out, size_t n) {
     char c[4][1100] = {{0}};
     if (name) {
