@@ -76,6 +76,35 @@ TEST(import_nsp_key_area) {
     for (auto &l : imp.describe()) CHECK(!contains(l, hex(fx.keys.header_key.data(), 32)));
 }
 
+// Verify packages: an NCA whose header a dump or conversion tool rewrote (here the card / download byte, re-encrypted
+// with the header key, as such tools do) differs from its SHA-256 record but its sections' hash trees all match - named
+// as header-only, not a failure; a byte changed in its data is a HashMismatch that says the contents differ
+TEST(verify_header_only_and_damaged) {
+    Fixture fx;
+    auto g = synth::game(fx.keys, fx.spec(), fx.rng);
+    synth::Files pkg = g.package;
+    synth::Bytes *program = nullptr;
+    for (auto &f : pkg)
+        if (f.first.find(".nca") != std::string::npos && (!program || f.second.size() > program->size())) program = &f.second;
+    REQUIRE(program && program->size() > 0x1000);
+    synth::Bytes good = *program;
+    aes_xts_nintendo(fx.keys.header_key, true, program->data(), 0xC00, 0, 0x200);
+    (*program)[0x204] = 1;  // (distribution type: game card)
+    aes_xts_nintendo(fx.keys.header_key, false, program->data(), 0xC00, 0, 0x200);
+    {
+        Importer imp(fx.input(pkg));
+        std::vector<std::string> header_only = imp.verify_ncas(nullptr, nullptr);
+        REQUIRE(header_only.size() == 1);
+        CHECK(contains(header_only[0], ".nca"));
+    }
+    *program = good;
+    (*program)[0xC00 + (program->size() - 0xC00) / 2] ^= 0x08;  // (inside its sections' data)
+    std::string e;
+    try { Importer(fx.input(pkg)).verify_ncas(nullptr, nullptr); } catch (const HashMismatch &x) { e = x.en(); } catch (const Error &x) { e = "OTHER " + x.en(); }
+    CHECK(contains(e, "its contents differ too"));
+    CHECK(contains(e, "integrity check failed"));
+}
+
 TEST(import_xci) {
     Fixture fx;
     auto g = synth::game(fx.keys, fx.spec(), fx.rng);

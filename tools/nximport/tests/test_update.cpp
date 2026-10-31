@@ -115,6 +115,30 @@ TEST(update_against_another_base) {
     rm_tree(dir);
     CHECK(contains(e, "integrity check failed"));
     CHECK(contains(e, "doesn't belong to this base game"));
+    CHECK(contains(e, "the block comes from the base game's RomFS section at"));  // (a byte the update keeps from the base)
+}
+
+// A damaged byte in the update's own data: the failure says the block is the update's (copy update.nsp again)
+TEST(update_damaged_in_its_own_data) {
+    UpdateFixture fx;
+    auto b = fx.base(), u = fx.update();
+    // the update's program NCA, its RomFS data: AocMainField.pack, new in the update, lies in the update's own data -
+    // flip a byte of the NCA's larger part and keep the flip that the import blames on the update's data
+    std::string dir = temp_dir();
+    bool seen = false;
+    for (auto &f : u.package) {
+        if (f.second.size() < 0x10000 || f.first.find(".nca") == std::string::npos) continue;
+        for (size_t at = 0x4000; at + 0x2000 < f.second.size() && !seen; at += 0x1000) {
+            synth::Files pkg = u.package;
+            for (auto &g : pkg) if (g.first == f.first) g.second[at] ^= 0x20;
+            std::string e;
+            try { Importer(fx.input(b.package, pkg)).extract_to(dir + "/o", nullptr, nullptr); } catch (const Error &x) { e = x.en(); }
+            rm_tree(dir + "/o");
+            if (contains(e, "the block comes from the update's own data at")) seen = true;
+        }
+    }
+    rm_tree(dir);
+    CHECK(seen);
 }
 
 TEST(update_package_checks) {

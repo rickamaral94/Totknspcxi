@@ -176,8 +176,9 @@ PackageImportOutcome package_import_run(const PackageImportInputs &in, const Pac
     }
     if (h.verify_only) {
         if (h.step) h.step("Verifying the packages...");
+        std::vector<std::string> header_only;
         try {
-            imp->verify_ncas(h.progress, cancel);
+            header_only = imp->verify_ncas(h.progress, cancel);
         } catch (const nx::Cancelled &) {
             return out.result = PKG_CANCELLED, out;
         } catch (const nx::HashMismatch &e) {
@@ -187,7 +188,15 @@ PackageImportOutcome package_import_run(const PackageImportInputs &in, const Pac
             fprintf(stderr, "[import] verify: %s\n", e.en().c_str());
             return out.result = PKG_UNUSABLE, out.detail = say(e), out;
         }
-        fprintf(stderr, "[import] verify: every NCA matches the SHA-256 its package's metadata records\n");
+        fprintf(stderr, "[import] verify: every NCA's contents match (%zu with only their header changed)\n", header_only.size());
+        if (!header_only.empty()) {  // (the detail under "verified": which ones a dump or conversion tool rewrote)
+            std::string names;
+            for (auto &n : header_only) names += (names.empty() ? "" : ", ") + n;
+            out.detail = h.portuguese ? "O SHA-256 do arquivo difere, mas só fora do conteúdo verificado (o cabeçalho, reescrito pela "
+                                        "ferramenta de dump ou conversão): o conteúdo está intacto: " + names
+                                      : "The file's SHA-256 differs, but only outside the hashed contents (its header, rewritten by "
+                                        "the dump or conversion tool): the contents are intact: " + names;
+        }
         return out.result = PKG_DONE, out;
     }
 

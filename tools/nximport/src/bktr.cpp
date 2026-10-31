@@ -3,6 +3,7 @@
 #include "integrity.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 
 namespace nx {
@@ -139,6 +140,28 @@ protected:
             src_[e.storage]->read(out, k, e.phys + (off - e.virt));
             out += k, off += k, n -= k;
         }
+    }
+
+public:
+    // "the base game's RomFS section at 0x... (n bytes)" and / or "the update's own data at 0x...": which package's
+    // file a failed block is in (copy that one again), and where in its section
+    std::string origin(uint64_t off, uint64_t n, bool pt) const override {
+        std::string out;
+        while (n && off < size_) {
+            size_t i = size_t(std::upper_bound(entries_.begin(), entries_.end(), off,
+                                               [](uint64_t o, const IndirectEntry &e) { return o < e.virt; }) - entries_.begin()) - 1;
+            const IndirectEntry &e = entries_[i];
+            uint64_t range_end = i + 1 < entries_.size() ? entries_[i + 1].virt : size_;
+            uint64_t k = std::min(n, range_end - off);
+            char at[64];
+            snprintf(at, sizeof at, "%#llx (%llu bytes)", (unsigned long long)(e.phys + (off - e.virt)), (unsigned long long)k);
+            if (!out.empty()) out += pt ? " e " : " and ";
+            out += e.storage ? (pt ? "dos dados do próprio update, em " : "the update's own data at ")
+                             : (pt ? "da seção RomFS do jogo base, em " : "the base game's RomFS section at ");
+            out += at;
+            off += k, n -= k;
+        }
+        return out;
     }
 
 private:

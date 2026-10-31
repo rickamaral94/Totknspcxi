@@ -709,3 +709,5 @@
  "4x (30 -> 120)"},
 {"How many frames are shown for each of the game's. 2x: the game at 30, 60 shown. 3x and 4x need a 120 Hz screen (the Odin 2 Portal's, for one): the game at 40 or 30, 120 shown - each generated frame costs the GPU, input feels a little later. Where the screen can't, 2x. Applies at once.",
  "Quantos quadros são mostrados para cada um do jogo. 2x: o jogo a 30, 60 mostrados. 3x e 4x precisam de tela de 120 Hz (a do Odin 2 Portal, por exemplo): o jogo a 40 ou 30, 120 mostrados - cada quadro gerado custa GPU, e os comandos respondem um pouco depois. Onde a tela não dá, 2x. Vale na hora."},
+{"Packages verified: their contents match Nintendo's hashes.",
+ "Pacotes verificados: o conteúdo bate com os hashes da Nintendo."},

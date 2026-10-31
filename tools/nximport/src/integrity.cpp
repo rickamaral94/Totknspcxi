@@ -35,21 +35,25 @@ static bool block_ok(const uint8_t *data, size_t n, size_t pad_to, const uint8_t
     return false;
 }
 
-[[noreturn]] static void mismatch(const std::string &what, uint64_t off, bool same_each_time) {
+[[noreturn]] static void mismatch(const std::string &what, uint64_t off, bool same_each_time, const std::string &from_en,
+                                  const std::string &from_pt) {
     std::string o = std::to_string(off);
+    // (an update's patched RomFS: which package the block's bytes are in - Reader::origin)
+    std::string fen = from_en.empty() ? "" : "; the block comes from " + from_en;
+    std::string fpt = from_pt.empty() ? "" : "; o bloco vem " + from_pt;
     if (same_each_time)
         fail(what + ": integrity check failed at offset " + o +
                  " (read 3 times, the same bytes each time: the file is damaged there - copy it again - or a wrong title "
-                 "key, or an update that doesn't belong to this base game)",
+                 "key, or an update that doesn't belong to this base game" + fen + ")",
              what + ": falha na verificação de integridade no offset " + o +
                  " (lido 3 vezes, os mesmos bytes a cada vez: o arquivo está danificado aí - copie-o de novo - ou title "
-                 "key errada, ou um update que não é deste jogo base)");
+                 "key errada, ou um update que não é deste jogo base" + fpt + ")");
     fail(what + ": integrity check failed at offset " + o +
              " (read 3 times, different bytes each time: the storage or the file provider returns inconsistent data - "
-             "copy the file to the device's internal storage and try again)",
+             "copy the file to the device's internal storage and try again" + fen + ")",
          what + ": falha na verificação de integridade no offset " + o +
              " (lido 3 vezes, bytes diferentes a cada vez: o armazenamento ou o provedor de arquivos devolve dados "
-             "inconsistentes - copie o arquivo para o armazenamento interno do aparelho e tente de novo)");
+             "inconsistentes - copie o arquivo para o armazenamento interno do aparelho e tente de novo" + fpt + ")");
 }
 
 // A block whose hash didn't match, read again from the storage (twice more): Android's file providers have returned
@@ -73,9 +77,11 @@ static void recheck(const Reader &r, uint64_t off, uint64_t n, size_t pad_to, co
         sha256(again.data(), size_t(n), h);
         same &= !memcmp(h, first, 32);
     }
-    fprintf(stderr, "[nximport] %s: the block at %llu (%llu bytes) fails its hash 3 times, %s\n", what.c_str(),
-            (unsigned long long)off, (unsigned long long)n, same ? "the same bytes each time" : "different bytes each time");
-    mismatch(what, off, same);
+    std::string from_en = r.origin(off, n, false), from_pt = r.origin(off, n, true);
+    fprintf(stderr, "[nximport] %s: the block at %llu (%llu bytes) fails its hash 3 times, %s%s%s\n", what.c_str(),
+            (unsigned long long)off, (unsigned long long)n, same ? "the same bytes each time" : "different bytes each time",
+            from_en.empty() ? "" : "; it comes from ", from_en.c_str());
+    mismatch(what, off, same, from_en, from_pt);
 }
 
 ReaderPtr open_sha256_region(const ReaderPtr &section, const uint8_t hd[0xF8], bool quick) {

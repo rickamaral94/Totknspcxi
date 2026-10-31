@@ -915,8 +915,9 @@ extern "C" JNIEXPORT jint JNICALL Java_com_totkrecompandroid_TOTKRecompAndroidAc
         pthread_mutex_lock(&g_lock);
         g_busy = false;
         pthread_mutex_unlock(&g_lock);
-        if (o.result == PKG_DONE)
-            set_job("Packages verified: each one matches the SHA-256 its own metadata records.");
+        if (o.result == PKG_DONE)  // (detail: the NCAs whose header alone was rewritten by a dump tool, if any)
+            set_job(o.detail.empty() ? "Packages verified: each one matches the SHA-256 its own metadata records."
+                                     : "Packages verified: their contents match Nintendo's hashes.");
         else if (o.result == PKG_DAMAGED)  // (only an NCA whose SHA-256 was read and differs)
             set_job("The package is damaged", true,
                     "Its contents differ from the SHA-256 its own metadata records. Copy it again from the original, or "

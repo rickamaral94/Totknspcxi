@@ -27,6 +27,9 @@ public:
     }
     // What this is, for messages ("base.nsp", "base.nsp/abc.nca section 1")
     const std::string &what() const { return what_; }
+    // Where [off, off + n) really comes from, for a failure's message - an update's patched RomFS says which of its
+    // bytes are the base game's and which the update's own (bktr.cpp); "" for a plain file. pt: in Portuguese.
+    virtual std::string origin(uint64_t off, uint64_t n, bool pt) const { (void)off, (void)n, (void)pt; return {}; }
 
 protected:
     explicit Reader(std::string what) : what_(std::move(what)) {}

@@ -54,8 +54,11 @@ public:
     // cancel (may be null) checked between blocks: throws Cancelled.
     void extract_to(const std::string &dir, const Progress &progress, const std::atomic<bool> *cancel) const;
 
-    // SHA-256 of each NCA used against its CNMT record (a whole extra read of the packages; optional)
-    void verify_ncas(const Progress &progress, const std::atomic<bool> *cancel) const;
+    // SHA-256 of each NCA used against its CNMT record (a whole extra read of the packages; optional). An NCA whose
+    // SHA-256 differs gets its sections' own hash trees read whole: all matching, only its header was changed (a dump
+    // or conversion tool rewrote it: the content is Nintendo's) - named in the returned list, not a failure. Else
+    // HashMismatch, saying which section's data differs.
+    std::vector<std::string> verify_ncas(const Progress &progress, const std::atomic<bool> *cancel) const;
 
     // The Program NCAs used, by their file names in the packages ("" for the update without one): verify.sh hands
     // the same NCAs to hactool

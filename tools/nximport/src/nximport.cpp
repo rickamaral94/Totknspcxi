@@ -258,7 +258,7 @@ void Importer::extract_to(const std::string &dir, const Progress &progress, cons
                    [&](void *d, uint64_t n, uint64_t o) { read_romfs(i, d, n, o); }, buf, done, total, progress, cancel);
 }
 
-void Importer::verify_ncas(const Progress &progress, const std::atomic<bool> *cancel) const {
+std::vector<std::string> Importer::verify_ncas(const Progress &progress, const std::atomic<bool> *cancel) const {
     std::vector<std::pair<const Picked *, const CnmtContent *>> todo;
     for (const Picked *p : {&impl_->base, impl_->has_update ? &impl_->update : nullptr}) {
         if (!p) continue;
@@ -268,6 +268,18 @@ void Importer::verify_ncas(const Progress &progress, const std::atomic<bool> *ca
     uint64_t total = 0, done = 0;
     for (auto &t : todo) total += t.second->size;
     std::vector<uint8_t> buf(COPY_CHUNK);
+    std::vector<std::string> header_only;
+    // the whole of a reader read (its own checks throw on a block that differs), counted in the progress
+    auto read_all = [&](const Reader &r) {
+        total += r.size();
+        for (uint64_t off = 0, size = r.size(); off < size;) {
+            if (cancel && cancel->load()) throw Cancelled();
+            uint64_t n = size - off < buf.size() ? size - off : buf.size();
+            r.read(buf.data(), n, off);
+            off += n, done += n;
+            if (progress) progress(done, total);
+        }
+    };
     for (auto &t : todo) {
         const Entry *e = find_entry(t.first->package->files, t.second->file_name());
         Sha256 h;
@@ -281,10 +293,38 @@ void Importer::verify_ncas(const Progress &progress, const std::atomic<bool> *ca
         }
         uint8_t d[32];
         h.finish(d);
-        if (memcmp(d, t.second->hash.data(), 32) != 0 || memcmp(d, t.second->id.data(), 16) != 0)
-            throw HashMismatch(e->name + ": its SHA-256 doesn't match the package's metadata (corrupt or modified file)",
-                               e->name + ": o SHA-256 não bate com os metadados do pacote (arquivo corrompido ou modificado)");
+        if (!memcmp(d, t.second->hash.data(), 32) && !memcmp(d, t.second->id.data(), 16)) continue;
+        // The file differs from its record: its header (rewritten by some dump and conversion tools: the card / download
+        // flag, the key area) or its data. Each section's own hash tree tells - the NCA header's hashes of the sections'
+        // headers are checked when it's opened, and each section's data here, whole.
+        fprintf(stderr, "[nximport] %s: its SHA-256 differs from the package's metadata: checking its sections' hash trees\n",
+                e->name.c_str());
+        try {
+            Nca nca(e->data, impl_->keys, impl_->tickets);
+            for (auto &s : nca.sections()) {
+                if (s.fs_type == FS_PFS0) {
+                    nca.open_pfs0(s);  // (its data checked whole against its hash table)
+                } else if (s.enc_type == ENC_CTR_EX) {
+                    // an update's patch section: its hashes cover the patched RomFS, rebuilt with the base (bktr.h)
+                    if (impl_->has_update && t.first == &impl_->update && t.second->type == 1 /* Program */)
+                        read_all(*impl_->romfs_image);
+                } else if (s.hash_type == HASH_IVFC) {
+                    read_all(*nca.open_romfs(s));
+                }
+            }
+        } catch (const Cancelled &) {
+            throw;
+        } catch (const Error &x) {
+            throw HashMismatch(e->name + ": its SHA-256 doesn't match the package's metadata, and its contents differ too: " +
+                                   x.en() + " (a damaged file: copy it again, or dump it again)",
+                               e->name + ": o SHA-256 não bate com os metadados do pacote, e o conteúdo também difere: " +
+                                   x.pt() + " (arquivo danificado: copie de novo, ou refaça o dump)");
+        }
+        fprintf(stderr, "[nximport] %s: every section matches its hash tree: only bytes outside the hashed contents differ "
+                        "(its header, rewritten by the dump or conversion tool, or padding), the contents are intact\n", e->name.c_str());
+        header_only.push_back(e->name);
     }
+    return header_only;
 }
 
 std::string Importer::base_program() const { return impl_->base.program_name; }
