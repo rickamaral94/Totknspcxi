@@ -661,6 +661,10 @@ static void tab_display(void) {
                "With Sync lag off: the GPU reads the game's per-draw constants where the game keeps them instead of copies - "
                "less work for the render thread. Being tested: if Link's legs sink into the ground with it on, leave it off. "
                "Applies at once.");
+    opt_toggle("ADPF: the game's threads (experimental)", &g_settings.adpf_workers, false,
+               "Adds the game's busiest threads (up to 3) to Android's performance hint session, beside the presenting and "
+               "render threads, so a late frame raises their clocks too. Gained nothing in BOTW; measure it with Settings > "
+               "Files > Compare: ADPF threads. Applies at once.");
     opt_toggle("Native game code (experimental)", &g_settings.native_code, false,
                "Runs the game's own code directly on the phone's CPU instead of the game code built at setup: no build "
                "needed. An experiment - report what goes wrong. Applies the next time the game starts.");

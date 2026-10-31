@@ -43,6 +43,7 @@ typedef struct {
     bool shader_int32;    // shader address math in 32-bit words even where the driver offers 64-bit (vulkan/exec.c)
     bool files_in_place;  // Android: a setup reads the picked romfs/ where it is, no copy (services/fs.c); off by default
     bool native_code;     // Android: the game's own code on the CPU, no build of it (runtime/native.c); off by default
+    bool adpf_workers;    // Video > ADPF: the game's threads (experimental): the busiest join the hint session (platform/android.c)
     bool cbuf_inplace;    // Video > Constant buffers read in place (experimental; only with Sync lag off): vulkan/exec.c
     bool sync_lag;        // Android: the game's next frame overlaps the GPU's last (nvn/objects.c nvnSyncWait); on by default
     // Driver compatibility (the start screen's Settings > Prelaunch, ui/launcher.mm; from LASRecompAndroid), for GPUs

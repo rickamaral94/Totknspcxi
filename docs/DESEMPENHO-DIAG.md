@@ -158,3 +158,35 @@ caminho crítico quando o jogo espera a GPU.
 - **Como avaliar no aparelho:** com o Sync lag desligado, rode **Medir e comparar** num trecho de jogo e compare a CPU
   da thread de render e o intervalo de present dos dois lados. Depois jogue com a opção ligada olhando os pés do Link
   parado em ladeiras, a água e o terreno ao longe. Se não houver artefato, ela pode passar a ser o padrão.
+
+## Resolução dinâmica (TOTK)
+
+Em **Vídeo > Resolução interna > Dinâmica**, a escala da cena vai de 0,5 a 1, em passos de 0,05. Veio do
+BOTWRecompAndroid (`82ece27` e as mudanças anteriores a ele), sem a parte da geração de quadros. A cópia do TOTK era
+mais antiga e nem recebia o tempo de GPU: o `output_scale` era chamado com `-1`, e só o tempo de quadro decidia.
+
+- **Tempo de GPU pela janela inteira:** o total ocupado da GPU (`gpu_busy_total`) no início e no fim de cada janela de
+  30 quadros, dividido pelos quadros. O valor por quadro chega em lotes; no BOTW, a média só dos quadros com leitura
+  dobrava o valor. Uma janela sem nenhuma leitura não decide nada.
+- **Só baixa quando a GPU é o limite:** o quadro precisa estar lento e a GPU ocupada na maior parte dele. Quando a CPU
+  segura o quadro, baixar a resolução só deixa a imagem mais mole. O TOTKDroid aponta a thread de render como o
+  limite.
+- **Meta:** 60 fps só com Taxa de quadros em 60 (`rt_fps60`) e fora de cutscene (`rt_cutscene_now`, que segura 30).
+  No resto, 30. No BOTW, mirar no 60 do Auto levou a escala ao piso enquanto o jogo ficava em 30.
+- **Ao subir:** quando a escala sobe e logo precisa voltar, a próxima subida espera mais (`g_dyn_probe_wait`), para
+  não ficar realocando os alvos a cada par de segundos.
+- **Teste no host:** `tools/dynres_tests/test_dynres.c` cobre a cena presa na CPU (a escala fica), a presa na GPU (a
+  escala desce), a folga (sobe de volta), a meta de 60, a cutscene em 30 e a janela sem timestamps (não decide).
+
+## ADPF com as threads do jogo (TOTK)
+
+Veio do BOTWRecompAndroid (`e984490`, `14ba8c7`). A sessão de dicas de desempenho do Android tem a thread que
+apresenta e a de render. Com **Vídeo > ADPF: as threads do jogo (experimental)**, entram também, a cada 2 s, até 3
+threads do jogo que mais usaram CPU (`kernel_busiest_threads`), cada uma com mais de 15% do tempo. Uma thread que já
+está na sessão continua enquanto estiver entre as 4 mais ocupadas, para o conjunto não oscilar. Assim, um quadro
+atrasado sobe o clock de quem trabalha.
+
+- **Desligado por padrão:** no BOTW não houve ganho (26,3 quadros reais por segundo com elas contra 27,3 sem), e os
+  clocks ficaram mais altos. `LARECOMP_ADPF_WORKERS=0/1` força.
+- **Comparar:** Configurações > Arquivos tem agora dois botões, **Comparar: constant buffers** e **Comparar: threads no
+  ADPF**. Cada um alterna o seu item a cada 10 s, e o relatório mostra os quadros por segundo de cada lado.

@@ -1613,15 +1613,17 @@ static void prelaunch_tab(float sc) {
             else {
                 if (ImGui::Button(tr("Measure performance (60 s)"))) diag_request(60);
                 ImGui::SameLine();
-                if (ImGui::Button(tr("Measure and compare (120 s)"))) diag_request_ab(120);
+                if (ImGui::Button(tr("Compare: constant buffers (120 s)"))) diag_request_ab_feature(120, 1);
+                ImGui::SameLine();
+                if (ImGui::Button(tr("Compare: ADPF threads (120 s)"))) diag_request_ab_feature(120, 2);
                 if (st == 3) ImGui::Text(tr("Measurement done: the report is in the log and in %s"), msg);
             }
             ImGui::TextDisabled("%s", tr("In the next game session, records 60 s of gameplay once you have played 5 s out of "
                                          "the menus: where each frame's time goes (the game's threads, the GPU, the clocks). "
                                          "A line in the corner shows it. Play the same stretch as usual, then send the log. "
-                                         "Measure and compare: 120 s, the change being tested (now: the constant buffers read in "
-                                         "place, with Sync lag off) turned on and off every 10 s, so both share the clocks and "
-                                         "the heat."));
+                                         "Compare: 120 s, the change being tested turned on and off every 10 s, so both share the "
+                                         "clocks and the heat - the constant buffers read in place (with Sync lag off), or the "
+                                         "game's busiest threads in the ADPF session."));
         }
         ImGui::PopTextWrapPos();
         if (changed) settings_save();

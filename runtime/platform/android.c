@@ -30,6 +30,7 @@
 #include "../paths.h"
 #include "../platform.h"
 #include "../rt.h"
+#include "../settings.h"
 #include "../../android/common/guest_window.h"
 
 uint64_t g_guest_lo;  // the window's start (rt.h GUEST_LO), set by plat_reserve_guest before main()
@@ -873,6 +874,64 @@ static void adpf_work_locked(int slot, uint64_t work_ns, uint64_t target_ns, uin
                 } else {
                     s_errors++;
                     s_last_error = errno;
+                }
+            }
+        }
+        // The game's own busiest threads too (from BOTWRecompAndroid; Video > ADPF: the game's threads, off by default,
+        // or LARECOMP_ADPF_WORKERS=0/1). The presenting thread mostly waits for them - in BOTW 0.6 ms of CPU a frame,
+        // against 4-7 ms for the main thread and each of two workers, at 1.9 of the big cores' 3.2 GHz (Odin 2,
+        // 2026-10-30) - so the boost a late frame earns goes to threads with nothing to do. Every 2 s: up to 3 game
+        // threads that used the most CPU (each over 15% of the time; one already in stays while it is among the 4
+        // busiest, so the set doesn't flicker). In BOTW it gained nothing (26.3 real frames a second with them, 27.3
+        // without, the clusters higher); TOTK's limit is its render thread, also in the session already - to measure:
+        // Settings > Files > Measure and compare (ADPF) turns it on and off every 10 s (diag.c g_diag_ab).
+        if (slot == 0 && session[0] && s_presenting_tid > 0 && s_render_tid > 0) {
+            static int workers_env = -2, ncur, changes;
+            static uint64_t pick_at;
+            static int32_t cur[5];
+            if (workers_env == -2) { const char *e = getenv("LARECOMP_ADPF_WORKERS"); workers_env = e ? atoi(e) != 0 : -1; }
+            extern volatile int g_diag_ab;
+            extern int g_diag_ab_feature;
+            extern int kernel_busiest_threads(int32_t *tids, int max, double min_share, int32_t skip);
+            bool want = g_diag_ab >= 0 && g_diag_ab_feature == 2 ? g_diag_ab == 1
+                      : workers_env >= 0                          ? workers_env != 0
+                                                                  : g_settings.adpf_workers;
+            uint64_t now = plat_now_ns();
+            if (now >= pick_at || (!want && ncur > 2)) {
+                pick_at = now + 2000000000ull;
+                int32_t w[4], tids[5] = {s_presenting_tid, s_render_tid};
+                int nw = kernel_busiest_threads(w, 4, 0.15, s_presenting_tid), n = 2;
+                if (want) {
+                    for (int i = 2; i < ncur; i++)  // (the ones in already, while still among the busiest)
+                        for (int j = 0; j < nw; j++) if (w[j] == cur[i]) { tids[n++] = cur[i]; w[j] = 0; break; }
+                    for (int j = 0; j < nw && n < 5; j++) if (w[j] && w[j] != s_render_tid) tids[n++] = w[j];
+                }
+                bool same = n == ncur;
+                for (int i = 0; same && i < n; i++) {
+                    bool in = false;
+                    for (int j = 0; j < ncur; j++) in |= cur[j] == tids[i];
+                    same = in;
+                }
+                if (!same && (n > 2 || ncur > 2)) {
+                    int ok = set_threads && set_threads(session[0], tids, (size_t)n) == 0;
+                    if (!ok) {  // (API < 34: a new session with them)
+                        if (close_session) close_session(session[0]);
+                        session[0] = create(m, tids, (size_t)n, (int64_t)target[0]);
+                        s_recreated++;
+                        ok = session[0] != NULL;
+                    }
+                    if (ok) {
+                        memcpy(cur, tids, sizeof tids), ncur = n, s_session_threads = n;
+                        if (changes++ < 12)
+                            LOG("[android] performance hint session: %d threads (the presenting and render threads + %d of "
+                                "the game's busiest)\n", n, n - 2);
+                    } else {
+                        s_errors++;
+                        s_last_error = errno;
+                        ncur = 0;
+                    }
+                } else if (!same) {
+                    memcpy(cur, tids, sizeof tids), ncur = n;  // (the two of before: already the session's)
                 }
             }
         }

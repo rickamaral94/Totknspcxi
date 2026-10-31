@@ -50,6 +50,7 @@ Settings g_settings = {
     .upscaler = UPSCALE_SGSR1,  // (one pass: ~1 ms on the Adreno 830 to 2560x1440, FSR 1's two ~2.7 ms; 40 fps against 38)
     .native_code = false,       // (an experiment: runtime/native.c)
     .cbuf_inplace = false,
+    .adpf_workers = false,      // (BOTW: no gain, 26.3 real frames a second with them against 27.3, higher clocks)
     .sync_lag = false,          // (on: a few more fps, the CPU's reads of GPU results a frame old - nvn/objects.c nvnSyncWait;
                                 // BOTW saw Link's legs sink and white water with it. Off in TOTK until tested there)
     .out_lines = OUT_AUTO,      // (POCO F7 Ultra, 3200x1440, 1.8.2's Great Plateau: GPU 22.8 ms a frame at the screen's,
@@ -192,6 +193,7 @@ void settings_reset_defaults(void) {
     g_settings.fps_mode = d->fps_mode;
     g_settings.shader_int32 = d->shader_int32;
     g_settings.cbuf_inplace = d->cbuf_inplace;
+    g_settings.adpf_workers = d->adpf_workers;
     g_settings.sync_lag = d->sync_lag;
     g_settings.files_in_place = d->files_in_place;
     g_settings.native_code = d->native_code;
@@ -237,6 +239,7 @@ void settings_load(void) {
         else if (!strcmp(key, "shader_int32")) g_settings.shader_int32 = atoi(val) != 0;
         else if (!strcmp(key, "sync_lag")) g_settings.sync_lag = atoi(val) != 0;
         else if (!strcmp(key, "cbuf_inplace")) g_settings.cbuf_inplace = atoi(val) != 0;
+        else if (!strcmp(key, "adpf_workers")) g_settings.adpf_workers = atoi(val) != 0;
         else if (!strcmp(key, "files_in_place")) g_settings.files_in_place = atoi(val) != 0;
         else if (!strcmp(key, "native_code")) g_settings.native_code = atoi(val) != 0;
         else if (!strcmp(key, "gpu_heap")) g_settings.gpu_heap = !strcmp(val, "auto") ? -1 : atoi(val) != 0;
@@ -318,7 +321,7 @@ void settings_save(void) {
 #ifdef __ANDROID__
     fprintf(f, "touch_controls = %d\n", g_settings.touch_controls);
     fprintf(f, "frame_rate = %s\n", g_settings.fps_mode == 1 ? "30" : g_settings.fps_mode == 2 ? "60" : "auto");
-    fprintf(f, "cbuf_inplace = %d\n", g_settings.cbuf_inplace);
+    fprintf(f, "cbuf_inplace = %d\nadpf_workers = %d\n", g_settings.cbuf_inplace, g_settings.adpf_workers);
     fprintf(f, "shader_int32 = %d\nsync_lag = %d\nfiles_in_place = %d\nnative_code = %d\n", g_settings.shader_int32,
             g_settings.sync_lag, g_settings.files_in_place, g_settings.native_code);
     static const char *const tri[] = {"auto", "0", "1"};  // (-1 / 0 / 1)

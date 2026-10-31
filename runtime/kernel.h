@@ -51,6 +51,8 @@ struct KThread {
     bool core0_held;       // kernel.c: this thread has core 0 (it runs; the others of core 0 wait)
     bool core0_evicted;    // atomic request to reconcile core ownership at the next guest safe point
     KThread *core0_next;   // core-0 runnable queue (c0_m)
+    int32_t tid;           // its host thread's id (kernel_busiest_threads: the ADPF session)
+    uint64_t cpu_seen;     // kernel_busiest_threads: its CPU time at the last look
 #endif
 };
 

@@ -270,6 +270,7 @@ static uint64_t g_move_cost_ns;
 // A/B (diag_request_ab): the feature alternates every 10 s in the window, so both sides share the clocks and the heat
 volatile int g_diag_ab = -1;
 static int g_ab_want;
+int g_diag_ab_feature = 1;  // (what the comparison alternates: 1 constant buffers in place, 2 the ADPF session's game threads)
 static uint64_t f_next_ab;
 static uint64_t ab_cl_sum[2][CL];
 static int ab_cl_samples[2];
@@ -394,6 +395,12 @@ static void gp_report(void) {
         out("mean of the %d frames: %.2f ms - %s ms", g_gp_n, total_sum / g_gp_n, kinds);
     }
     pthread_mutex_unlock(&g_gp_lock);
+}
+
+void diag_request_ab_feature(int seconds, int feature) {
+    if (atomic_load(&g_state) == 1 || atomic_load(&g_state) == 2 || atomic_load(&g_state) == 3) return;
+    g_diag_ab_feature = feature == 2 ? 2 : 1;
+    diag_request_ab(seconds);
 }
 
 void diag_request_ab(int seconds) {
@@ -807,9 +814,16 @@ static void *report_main(void *arg) {
     stat_line("acquire (vkAcquireNextImageKHR), gameplay", f_acquire, f_n, f_flags, 1, 1);
     stat_line("present call (vkQueuePresentKHR), gameplay", f_present, f_n, f_flags, 1, 1);
     if (g_ab_want) {
-        out("-- A/B: constant buffers read in place (on / off, alternating every 10 s; gameplay frames)");
-        stat_line("present interval, in place ON ", f_interval, f_n, f_flags, 5, 5);
-        stat_line("present interval, in place OFF", f_interval, f_n, f_flags, 5, 1);
+        out("-- A/B: %s (on / off, alternating every 10 s; gameplay frames)",
+            g_diag_ab_feature == 2 ? "the game's busiest threads in the ADPF session" : "constant buffers read in place");
+        for (int a = 1; a >= 0; a--) {  // (frames a second on each side: the gameplay presents under 250 ms)
+            uint64_t k = 0, ns = 0;
+            for (int i = 0; i < f_n; i++)
+                if ((f_flags[i] & 5) == (a ? 5 : 1) && f_interval[i] < 250000000ull) k++, ns += f_interval[i];
+            if (ns) out("frames a second with it %s: %.2f (%llu in %.1f s)", a ? "ON " : "OFF", k * 1e9 / ns, (unsigned long long)k, ns / 1e9);
+        }
+        stat_line("present interval, ON ", f_interval, f_n, f_flags, 5, 5);
+        stat_line("present interval, OFF", f_interval, f_n, f_flags, 5, 1);
         stat_line("render thread CPU per interval, ON ", f_rcpu, f_n, f_flags, 5, 5);
         stat_line("render thread CPU per interval, OFF", f_rcpu, f_n, f_flags, 5, 1);
         stat_line("main thread CPU per interval, ON ", f_mcpu, f_n, f_flags, 5, 5);

@@ -437,6 +437,7 @@ static void *thread_main(void *arg) {
     KThread *t = arg;
     t_cur = t;
 #ifdef __ANDROID__
+    t->tid = (int32_t)gettid();
     plat_thread_unpin();  // (not the presenting thread's fast cores: platform.h)
 #endif
     crash_handler_install();
@@ -541,6 +542,34 @@ KThread *kernel_current_thread(void) { return t_cur; }
 // (diag.c) no address sampling with Native game code: the game's own ARM64 code runs with the thread's registers
 // rewritten (native.c), and a signal handler between its instructions is untested
 bool diag_sampler_allowed(void) { return !native_on(); }
+
+#ifdef __ANDROID__
+// (platform/android.c, the ADPF session) up to max host thread ids of the game's threads that used the most CPU since
+// the last call, busiest first, each at least min_share of the wall time between the calls; skip: one left out
+int kernel_busiest_threads(int32_t *tids, int max, double min_share, int32_t skip) {
+    static uint64_t last;
+    uint64_t now = plat_now_ns(), span = last ? now - last : 0, best[8];
+    last = now;
+    if (max > 8) max = 8;
+    int n = 0;
+    pthread_mutex_lock(&g_klock);
+    for (KThread *t = g_threads; t; t = t->anext) {
+        struct timespec ts;
+        if (!t->tid || t->finished || clock_gettime((clockid_t)((~(unsigned)t->tid << 3) | 6), &ts)) continue;
+        uint64_t cpu = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec, d = t->cpu_seen ? cpu - t->cpu_seen : 0;
+        t->cpu_seen = cpu;
+        if (t->tid == skip || !span || (double)d < min_share * (double)span) continue;
+        int i = n < max ? n++ : max;  // (insertion, busiest first; past the last: dropped)
+        while (i > 0 && best[i - 1] < d) {
+            if (i < max) best[i] = best[i - 1], tids[i] = tids[i - 1];
+            i--;
+        }
+        if (i < max) best[i] = d, tids[i] = t->tid;
+    }
+    pthread_mutex_unlock(&g_klock);
+    return n;
+}
+#endif
 
 // (diag.c) the calling thread's KThread
 bool diag_thread_identity(uint64_t *id, uint32_t *handle, int *prio) {

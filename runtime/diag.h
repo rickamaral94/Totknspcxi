@@ -53,6 +53,8 @@ void diag_request(int seconds);
 // The same, comparing a feature on and off in alternating 10 s blocks (today: the constant buffers read in place,
 // vulkan/exec.c ubo_direct); g_diag_ab: -1 no comparison running, else the feature's state for this block
 void diag_request_ab(int seconds);
+void diag_request_ab_feature(int seconds, int feature);  // 1 constant buffers in place, 2 the ADPF session's game threads
+extern int g_diag_ab_feature;
 extern volatile int g_diag_ab;
 // The measurement's state for the menu: 0 none, 1 waiting for gameplay, 2 recording, 3 done; msg: a line to show
 int diag_status(char *msg, size_t n);
