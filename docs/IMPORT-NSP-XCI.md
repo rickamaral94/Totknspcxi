@@ -1,24 +1,31 @@
 # Importar a partir de NSP/XCI (`tools/nximport`)
 
 O resto do projeto recebe o jogo **extraído**: `exefs/` + `romfs/`. Isso vale para o app, os scripts e o
-`tools/botw_dump.py`. O `nximport` é uma etapa **anterior** a esse fluxo. Ele lê os pacotes do próprio jogador (NSP ou
+`tools/totk_dump.py`. O `nximport` é uma etapa **anterior** a esse fluxo. Ele lê os pacotes do próprio jogador (NSP ou
 XCI da base e, opcionalmente, o NSP do update) com as `prod.keys`/`title.keys` do console dele e entrega os mesmos
 arquivos que a extração do hactool entregaria. O recompilador, o loader e a detecção de versão não mudam.
+
+> **Tears of the Kingdom:** o app roda só a **1.4.3** (`GAME_V_143`). O cartucho e o NSP base são a 1.0.0, então a
+> importação precisa também do **NSP do update 1.4.3** (`0100F2C0115B6800`, v720896). Sem ele, o app recusa com
+> "O jogo base sozinho é a versão 1.0.0: escolha também o update 1.4.3 (v720896)." O romfs de 1.4.3 tem 304243
+> arquivos (~16 GB); o `romfs_check_set` confere essa contagem antes de escrever qualquer coisa. O TOTK não tem DLC,
+> então a parte de DLC do BOTWRecompAndroid não foi trazida. O importador veio do BOTWRecompAndroid (mesmo código,
+> mesmos testes), com os title IDs e a versão do TOTK.
 
 > Nenhuma chave, pacote ou arquivo do jogo entra no repositório (`.gitignore`: `*.keys`, `*.nsp`, `*.xci`, `*.nca`,
 > `*.tik`, `*.nsz`, `*.xcz`). As chaves vêm do console do próprio jogador; o projeto não diz como obtê-las.
 
-## Onde ele se encaixa (conferido no upstream `4acbf40`)
+## Onde ele se encaixa (conferido no upstream TOTKDroid `cc4f134`)
 
 | Peça | Hoje | Com o nximport |
 | --- | --- | --- |
-| Versão do jogo | build id do NSO `main` em +0x40: `runtime/loader.c` `game_version_of_build` (app: `nativeGameVersion`) e `tools/botw_dump.py` | Sem mudança. O nximport não tem lista de versões própria: só confere o title ID pelo CNMT. |
+| Versão do jogo | build id do NSO `main` em +0x40: `runtime/loader.c` `game_version_of_build` (app: `nativeGameVersion`) e `tools/totk_dump.py` | Sem mudança. O nximport não tem lista de versões própria: só confere o title ID pelo CNMT. |
 | App, "Game files" | `importGame()` (Java), depois `nativeImportBegin` (`runtime/ui/launcher.mm`), que **apaga o setup anterior na hora**, copia `exefs/` e monta o `romfs.bin` com `romfs_build_entries` | Seção nova **Importar NSP/XCI**, com fluxo transacional próprio (`package_import.cpp`). A importação por pasta continua como era. |
 | Builder do `romfs.bin` | `runtime/romfs_build.c`: `fdopen` + `fread` sequencial de `entries[i].size` bytes, depois `fgetc == EOF`. Sem seek, sem fstat. Três tentativas por arquivo. Uma thread. | **Sem alteração**, alimentado pela `nx::RomfsFeed` (socketpair). A prova de compatibilidade está em `tests/test_feed.cpp`. |
-| Scripts | `android/build_gamelib.sh <exefs>`, `android/push_game.sh <pasta com exefs/ e romfs/>` | Também aceitam `--nsp/--xci … [--update …] --keys … [--title-keys …]`. Chamam `android/nximport_dump.sh`, que roda o CLI e depois o `tools/botw_dump.py`, e seguem o fluxo de sempre. |
+| Scripts | `android/build_gamelib.sh <exefs>`, `android/push_game.sh <pasta com exefs/ e romfs/>` | Também aceitam `--nsp/--xci … [--update …] --keys … [--title-keys …]`. Chamam `android/nximport_dump.sh`, que roda o CLI e depois o `tools/totk_dump.py`, e seguem o fluxo de sempre. |
 
-Layout gerado pelo CLI: `Dump/01007EF00011E000/exefs/{main,main.npdm,rtld,sdk,subsdk*}` e
-`Dump/01007EF00011E000/romfs/…`. Ele grava primeiro em `01007EF00011E000.partial` e só renomeia no fim.
+Layout gerado pelo CLI: `Dump/0100F2C0115B6000/exefs/{main,main.npdm,rtld,sdk,subsdk*}` e
+`Dump/0100F2C0115B6000/romfs/…`. Ele grava primeiro em `0100F2C0115B6000.partial` e só renomeia no fim.
 
 ## Uso (CLI de desktop)
 
@@ -37,13 +44,13 @@ As mensagens saem em português quando `LANG` começa com `pt`. `--programs` imp
 ```bash
 android/build_gamelib.sh --nsp base.nsp --update update.nsp --keys prod.keys   # importa e compila o game code
 android/push_game.sh --nsp base.nsp --update update.nsp --keys prod.keys       # importa e envia ao aparelho
-NXIMPORT_OUT=Dump/v160 android/push_game.sh --xci jogo.xci --update u160.nsp --keys prod.keys
+NXIMPORT_OUT=Dump/v143 android/push_game.sh --xci jogo.xci --update u143.nsp --keys prod.keys
 ```
 
 `android/nximport_dump.sh`:
 - compila o CLI em `build/nximport-host` na primeira vez;
-- grava em `${NXIMPORT_OUT:-Dump}/01007EF00011E000`, e se recusa a sobrescrever um dump que já existe;
-- roda o `tools/botw_dump.py` quando há um Python com lz4 (`tools/venv`). É ele quem diz a versão.
+- grava em `${NXIMPORT_OUT:-Dump}/0100F2C0115B6000`, e se recusa a sobrescrever um dump que já existe;
+- roda o `tools/totk_dump.py` quando há um Python com lz4 (`tools/venv`). É ele quem diz a versão.
 
 ## Chaves
 
@@ -83,7 +90,7 @@ NXIMPORT_OUT=Dump/v160 android/push_game.sh --xci jogo.xci --update u160.nsp --k
   - A chave vem da key area (índice 2, cifrada com `key_area_key_*_<rev>`) ou da title key.
   - O hash de cada FS header é conferido contra o header da NCA.
 - **Conteúdo pelo CNMT**:
-  - A base precisa de um CNMT `Application` de `01007EF00011E000`. O update, de um `Patch` de `01007EF00011E800`
+  - A base precisa de um CNMT `Application` de `0100F2C0115B6000`. O update, de um `Patch` de `0100F2C0115B6800`
     cujo `application_id` é o da base.
   - A NCA Program é a do **content ID** listado no CNMT, conferida pelo tamanho; com `--verify-nca`, também pelo
     SHA-256.
@@ -252,5 +259,5 @@ Testes de host (`tests/test_package_import.cpp`, com o `romfs_build.c` de verdad
 | --- | --- | --- |
 | 1 | CLI com base (NSP/XCI, chaves, NCA, integridade, romfs, testes) | **feita** |
 | 2 | Update (BKTR: IndirectStorage + AesCtrEx), `verify.sh`, scripts | **feita**: BKTR implementado; **falta validar** com arquivos reais e o hactool |
-| 3 | App Android (SAF, instalação transacional, serviço, chaves) | **feita**: compila (NDK e javac); **falta** a build do APK e o teste no aparelho |
-| 4 | APK compilado e importação completa no aparelho | pendente |
+| 3 | App Android (SAF, instalação transacional, serviço, chaves) | **feita** no BOTW; no TOTK: javac e checagem de sintaxe do `launcher.mm` (clang, headers do SDL3/Vulkan) sem erros; testes do host 55/55 |
+| 4 | APK do TOTK compilado (NDK) e importação completa no aparelho (base + update 1.4.3) | pendente |
