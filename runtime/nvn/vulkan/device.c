@@ -1744,6 +1744,16 @@ bool vk_adreno_8xx(const char *name) {
     int n = atoi(a);
     return n >= 800 && n < 900;
 }
+// Turnip's low-resolution Z, Automatic: the Adreno 8xx GPUs, and the Adreno 740 - measured in BOTWRecompAndroid on the
+// Odin 2 Portal (Turnip 27.0.0-devel, 2026-10-30): the GPU's time per real frame 14.9 ms with it at 1x against 16.5 ms
+// without it at 0.55 scale, and no drawing missing or flickering (docs/DESEMPENHO-DIAG.md). Other Adreno 7xx stay off.
+bool vk_lrz_auto(const char *name) {
+    if (vk_adreno_8xx(name)) return true;
+    const char *a = name ? strstr(name, "Adreno") : NULL;
+    if (!a) return false;
+    while (*a && (*a < '0' || *a > '9')) a++;
+    return atoi(a) == 740;
+}
 // A Turnip path's setting (-1 Automatic, 1 on, 0 off) for this GPU
 bool vk_turnip_path_on(int setting) { return setting < 0 ? vk_adreno_8xx(g_vk.props.deviceName) : setting != 0; }
 static bool g_lrz_at_start = true;
@@ -1791,7 +1801,7 @@ void ui_window_init(void) {
                 model[strcspn(model, "\r\n")] = 0;
             }
             if (!model[0]) snprintf(model, sizeof model, "%s", g_settings.gpu_model);
-            lrz = !model[0] || vk_adreno_8xx(model);
+            lrz = !model[0] || vk_lrz_auto(model);
         }
         g_lrz_at_start = lrz != 0;
         if (!lrz && !getenv("TU_DEBUG")) setenv("TU_DEBUG", "nolrz", 1);

@@ -190,3 +190,15 @@ atrasado sobe o clock de quem trabalha.
   clocks ficaram mais altos. `LARECOMP_ADPF_WORKERS=0/1` força.
 - **Comparar:** Configurações > Arquivos tem agora dois botões, **Comparar: constant buffers** e **Comparar: threads no
   ADPF**. Cada um alterna o seu item a cada 10 s, e o relatório mostra os quadros por segundo de cada lado.
+
+## LRZ do Turnip: Automático também na Adreno 740 (TOTK)
+
+O LRZ (Z de baixa resolução) é o teste de profundidade antecipado do Turnip. Veio do BOTWRecompAndroid (`dd59992`):
+no **Automático** ele fica ligado nas Adreno 8xx e agora também na Adreno 740 (`vk_lrz_auto`). As outras Adreno 7xx
+continuam desligadas, porque não foram testadas.
+
+- **Medição no BOTW** (Odin 2 Portal, Turnip 27.0.0-devel): 14,9 ms de GPU por quadro com LRZ em 1x, contra 16,5 ms
+  sem ele em escala 0,55. Nenhum desenho sumiu ou piscou.
+- **No TOTK ainda não foi testado.** Se algo sumir ou piscar numa Adreno 740, desligue em Configurações > Pré-início >
+  Compatibilidade de driver > LRZ. A troca vale quando o app reinicia, e a linha `run:` do relatório mostra se ele
+  estava ligado.
