@@ -49,6 +49,10 @@ typedef struct {
     bool custom_border, divisor, host_import, shader_int64;
     bool dyn_render;              // VK_KHR_dynamic_rendering in use; without it, classic render passes (rpcompat.c)
     bool sync2;                   // synchronization2 in use; without it, Vulkan 1.0 barriers (device.c sync1_*)
+    bool framegen;                // made with the frame generation's features (vulkan/framegen.c): Video > Frame generation
+    bool display_timing;          // VK_GOOGLE_display_timing enabled (only with framegen): images given a presentation time
+    uint64_t next_present_ns;     // (vk_frame_end) the next image's desired presentation time, CLOCK_MONOTONIC; 0: as soon as possible
+    bool sc_remake;               // the swapchain is made again before the next image (its present mode changed)
     bool eds;                     // extended dynamic state in use; without it, those states (and extended dynamic state
                                   // 2's) baked into pipelines (exec.c PipeKey.fx)
     bool eds2;                    // extended dynamic state 2 in use; without it, depth bias and primitive restart are
@@ -129,6 +133,10 @@ typedef struct TexBackend {
     VkFormat fmt_twin;  // (Android) a format-listed render target (textures.c, UBWC): the one other view format allowed
     bool fmt_listed;
 } TexBackend;
+// (exec.c) the presented image in two steps, for a target that isn't the window image (vulkan/framegen.c)
+VkImageView vk_present_source(VkCommandBuffer cb, TexBackend *b, float vw, float vh, const float pv[8]);
+void vk_present_draw_view(VkCommandBuffer cb, VkImageView src, VkFormat fmt, VkExtent2D full, float vx, float vy, float vw, float vh,
+                          const float pv[8]);
 
 VkFormat vk_view_format(NvnTexture *t, VkFormat vf);  // the format a view asking for vf gets (textures.c)
 TexBackend *vk_tex(NvnTexture *t, bool for_render);  // backend image (uploads CPU contents unless for_render)

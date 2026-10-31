@@ -101,6 +101,9 @@ android/run_boot.sh 120                                      # start the game, l
 - [Mbed TLS](https://github.com/Mbed-TLS/mbedtls) (Apache 2.0, AES and SHA-256 for the NSP/XCI import) and
   [hactool](https://github.com/SciresM/hactool) by SciresM (ISC), the reference for the Switch package formats (no code
   taken) and for `tools/nximport/verify.sh`.
+- [lsfg-vk](https://lsfg-vk.dev) 1.0.0 by PancakeTAS (MIT) through [GameNative/lsfg-vk-android](https://github.com/GameNative/lsfg-vk-android)
+  (MIT), with [DXVK](https://github.com/doitsujin/dxvk)'s dxbc (zlib) and [pe-parse](https://github.com/trailofbits/pe-parse) (MIT):
+  the frame generation's shaders, translated on the phone from the user's own Lossless.dll (none included).
 - Upscaling and anti-aliasing: [AMD FidelityFX FSR 1](https://github.com/GPUOpen-Effects/FidelityFX-FSR) (MIT),
   [Qualcomm Snapdragon GSR](https://github.com/SnapdragonStudios/snapdragon-gsr) (BSD-3-Clause),
   [SMAA](https://github.com/iryoku/smaa) (MIT).

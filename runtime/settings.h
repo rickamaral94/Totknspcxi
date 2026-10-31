@@ -39,6 +39,11 @@ typedef struct {
     bool touch_controls;  // on-screen controls while no controller is connected (ui/touch_controls.mm)
     int overlay_style;    // Show FPS's overlay (ui/perf_overlay.mm): 0 full, 1 compact (one line)
     float overlay_pos[2]; // its top left, a share of the screen, dragged there with a finger (negative: the corner)
+    bool framegen;          // Video > Frame generation 2x (Lossless.dll's shaders): applies when the game starts (vulkan/framegen.cpp)
+    int fg_flow;            // its flow scale: 0 100%, 1 75%, 2 50% (the motion estimated at that share of the size)
+    bool fg_performance;    // its performance mode (LSFG 3.1P)
+    bool fg_hud;            // the HUD kept sharp in the generated frames: the real frame's pixels where the HUD is (framegen.c)
+    int fg_mult;            // its multiplier: 0 2x (30 -> 60), 1 3x (40 -> 120), 2 4x (30 -> 120)
     int fps_mode;         // 0: the game's own choice (30 / 60, the frame pacer), 1: 30 fps, 2: 60 fps
     bool shader_int32;    // shader address math in 32-bit words even where the driver offers 64-bit (vulkan/exec.c)
     bool files_in_place;  // Android: a setup reads the picked romfs/ where it is, no copy (services/fs.c); off by default

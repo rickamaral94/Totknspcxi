@@ -33,3 +33,7 @@ testes/
 *.nca
 *.ncz
 *.tik
+
+# Lossless Scaling: the user's own DLL and the shaders translated from it never go into the repository
+Lossless.dll
+*.spv

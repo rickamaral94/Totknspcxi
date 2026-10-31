@@ -808,6 +808,48 @@ static void create_device(void) {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR, .pipelineExecutableInfo = VK_TRUE};
     if (g_vk.exec_stats) { pex.pNext = f.pNext; f.pNext = &pex; }
 #endif
+#ifdef __ANDROID__
+    {   // Frame generation (vulkan/framegen.c, docs/FRAMEGEN.md): only with Video > Frame generation on and the
+        // Lossless.dll's shaders installed, the features their capabilities need (lsfg_extract's MANIFEST); otherwise
+        // the device is made exactly as without it
+        extern bool fg_device_wanted(void), fg_cap(const char *name);
+        extern void fg_device_made(bool ok, const char *why);
+        g_vk.framegen = false;
+        if (fg_device_wanted()) {
+            VkPhysicalDeviceVulkan12Features m12 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
+            VkPhysicalDeviceFeatures2 m = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &m12};
+            if (g_vk.api >= VK_API_VERSION_1_2) vkGetPhysicalDeviceFeatures2(g_vk.phys, &m);
+            const char *no = g_vk.api < VK_API_VERSION_1_3 ? "the driver is below Vulkan 1.3 (the shaders are SPIR-V 1.6)"
+                           : !m12.vulkanMemoryModel ? "the driver has no vulkanMemoryModel"
+                           : fg_cap("VulkanMemoryModelDeviceScope") && !m12.vulkanMemoryModelDeviceScope ? "the driver has no vulkanMemoryModelDeviceScope"
+                           : !h->shaderStorageImageWriteWithoutFormat ? "the driver has no shaderStorageImageWriteWithoutFormat"
+                           : fg_cap("StorageImageReadWithoutFormat") && !h->shaderStorageImageReadWithoutFormat ? "the driver has no shaderStorageImageReadWithoutFormat"
+                           : !h->shaderStorageImageExtendedFormats ? "the driver has no shaderStorageImageExtendedFormats" : NULL;
+            if (!no) {
+                f12.vulkanMemoryModel = VK_TRUE;
+                f12.vulkanMemoryModelDeviceScope = m12.vulkanMemoryModelDeviceScope;
+                b->shaderStorageImageWriteWithoutFormat = VK_TRUE;
+                b->shaderStorageImageReadWithoutFormat = h->shaderStorageImageReadWithoutFormat;
+                b->shaderStorageImageExtendedFormats = VK_TRUE;
+                g_vk.framegen = true;
+                // (and the presentation times the frame generation paces its images with, where the platform has them -
+                // Android's swapchain: VK_GOOGLE_display_timing - instead of sleeping on the render thread)
+                uint32_t ne = 0;
+                vkEnumerateDeviceExtensionProperties(g_vk.phys, NULL, &ne, NULL);
+                VkExtensionProperties *ep2 = calloc(ne ? ne : 1, sizeof *ep2);
+                if (ep2 && vkEnumerateDeviceExtensionProperties(g_vk.phys, NULL, &ne, ep2) == VK_SUCCESS)
+                    for (uint32_t i = 0; i < ne && n_ext < 32; i++)
+                        if (!strcmp(ep2[i].extensionName, VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME) && !getenv("LARECOMP_FG_NO_TIMING")) {
+                            ext[n_ext++] = VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME;
+                            g_vk.display_timing = true;
+                        }
+                free(ep2);
+                LOG("[fg] presentation times (VK_GOOGLE_display_timing): %s\n", g_vk.display_timing ? "yes" : "no: images paced by waiting");
+            }
+            fg_device_made(!no, no);
+        }
+    }
+#endif
     float prio = 1.0f;
     VkDeviceQueueCreateInfo qi = {.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = g_vk.qfam,
                                   .queueCount = 1, .pQueuePriorities = &prio};
@@ -901,6 +943,10 @@ static VkPresentModeKHR present_mode(void) {
     // a throttled / captured / busy compositor slowed the whole game (4-21 fps with the GPU mostly idle; mailbox:
     // 60). No tearing. LARECOMP_VK_PRESENT=fifo|immediate|mailbox to choose.
     const char *e = getenv("LARECOMP_VK_PRESENT");
+    // (the frame generation with presentation times: FIFO, where queued images wait for their time instead of
+    // replacing each other - vulkan/framegen.c)
+    extern bool fg_wants_fifo(void);
+    if (!e && fg_wants_fifo()) e = "fifo";
     VkPresentModeKHR want = !e || !strcmp(e, "mailbox") ? VK_PRESENT_MODE_MAILBOX_KHR
                           : !strcmp(e, "immediate") ? VK_PRESENT_MODE_IMMEDIATE_KHR : VK_PRESENT_MODE_FIFO_KHR;
     uint32_t n = 0;
@@ -951,7 +997,10 @@ static void create_swapchain(void) {
 #endif
     for (uint32_t i = 0; i < nf; i++)
         if (fmts[i].format == VK_FORMAT_B8G8R8A8_UNORM && fmts[i].colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) { sf = fmts[i]; break; }
-    uint32_t count = caps.minImageCount + 1;
+    extern bool fg_wants_fifo(void);
+    extern int fg_queued_images(void);
+    // (frame generation: its images of a real frame queued at once - 2 to 4)
+    uint32_t count = caps.minImageCount + 1 + (fg_wants_fifo() ? (uint32_t)fg_queued_images() - 1 : 0);
     if (caps.maxImageCount && count > caps.maxImageCount) count = caps.maxImageCount;
     if (count > 8) count = 8;  // (asked for: the driver may make more, up to VK_MAX_SWAP_IMAGES)
     if (count < caps.minImageCount) count = caps.minImageCount;
@@ -1072,19 +1121,46 @@ static Frame cur_frame;
 // Acquire the next window image and begin rendering into it (cleared to `clear`). Returns false when there is
 // nothing to draw into (minimised window).
 static uint64_t diag_acquire_ns, diag_present_ns;  // (diag.c: the last frame's, while measuring)
-bool vk_frame_begin(const float clear[4]) {
-    cur_frame.ok = false;
+void vk_diag_presented(void) { diag_present(diag_acquire_ns, diag_present_ns); }  // (vulkan/framegen.c: each image it shows)
+#ifdef __ANDROID__
+#include <android/native_window.h>
+#include <dlfcn.h>
+// (vulkan/framegen.c) the frame rate the window's content has, for Android to pick the screen's (0: none in particular)
+void vk_set_frame_rate(float hz) {
+    ANativeWindow *w = (ANativeWindow *)SDL_GetPointerProperty(SDL_GetWindowProperties(window), SDL_PROP_WINDOW_ANDROID_WINDOW_POINTER, NULL);
+    if (!w) return;
+    static int32_t (*set_rate)(ANativeWindow *, float, int8_t);  // (libnativewindow, API 30: taken at run time)
+    if (!set_rate) {
+        void *lib = dlopen("libnativewindow.so", RTLD_NOW);
+        if (lib) set_rate = (int32_t (*)(ANativeWindow *, float, int8_t))dlsym(lib, "ANativeWindow_setFrameRate");
+        if (!set_rate) { LOG("[vk] ANativeWindow_setFrameRate unavailable\n"); return; }
+    }
+    int r = set_rate(w, hz, ANATIVEWINDOW_FRAME_RATE_COMPATIBILITY_FIXED_SOURCE);
+    LOG("[vk] frame rate asked of the window: %.0f Hz (%d)\n", hz, r);
+}
+#endif
+
+// A window with a swapchain of its size (made again when it changed), without acquiring an image
+static bool window_ready(void) {
     int w, h;
     SDL_GetWindowSizeInPixels(window, &w, &h);
     if (!w || !h) return false;  // minimised
 #ifdef __ANDROID__
     if (!android_surface_ready()) return false;
 #endif
-    if (!g_vk.swapchain || (uint32_t)w != g_vk.sc_extent.width || (uint32_t)h != g_vk.sc_extent.height) recreate_swapchain();
-    if (!g_vk.swapchain) return false;
+    if (!g_vk.swapchain || g_vk.sc_remake || (uint32_t)w != g_vk.sc_extent.width || (uint32_t)h != g_vk.sc_extent.height) {
+        g_vk.sc_remake = false;
+        recreate_swapchain();
+    }
+    return g_vk.swapchain != VK_NULL_HANDLE;
+}
+
+bool vk_frame_begin(const float clear[4]) {
+    cur_frame.ok = false;
+    if (!window_ready()) return false;
     static int trace = -1;
     if (trace < 0) trace = getenv("LARECOMP_VK_TRACE") != NULL;
-    if (trace) LOG("[vk] frame begin %dx%d (swapchain %ux%u)\n", w, h, g_vk.sc_extent.width, g_vk.sc_extent.height);
+    if (trace) LOG("[vk] frame begin (swapchain %ux%u)\n", g_vk.sc_extent.width, g_vk.sc_extent.height);
     slot = (slot + 1) % FRAMES;
     if (!acquire_sem[slot]) acquire_sem[slot] = binary_semaphore();
 #ifdef __ANDROID__
@@ -1191,6 +1267,11 @@ void vk_frame_end(const char *shot_path) {
     vk_submit_extra(cur_frame.acquired, done_sem[img], VK_NULL_HANDLE);
     VkPresentInfoKHR pi = {.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .waitSemaphoreCount = 1, .pWaitSemaphores = &done_sem[img],
                            .swapchainCount = 1, .pSwapchains = &g_vk.swapchain, .pImageIndices = &img};
+    static uint32_t present_id;
+    VkPresentTimeGOOGLE when = {.presentID = ++present_id, .desiredPresentTime = g_vk.next_present_ns};
+    VkPresentTimesInfoGOOGLE times = {.sType = VK_STRUCTURE_TYPE_PRESENT_TIMES_INFO_GOOGLE, .swapchainCount = 1, .pTimes = &when};
+    if (g_vk.display_timing && g_vk.next_present_ns) pi.pNext = &times;  // (vulkan/framegen.c: this image's time)
+    g_vk.next_present_ns = 0;
 #ifdef __ANDROID__
     uint64_t trace_start = vk_timing_trace_on() ? SDL_GetTicksNS() : 0;
 #endif
@@ -1199,6 +1280,12 @@ void vk_frame_end(const char *shot_path) {
     VkResult r = vkQueuePresentKHR(g_vk.queue, &pi);
     DIAG_POP();
     if (pres_t0) diag_present_ns = SDL_GetTicksNS() - pres_t0;
+    if (g_vk.display_timing && diag_want_gpu_ts()) {  // (while measuring: when the compositor really showed the images)
+        VkPastPresentationTimingGOOGLE past[16];
+        uint32_t np = 16;
+        if (vkGetPastPresentationTimingGOOGLE(g_vk.dev, g_vk.swapchain, &np, past) >= 0)
+            for (uint32_t i = 0; i < np; i++) diag_displayed(past[i].presentID, past[i].actualPresentTime);
+    }
 #ifdef __ANDROID__
     if (trace_start) vk_timing_trace_wait(VK_TIMING_PRESENT, SDL_GetTicksNS() - trace_start);
     if (r == VK_ERROR_OUT_OF_DATE_KHR) recreate_swapchain();  // (SUBOPTIMAL: every frame of an unrotated swapchain)
@@ -1325,7 +1412,13 @@ void backend_present(NvnTexture *t) {
     static const float black[4] = {0, 0, 0, 1};
     uint64_t t0 = SDL_GetTicksNS();
     bool diag_ts = diag_want_gpu_ts() && diag_ts_reset();
-    bool have = vk_frame_begin(black);
+#ifdef __ANDROID__
+    extern bool fg_use_now(void);  // (vulkan/framegen.c: Video > Frame generation, in play)
+    bool fg = fg_use_now() && window_ready();
+#else
+    bool fg = false;
+#endif
+    bool have = fg || vk_frame_begin(black);
     uint64_t nd = SDL_GetTicksNS() - t0;
     if (nd > 30000000) {
         static int warned;
@@ -1349,6 +1442,7 @@ void backend_present(NvnTexture *t) {
             last_dw = dw, last_dh = dh;
         }
         output_scale(dw, dh, widescreen_allowed(), SDL_GetTicksNS() / 1e9, -1, &os);
+        diag_real_frame();
 #ifdef __ANDROID__
         static int matrix_trace = -1;
         static uint64_t matrix_last;
@@ -1375,6 +1469,14 @@ void backend_present(NvnTexture *t) {
         VkCommandBuffer cb = vk_cmd();
         float pv[8] = {renderer_origin_lower_left() ? 1.0f : 0.0f, 0, 0, 0, crop[0], crop[1], crop[2], crop[3]};
         memcpy(g_shot_crop, crop, sizeof crop);
+#ifdef __ANDROID__
+        if (fg) {  // (the frame generation presents it - and the frame made before it - itself: vulkan/framegen.c)
+            extern bool fg_frame(TexBackend *b, float vx, float vy, float vw, float vh, const float pv[8]);
+            if (fg_frame(b, (float)vx, (float)vy, (float)vw, (float)vh, pv)) goto presented;
+            if (!vk_frame_begin(black)) { renderer_submit(); goto presented; }  // (it stopped: this frame as usual)
+            cb = vk_cmd();
+        }
+#endif
         if (diag_ts) vkCmdWriteTimestamp2(cb, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, diag_qp, diag_qi * 2);
         vk_present_draw(cb, b, (float)vx, (float)vy, (float)vw, (float)vh, pv);
         static long menu_at = -1;
@@ -1391,6 +1493,9 @@ void backend_present(NvnTexture *t) {
     } else {
         renderer_submit();
     }
+#ifdef __ANDROID__
+presented:;
+#endif
     extern void vk_prof_frame(uint64_t frame, uint64_t present_ns);
     vk_prof_frame(total_frames, SDL_GetTicksNS() - t0);
     frames++;
@@ -1760,6 +1865,10 @@ static bool g_lrz_at_start = true;
 // (diag.c) what the measurement ran with: the GPU, the driver and the settings that move the GPU's work
 void vk_diag_context(char *buf, size_t n) {
     extern double output_scale_dynamic_factor(void);
+    extern bool fg_overlay(float *, float *, int *);
+    float fr, fs;
+    int mult = 0;
+    bool fg = fg_overlay(&fr, &fs, &mult);
     static const char *res[] = {"Match display", "1x", "2x", "3x", "4x", "5x", "6x", "7x", "8x"};
     char rs[48];
     int m = g_settings.res_mode;
@@ -1767,10 +1876,11 @@ void vk_diag_context(char *buf, size_t n) {
     else if (m == RES_DYNAMIC) snprintf(rs, sizeof rs, "Dynamic (now %.2f)", output_scale_dynamic_factor());
     else snprintf(rs, sizeof rs, "%s", m == RES_Q75 ? ".75x" : m == RES_Q50 ? ".50x" : m == RES_Q25 ? ".25x" : "?");
     snprintf(buf, n, "GPU %s | driver %s | LRZ %s | internal resolution %s | upscaler %d | AA %d | frame rate %s | sync lag %s"
-             " | constant buffers in place %s",
+             " | constant buffers in place %s | frame generation %s%s",
              g_vk.props.deviceName, g_vk_driver_desc, g_lrz_at_start ? "on" : "off", rs, g_settings.upscaler,
              g_settings.antialias, g_settings.fps_mode == 1 ? "30" : g_settings.fps_mode == 2 ? "60" : "auto",
-             g_settings.sync_lag ? "on" : "off", g_settings.cbuf_inplace ? "on" : "off");
+             g_settings.sync_lag ? "on" : "off", g_settings.cbuf_inplace ? "on" : "off",
+             fg ? (mult == 4 ? "4x" : mult == 3 ? "3x" : "2x") : "off", fg ? (g_settings.fg_hud ? " (HUD mask on)" : " (HUD mask off)") : "");
 }
 bool vk_lrz_at_start(void) { return g_lrz_at_start; }  // (the start screen: a change needs a restart)
 const char *vk_gpu_name(void) { return g_vk.props.deviceName; }

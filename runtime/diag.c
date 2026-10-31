@@ -256,6 +256,13 @@ void diag_pop_(void) {
 // ---------------------------------------------------------------- frames
 #define FMAX 16384
 static uint64_t f_interval[FMAX], f_acquire[FMAX], f_present[FMAX], f_gpu[FMAX], f_comp[FMAX];
+static uint64_t f_shown[FMAX], f_last_shown;  // (the intervals between images as the compositor showed them)
+static uint8_t f_shown_flags[FMAX];            // (1, and 4 with the compared feature on)
+static int f_nshown;
+static uint64_t rf_n, rf_ns, rf_t, ab_real[2], ab_ns[2];  // (real frames in gameplay and their time; per A/B side)
+#if defined(__ANDROID__) && !defined(DIAG_TESTING)
+static uint64_t g_ts0[6];  // (vulkan/exec.c diag_gpu_ts_health at the window's start)
+#endif
 static uint8_t f_flags[FMAX];  // 1 gameplay, 2 sampler on, 4 the compared feature on (diag_request_ab)
 static uint64_t f_rcpu[FMAX], f_mcpu[FMAX];  // the render thread's and the main thread's own CPU time per interval
 static int f_n, f_ncomp, f_nmenu;
@@ -397,6 +404,26 @@ static void gp_report(void) {
     pthread_mutex_unlock(&g_gp_lock);
 }
 
+// (vulkan/device.c, with the frame generation's presentation times) when the compositor showed an image: the intervals
+// only between consecutive presentIDs (the platform keeps few past timings: one across a lost one isn't what was shown)
+void diag_displayed(uint32_t id, uint64_t t) {
+    static uint32_t last_id;
+    if (atomic_load(&g_state) != 2 || t <= f_last_shown) return;
+    if (f_last_shown && id == last_id + 1 && t - f_last_shown < 200000000ull && f_nshown < FMAX)
+        f_shown_flags[f_nshown] = (uint8_t)(1 | (g_diag_ab == 1 ? 4 : 0)), f_shown[f_nshown++] = t - f_last_shown;
+    f_last_shown = t, last_id = id;
+}
+// (vulkan/device.c) a real frame presented - with the frame generation, its own images aside
+void diag_real_frame(void) {
+    if (atomic_load(&g_state) != 2) return;
+    uint64_t now = now_fn();
+    if (rf_t && now - rf_t < 250000000ull && diag_in_gameplay()) {
+        rf_n++, rf_ns += now - rf_t;
+        if (g_diag_ab >= 0) ab_real[g_diag_ab]++, ab_ns[g_diag_ab] += now - rf_t;
+    }
+    rf_t = now;
+}
+
 void diag_request_ab_feature(int seconds, int feature) {
     if (atomic_load(&g_state) == 1 || atomic_load(&g_state) == 2 || atomic_load(&g_state) == 3) return;
     g_diag_ab_feature = feature == 2 ? 2 : 1;
@@ -416,6 +443,8 @@ void diag_request(int seconds) {
     atomic_store(&win_t0, ~0ull);
     atomic_store(&win_t1, ~0ull);
     g_gp_n = 0, atomic_store(&g_gp_pending, 0), atomic_store(&g_gp_skip, 0);
+    f_nshown = 0, f_last_shown = 0, rf_n = rf_ns = rf_t = 0;
+    memset(ab_real, 0, sizeof ab_real), memset(ab_ns, 0, sizeof ab_ns);
     f_n = f_ncomp = f_nmenu = 0;
     f_last = f_last_gpu = 0;
     cl_n = cl_samples = 0;
@@ -472,6 +501,10 @@ void diag_present(uint64_t acquire_ns, uint64_t present_ns) {
         atomic_store(&win_t1, now + (uint64_t)g_seconds * 1000000000ull);
         atomic_store(&win_t0, now);
         g_gp_next = now + 10000000000ull;
+#if defined(__ANDROID__) && !defined(DIAG_TESTING)
+        { extern void diag_gpu_ts_health(uint64_t *, uint64_t *, uint64_t *, uint64_t *, uint64_t *, uint64_t *);
+          diag_gpu_ts_health(&g_ts0[0], &g_ts0[1], &g_ts0[2], &g_ts0[3], &g_ts0[4], &g_ts0[5]); }
+#endif
         if (g_ab_want) g_diag_ab = 1, f_next_ab = now + 10000000000ull;
         f_last_rcpu = thread_cpu(), f_last_mcpu = tid_cpu(atomic_load(&g_main_tid));
         atomic_store(&g_state, 2);
@@ -781,30 +814,36 @@ static void *report_main(void *arg) {
         vk_diag_context(ctx, sizeof ctx);
 #endif
         out("run: %s", ctx);
-        // (TOTK has no frame generation: every present is a real frame - gameplay presents under 250 ms)
-        uint64_t rf_n = 0, rf_ns = 0;
+        // (frames: every gameplay present under 250 ms; with the frame generation the real ones alone, diag_real_frame,
+        // and the percentiles those of the screen's own intervals, diag_displayed)
+        uint64_t pn = 0, pns = 0;
         double gpu = 0;
         uint64_t *c = malloc(sizeof *c * (size_t)(f_n ? f_n : 1));
         for (int i = 0; i < f_n; i++)
             if ((f_flags[i] & 1) && f_interval[i] < 250000000ull) {
-                if (c) c[rf_n] = f_interval[i];
-                rf_n++, rf_ns += f_interval[i], gpu += f_gpu[i] / 1e6;
+                if (c) c[pn] = f_interval[i];
+                pn++, pns += f_interval[i], gpu += f_gpu[i] / 1e6;
             }
+        bool fg = f_nshown > 0;
+        if (fg && c && (size_t)f_nshown <= (size_t)(f_n ? f_n : 1)) memcpy(c, f_shown, sizeof *c * (size_t)f_nshown);
+        uint64_t k = fg && c && (size_t)f_nshown <= (size_t)(f_n ? f_n : 1) ? (uint64_t)f_nshown : pn;
         double p50 = 0, p95 = 0, p99 = 0;
-        if (c && rf_n) {
-            qsort(c, (size_t)rf_n, sizeof *c, cmp_u64);
-            p50 = c[rf_n / 2] / 1e6, p95 = c[(size_t)(rf_n * 0.95)] / 1e6, p99 = c[(size_t)(rf_n * 0.99)] / 1e6;
+        if (c && k) {
+            qsort(c, (size_t)k, sizeof *c, cmp_u64);
+            p50 = c[k / 2] / 1e6, p95 = c[(size_t)(k * 0.95)] / 1e6, p99 = c[(size_t)(k * 0.99)] / 1e6;
         }
         free(c);
+        uint64_t real_n = rf_n ? rf_n : pn, real_ns = rf_n ? rf_ns : pns;
         char cl[160] = "n/a";
         if (cl_samples && cl_n) {
             int o = 0;
             for (int i = 0; i < cl_n && o < (int)sizeof cl - 16; i++)
                 o += snprintf(cl + o, sizeof cl - (size_t)o, "%s%llu", i ? "/" : "", (unsigned long long)(cl_sum[i] / (uint64_t)cl_samples));
         }
-        out("summary: %.2f frames a second | present p50 %.2f p95 %.2f p99 %.2f ms | GPU %.2f ms a frame | "
+        out("summary: %.2f real frames a second | %s p50 %.2f p95 %.2f p99 %.2f ms | GPU %.2f ms a real frame | "
             "CPU clusters %s MHz | SoC %.0f-%.0f C",
-            rf_ns ? rf_n * 1e9 / rf_ns : 0.0, p50, p95, p99, rf_n ? gpu / (double)rf_n : 0.0, cl,
+            real_ns ? real_n * 1e9 / real_ns : 0.0, k == pn ? "present" : "screen", p50, p95, p99,
+            real_n ? gpu / (double)real_n : 0.0, cl,
             temp_max > -1e8f ? temp_min : 0.0f, temp_max > -1e8f ? temp_max : 0.0f);
     }
     out("-- frames (the time between two vkQueuePresentKHR on the render thread)");
@@ -816,11 +855,16 @@ static void *report_main(void *arg) {
     if (g_ab_want) {
         out("-- A/B: %s (on / off, alternating every 10 s; gameplay frames)",
             g_diag_ab_feature == 2 ? "the game's busiest threads in the ADPF session" : "constant buffers read in place");
-        for (int a = 1; a >= 0; a--) {  // (frames a second on each side: the gameplay presents under 250 ms)
-            uint64_t k = 0, ns = 0;
-            for (int i = 0; i < f_n; i++)
-                if ((f_flags[i] & 5) == (a ? 5 : 1) && f_interval[i] < 250000000ull) k++, ns += f_interval[i];
-            if (ns) out("frames a second with it %s: %.2f (%llu in %.1f s)", a ? "ON " : "OFF", k * 1e9 / ns, (unsigned long long)k, ns / 1e9);
+        for (int a = 1; a >= 0; a--) {  // (real frames a second on each side)
+            uint64_t k = ab_real[a], ns = ab_ns[a];
+            if (!rf_n)  // (no real-frame count: the gameplay presents under 250 ms)
+                for (int i = 0; i < f_n; i++)
+                    if ((f_flags[i] & 5) == (a ? 5 : 1) && f_interval[i] < 250000000ull) k++, ns += f_interval[i];
+            if (ns) out("real frames a second with it %s: %.2f (%llu in %.1f s)", a ? "ON " : "OFF", k * 1e9 / ns, (unsigned long long)k, ns / 1e9);
+        }
+        if (f_nshown) {
+            stat_line("interval as the screen showed it, ON ", f_shown, f_nshown, f_shown_flags, 5, 5);
+            stat_line("interval as the screen showed it, OFF", f_shown, f_nshown, f_shown_flags, 5, 1);
         }
         stat_line("present interval, ON ", f_interval, f_n, f_flags, 5, 5);
         stat_line("present interval, OFF", f_interval, f_n, f_flags, 5, 1);
@@ -839,10 +883,23 @@ static void *report_main(void *arg) {
             out("%s", line);
         }
     }
+    if (f_nshown)  // (the compositor's own times - VK_GOOGLE_display_timing - the cadence the screen really had)
+        stat_line("interval between images as the screen showed them", f_shown, f_nshown, NULL, 0, 0);
     out("-- GPU (timestamps at each submission's start and end, idle excluded)");
     // (the busy time arrives in batches, as submissions' timestamps are read back: the mean is the GPU's time per frame,
     // the percentiles are those of the batches)
     stat_line("GPU busy per present interval, gameplay (use the mean)", f_gpu, f_n, f_flags, 1, 1);
+#if defined(__ANDROID__) && !defined(DIAG_TESTING)
+    {   // (whether the GPU's busy time is whole: the submissions read in the window and those that added nothing)
+        extern void diag_gpu_ts_health(uint64_t *, uint64_t *, uint64_t *, uint64_t *, uint64_t *, uint64_t *);
+        uint64_t h[6];
+        diag_gpu_ts_health(&h[0], &h[1], &h[2], &h[3], &h[4], &h[5]);
+        out("GPU timestamps read in the window: %llu counted, %llu inside an earlier one's span (%.1f ms of their own), %llu "
+            "not ready, %llu end before start, %llu never read",
+            (unsigned long long)(h[0] - g_ts0[0]), (unsigned long long)(h[2] - g_ts0[2]), (h[3] - g_ts0[3]) / 1e6,
+            (unsigned long long)(h[1] - g_ts0[1]), (unsigned long long)(h[4] - g_ts0[4]), (unsigned long long)(h[5] - g_ts0[5]));
+    }
+#endif
     stat_line("final composition (the game image into the window + the menus / overlay)", f_comp, f_ncomp, NULL, 0, 0);
     out("-- device (every 2 s)");
     if (cl_samples && cl_n) {
@@ -985,6 +1042,9 @@ void diag_test_name(uint64_t pc, char *buf, size_t n) {
 void diag_test_gpuprof(int *n, int *nrows, double *top_ms, char *top, size_t top_n, int *skipped) {
     *n = g_gp_n, *nrows = g_gp_n ? g_gp[0].nrows : 0, *top_ms = g_gp_n ? g_gp[0].row[0].ms : 0, *skipped = f_nmenu;
     snprintf(top, top_n, "%s", g_gp_n ? g_gp[0].row[0].label : "");
+}
+void diag_test_framegen(uint64_t *real, uint64_t *real_ns, int *shown, uint64_t *shown0) {
+    *real = rf_n, *real_ns = rf_ns, *shown = f_nshown, *shown0 = f_nshown ? f_shown[0] : 0;
 }
 void diag_test_end(void) {
     for (int i = 0; i < atomic_load(&g_nslots) && i < SLOTS; i++)

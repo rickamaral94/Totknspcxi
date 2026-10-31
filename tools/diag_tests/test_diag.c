@@ -185,6 +185,36 @@ static void test_graphics(void) {
     diag_test_set_clock(NULL);
 }
 
+// Frame generation 2x: 30 real frames a second, two images shown for each (each a present), the compositor showing
+// them 16.7 ms apart - with a lost presentID in between, whose interval isn't counted
+static void test_framegen(void) {
+    diag_test_set_clock(fake_now);
+    fake_ns = 300000000000ull;
+    diag_request(20);
+    uint32_t id = 0;
+    for (int f = 0; f < 30 * 30; f++) {  // 30 s at 30 real frames a second: 5 s of waiting, then the 20 s window
+        fake_ns += 33333333;
+        diag_real_frame();
+        diag_present(100000, 200000);  // (the generated image)
+        diag_present(100000, 200000);  // (the real one)
+        diag_displayed(++id, fake_ns - 16666667);
+        if (f % 50 == 7) id++;  // (a presentID the platform's history lost)
+        diag_displayed(++id, fake_ns);
+    }
+    uint64_t real, real_ns, shown0;
+    int shown;
+    diag_test_framegen(&real, &real_ns, &shown, &shown0);
+    double fps = real_ns ? real * 1e9 / real_ns : 0;
+    fprintf(stderr, "framegen: %.2f real frames a second, %d screen intervals, first %.2f ms\n", fps, shown, shown0 / 1e6);
+    CHECK(fps > 29.9 && fps < 30.1);
+    CHECK(shown > 1000 && shown < 1200);  // (20 s at 60 shown, less the ones across a lost id)
+    CHECK(shown0 > 16600000 && shown0 < 16700000);
+    struct timespec ts = {1, 0};
+    nanosleep(&ts, NULL);
+    CHECK(diag_status(NULL, 0) == 3);
+    diag_test_set_clock(NULL);
+}
+
 int main(void) {
     test_percentiles();
     test_accounting();
@@ -192,6 +222,7 @@ int main(void) {
     test_report();
     test_ab();
     test_graphics();
+    test_framegen();
     if (fails) { fprintf(stderr, "%d failed\n", fails); return 1; }
     fprintf(stderr, "all passed\n");
     return 0;

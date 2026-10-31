@@ -19,6 +19,10 @@ static bool cutscene, fps60 = true;
 uint64_t diag_gpu_busy_total_ns(void) { return gpu_total; }
 bool rt_fps60(void) { return fps60; }
 bool rt_cutscene_now(void) { return cutscene; }
+static int fg_base;
+static double fg_ms;
+int fg_base_fps(void) { return fg_base; }
+double fg_gpu_ms_per_real(void) { return fg_ms; }
 bool framepace_on(void) { return false; }
 int framepace_target(void) { return 30; }
 
@@ -78,6 +82,17 @@ int main(void) {
         for (int i = 0; i < 300; i++) t += 0.040, output_scale(2400, 1080, false, t, -1, &o);
     }
     CHECK(output_scale_dynamic_factor() == still);
+
+    // Frame generation 2x (the game held at 30) costing 8 ms of GPU a real frame: 22 ms of the game's own is too much
+    // (33.3 - 8 = 25.3 ms left, 87% of it 22), though alone it would fit a 30 fps frame
+    g_settings.fps_mode = 2;
+    fg_base = 30, fg_ms = 8;
+    frames(300, 33.3, 12);  // (settled first: plenty of room)
+    double fgb = output_scale_dynamic_factor();
+    frames(600, 33.3, 23);
+    fprintf(stderr, "framegen 2x, 8 ms of its own, game 23 ms: scale %.2f -> %.2f\n", fgb, output_scale_dynamic_factor());
+    CHECK(output_scale_dynamic_factor() < fgb);
+    fg_base = 0, fg_ms = 0;
 
     if (fails) { fprintf(stderr, "%d failed\n", fails); return 1; }
     fprintf(stderr, "all passed\n");

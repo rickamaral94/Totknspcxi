@@ -60,6 +60,9 @@ static void dyn_update(double now, double gpu_ms) {
     {
         extern bool rt_fps60(void), rt_cutscene_now(void);
         want = g_settings.fps_mode == 2 && rt_fps60() && !rt_cutscene_now() ? 1000.0 / 60 : 1000.0 / 30;
+        extern int fg_base_fps(void);  // (Frame generation: the game held at its multiplier's base, 30 or 40)
+        int base = fg_base_fps();
+        if (base > 0) want = 1000.0 / base;
     }
 #endif
     g_dyn_dt_sum += dt;
@@ -79,10 +82,21 @@ static void dyn_update(double now, double gpu_ms) {
     dyn_window_start();
     if (now < g_dyn_cool_until) return;
     double prev = g_dyn;
+    // The GPU's share of the frame: with the frame generation on, its own work (not in the busy total: it submits apart)
+    // comes out of the frame's budget too - the real frame has to leave it room, or it misses its slot and the screen
+    // shows an image twice (vulkan/framegen.c)
+    double want_gpu = want;
+#ifdef __ANDROID__
+    {
+        extern double fg_gpu_ms_per_real(void);
+        double fg = fg_gpu_ms_per_real();
+        if (fg > 0) want_gpu = fmax(want * 0.5, want - fg);
+    }
+#endif
     // With the GPU's time: slow frames lower the scale only while the GPU is busy most of them - else the CPU holds
     // them, and a smaller image doesn't help (on BOTW's POCO 36 ms frames with 25 ms of GPU kept lowering it; TOTK's
     // render thread is its limit, docs/TOTK-PORT.md)
-    bool slow = avg_gpu >= 0 ? avg_gpu > want * 0.87 || (avg_dt > want * 1.08 && avg_gpu > want * 0.7)
+    bool slow = avg_gpu >= 0 ? avg_gpu > want_gpu * 0.87 || (avg_dt > want * 1.08 && avg_gpu > want_gpu * 0.7)
                              : avg_dt > want * 1.04;
     if (slow) {
         g_dyn = fmax(0.5, g_dyn - (avg_dt > want * 1.3 ? 0.1 : 0.05));
@@ -93,14 +107,14 @@ static void dyn_update(double now, double gpu_ms) {
         // with GPU timing: raise when there is clear headroom; without: probe upwards now and then (with it too, a
         // raise that had to be taken back soon waits longer before the next: g_dyn_probe_wait - BOTW's POCO swung
         // 0.55 <-> 0.70 every couple of seconds, each change reallocating the targets)
-        bool room = avg_gpu >= 0 ? avg_gpu < want * 0.63 && g_dyn_good >= 4 && now >= g_dyn_probe_at
+        bool room = avg_gpu >= 0 ? avg_gpu < want_gpu * 0.63 && g_dyn_good >= 4 && now >= g_dyn_probe_at
                                  : now >= g_dyn_probe_at && g_dyn_good >= 2 * (int)g_dyn_probe_wait;
         if (room) { g_dyn = fmin(1.0, g_dyn + 0.05); g_dyn_good = 0; g_dyn_last_raise = now; g_dyn_probe_at = now + g_dyn_probe_wait; }
     }
     g_dyn = round(g_dyn * 20) / 20;
     if (g_dyn != prev) {
         g_dyn_cool_until = now + 1.5;
-        LOG("[dynres] %.2f -> %.2f (frame %.1f ms, gpu %.1f ms of %.1f)\n", prev, g_dyn, avg_dt, avg_gpu, want);
+        LOG("[dynres] %.2f -> %.2f (frame %.1f ms, gpu %.1f ms of %.1f)\n", prev, g_dyn, avg_dt, avg_gpu, want_gpu);
     }
 }
 

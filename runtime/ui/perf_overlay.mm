@@ -41,6 +41,10 @@ static void record(void) {
     g_perf_rect[0] = p.x, g_perf_rect[1] = p.y, g_perf_rect[2] = z.x, g_perf_rect[3] = z.y;
 }
 
+#ifdef __ANDROID__
+extern "C" bool fg_overlay(float *real, float *shown, int *mult);  // (nvn/vulkan/framegen.c)
+#endif
+
 void perf_overlay_draw(ImVec2 display, float scale) {
     // frame times: this runs once per presented frame
     static float ft[FT_N];
@@ -105,6 +109,13 @@ void perf_overlay_draw(ImVec2 display, float scale) {
     ImGui::SetWindowFontScale(0.62f);
 
     ImGui::TextColored(grade(fps, 55, 28), "%.0f FPS", fps);
+#ifdef __ANDROID__
+    {   // the frame generation's real frames and shown ones (nvn/vulkan/framegen.c)
+        float real, shown;
+        int mult;
+        if (fg_overlay(&real, &shown, &mult)) ImGui::TextDisabled("framegen %dx: %.0f real / %.0f shown", mult, real, shown);
+    }
+#endif
     ImGui::SameLine();
     ImGui::TextDisabled("%.1f ms", fps > 0 ? 1000.0f / fps : 0.0f);
     float graph[FT_N];  // (oldest first)

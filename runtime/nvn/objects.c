@@ -1439,9 +1439,15 @@ NVN(nvnWindowGetPresentInterval) { RET(WIN->interval); }
 // TOTK 1.4.3's frame controller may go down to interval 1 - 60 fps - where a frame fits (tools/patches.py, after
 // MacNativeGames; the world, cloth and fades step by the measured time): with Video > Frame rate Auto or 60. 30, or
 // LARECOMP_FPS60=0, keeps the game's lowest (2); LARECOMP_FPS60=1 takes 1 at 30 too (the presents still wait for 2).
+// With the frame generation on (Video > Frame generation, vulkan/framegen.c), never: the game is held at its
+// multiplier's base (30 or 40), the generated frames make up the rest.
 bool rt_fps60(void) {
     static int env = -2;
     if (env == -2) env = getenv("LARECOMP_FPS60") ? atoi(getenv("LARECOMP_FPS60")) : -1;
+#ifdef __ANDROID__
+    extern int fg_base_fps(void);
+    if (fg_base_fps() > 0) return false;
+#endif
     return env >= 0 ? env != 0 : g_game_version == GAME_V_143 && g_settings.fps_mode != 1;
 }
 
@@ -1668,7 +1674,23 @@ NVN(nvnQueuePresentTexture) {
         // cutscene's 2 stayed there after it; a cutscene at 30, as on the Switch)
         if (g_game_version == GAME_V_143 && g_settings.fps_mode == 2 && rt_fps60()) n = 1;
         if (n < 2 && rt_cutscene()) n = 2;
-        if (on && framepace_on()) {
+#ifdef __ANDROID__
+        extern int fg_base_fps(void);
+        int fg_base = fg_base_fps();  // (Video > Frame generation: the game at its multiplier's base, 30 or 40 a second)
+#else
+        int fg_base = 0;
+#endif
+        if (on && fg_base > 0) {
+            // A steady grid at the base rate, whatever the interval (40 a second is no whole number of 60 Hz vsyncs);
+            // after a long frame the grid starts again. The frame generation shows its frames on its own times.
+            static uint64_t last;
+            uint64_t period = 1000000000ull / (uint64_t)fg_base, target = last + period, t0 = plat_now_ns();
+            if (last && t0 < target) plat_sleep_until_ns(target);
+            uint64_t t1 = plat_now_ns();
+            g_blocked_ns += t1 - t0;
+            last = last && t1 < target + period ? target : t1;
+            last_vs = __atomic_load_n(&g_vsync_count, __ATOMIC_RELAXED);
+        } else if (on && framepace_on()) {
             // BOTW 1.8.2 (runtime/hle/framepace.c): a steady grid at the chosen frame rate, whatever the interval;
             // after a long frame the grid starts again. framepace.c sets the game's clock from when it went out.
             static uint64_t last;

@@ -174,6 +174,7 @@ static void note_gmem_store(int stage);  // (below: it reads the bound storage b
 // own slowness is the pacer's business (vk_pace_frame: busy time per presented frame). LARECOMP_COUNTER_IDLE=1: as
 // before.
 #define CQ_QUERIES (CQ_MAX + 2)
+static uint64_t gpu_ts_dropped, gpu_ts_ok, gpu_ts_unread, gpu_ts_covered, gpu_ts_backwards, gpu_ts_ns_lost;  // (diag.c: how much of it was read)
 static _Atomic uint64_t gpu_busy_total;  // (GPU ns working, all submissions so far: ADPF's GPU time per frame)
 static double g_pace_gpu_ms;  // (the last presented frame's GPU busy time: LARECOMP_LOG_PACE)
 #else
@@ -267,6 +268,14 @@ uint64_t diag_gpu_busy_total_ns(void) {
     return 0;
 #endif
 }
+#ifdef __ANDROID__
+// (diag.c) the submissions whose GPU times were read: counted, unread (not ready), wholly inside an earlier one's span
+// (and their own spans' sum), end before start, never read (the slot reused first)
+void diag_gpu_ts_health(uint64_t *ok, uint64_t *unread, uint64_t *covered, uint64_t *lost_ns, uint64_t *backwards,
+                        uint64_t *dropped) {
+    *dropped = gpu_ts_dropped, *ok = gpu_ts_ok, *unread = gpu_ts_unread, *covered = gpu_ts_covered, *lost_ns = gpu_ts_ns_lost, *backwards = gpu_ts_backwards;
+}
+#endif
 
 void vk_pace_frame(void) {
     {   // (write-backs of passes the GPU has finished since: the game may read them this frame)
@@ -527,9 +536,11 @@ static void cq_resolve(int i) {  // (cq_lock held) submission slot i is done: it
                 uint64_t ns = (uint64_t)(s1 - (s0 > last_end ? s0 : last_end > s1 ? s1 : last_end));
                 gpu_busy_total += ns;
                 vk_timing_trace_submission(ns, q->presentation);
-            }
+                if (ns) gpu_ts_ok++;
+                else gpu_ts_covered++, gpu_ts_ns_lost += (uint64_t)(s1 - s0);  // (inside an earlier one's span)
+            } else gpu_ts_backwards++;
             if (s1 > last_end) last_end = s1;
-        } else vk_timing_trace_query_failure(result, 0, q->seq);
+        } else gpu_ts_unread++, vk_timing_trace_query_failure(result, 0, q->seq);
     }
 #endif
     if (!q->n) return;
@@ -723,6 +734,7 @@ VkCommandBuffer vk_cmd(void) {
                 if (vkCreateQueryPool(g_vk.dev, &qi, NULL, &q->pool) != VK_SUCCESS) q->pool = VK_NULL_HANDLE;
             }
             pthread_mutex_lock(&cq_lock);
+            if (q->ts) gpu_ts_dropped++, q->ts = false;  // (its times never read: the slot reused first)
             q->n = 0;  // (resolved when the slot was freed: sub())
             q->seq = s->seq;
             pthread_mutex_unlock(&cq_lock);
@@ -5737,6 +5749,9 @@ static void draw(CmdRec *r, bool indexed) {
     PROF_ADD(prof_draw);
 }
 static uint64_t prof_tp_;
+#ifdef __ANDROID__
+static void hud_capture(NvnTexture *rt);
+#endif
 static void draw_(CmdRec *r, bool indexed) {
     if (prof) prof_tp_ = SDL_GetTicksNS();
     if (!st.program) { stat_skipped++; return; }
@@ -5856,6 +5871,12 @@ static void draw_(CmdRec *r, bool indexed) {
                 const float *f = (const float *)(uintptr_t)u->addr;
                 g_off_layout = f[12] == 0 && f[13] == 0 && f[14] == -1.0f && f[15] == 0 && fabsf(f[19]) > 640.0f;
             }
+#ifdef __ANDROID__
+            if (rt && u->addr && u->size >= 64 && vk_texture_scale_group(rt) == RS_OUT) {  // (the frame generation's HUD mask)
+                const float *f = (const float *)(uintptr_t)u->addr;
+                if (f[12] == 0 && f[13] == 0 && f[14] == -1.0f) hud_capture(rt);
+            }
+#endif
         }
         {   // LARECOMP_LOG_FSHASH_FROM=<frame>: each fragment shader drawn from that frame on, once (with its target)
             static long from = -2;
@@ -7115,8 +7136,10 @@ static VkPipeline post_pipeline(const char *fs, VkFormat fmt) {
 }
 
 // Post image `i` at w x h in format f (kept until the size or format changes). 0, 1: SMAA edges / weights, 2: SMAA
-// output, 3, 4: FSR EASU / RCAS (or SGSR) of the presented image; 5, 6: the same of the 3D scene (scene_upscale).
-enum { POST_IMAGES = 7 };
+// output, 3, 4: FSR EASU / RCAS (or SGSR) of the presented image; 5, 6: the same of the 3D scene (scene_upscale);
+// 7-10 the frame generation's HUD mask (vk_fg_hud_*): the final image before the HUD, the mask at its size, the mask
+// in the window, a generated frame with the HUD.
+enum { POST_IMAGES = 11 };
 static TexBackend *post_image(int i, uint32_t w, uint32_t h, VkFormat f) {
     static TexBackend img[POST_IMAGES];
     TexBackend *d = &img[i];
@@ -7130,12 +7153,14 @@ static TexBackend *post_image(int i, uint32_t w, uint32_t h, VkFormat f) {
         // (the scene's EASU output, A2B10G10R10: compressed (UBWC) on Turnip, RCAS's texelFetch of it read 16x4 blocks
         // of zeros - black dashes in the grass, about one a frame on the Adreno 830; uncompressed with a mutable
         // format, as SGSR's single pass and an RGBA8 intermediate showed none either)
-        bool plain = i == 5 && f == VK_FORMAT_A2B10G10R10_UNORM_PACK32;
+        // (the HUD's copy, 7, the same: the mask reads it with texelFetch too)
+        bool plain = (i == 5 || i == 7) && f == VK_FORMAT_A2B10G10R10_UNORM_PACK32;
         VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D,
                                 .flags = plain ? VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT : 0,
                                 .format = f, .extent = {w, h, 1}, .mipLevels = 1, .arrayLayers = 1,
                                 .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
-                                .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT};
+                                .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                                         (i == 7 ? VK_IMAGE_USAGE_TRANSFER_DST_BIT : 0)};
         VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
         VK_CHECK(vmaCreateImage(g_vk.vma, &ci, &ai, &d->image, &d->mem, NULL));
         d->format = f; d->width = w; d->height = h; d->depth = 1; d->layers = 1; d->levels = 1;
@@ -7360,7 +7385,21 @@ static void scene_upscale(Prog *pr, CmdRec *r) {
 void vk_present_draw(VkCommandBuffer cb, TexBackend *b, float vx, float vy, float vw, float vh, const float pv[8]) {
     if (!b || !b->image || (b->aspect & ~VK_IMAGE_ASPECT_COLOR_BIT)) return;
     VkImageView src = post_process(cb, b, pv[6] > 0 ? vw / pv[6] : vw, pv[7] > 0 ? vh / pv[7] : vh);
-    VkPipeline p = present_pipeline(g_vk.sc_format);
+    vk_present_draw_view(cb, src, g_vk.sc_format, g_vk.sc_extent, vx, vy, vw, vh, pv);
+}
+
+// The same in two steps, for a target other than the window image (vulkan/framegen.c): the game image after its post
+// passes (anti-aliasing, upscaling: each its own pass - so outside any rendering, where vk_frame_suspend / _resume do
+// nothing), then drawn into the rendering begun on a target of format fmt and size full
+VkImageView vk_present_source(VkCommandBuffer cb, TexBackend *b, float vw, float vh, const float pv[8]) {
+    if (!b || !b->image || (b->aspect & ~VK_IMAGE_ASPECT_COLOR_BIT)) return VK_NULL_HANDLE;
+    return post_process(cb, b, pv[6] > 0 ? vw / pv[6] : vw, pv[7] > 0 ? vh / pv[7] : vh);
+}
+
+void vk_present_draw_view(VkCommandBuffer cb, VkImageView src, VkFormat fmt, VkExtent2D full, float vx, float vy, float vw, float vh,
+                          const float pv[8]) {
+    if (!src) return;
+    VkPipeline p = present_pipeline(fmt);
     VkDescriptorSet ds = vk_alloc_set(present_set_layout);
     VkDescriptorImageInfo ii = {vk_default_sampler(true), src, VK_IMAGE_LAYOUT_GENERAL};
     VkWriteDescriptorSet w = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ds, .dstBinding = 0, .descriptorCount = 1,
@@ -7373,9 +7412,111 @@ void vk_present_draw(VkCommandBuffer cb, TexBackend *b, float vx, float vy, floa
     vkCmdPushConstants(cb, present_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, 32, pv);
     ss.known &= ~SS_SETS;  // (another layout: the draws' sets are bound again)
     vkCmdDraw(cb, 3, 1, 0, 0);
-    VkViewport full = {0, 0, (float)g_vk.sc_extent.width, (float)g_vk.sc_extent.height, 0, 1};
-    vkCmdSetViewport(cb, 0, 1, &full);
+    VkViewport whole = {0, 0, (float)full.width, (float)full.height, 0, 1};
+    vkCmdSetViewport(cb, 0, 1, &whole);
 }
+
+#ifdef __ANDROID__
+// ---- the frame generation's HUD mask (Video > Frame generation HUD mask; vulkan/framegen.c). The generated frames
+// bend and smear the HUD: where it is, they show the real frame's pixels instead. Where it is: the game draws its HUD
+// (nn::ui2d's layouts: their camera's projection at the start of the vertex constants, [12..14] = 0, 0, -1, as
+// widescreen's pane fixes read them) into the final image after the 3D scene; a copy of that image just before the
+// first such draw (hud_capture), against the image as presented (vk_fg_hud_mask).
+// The HUD isn't drawn into the presented image: 1.8.2 draws its layouts (~100 draws a frame) into one 1920x1080
+// A2B10G10R10 target over the scene, then converts that into one of its two RGBA8 window textures, which is what is
+// presented (Odin 2, 2026-10-31). So the copy is of that target: the one the layouts drew into most the frame before,
+// at the presented image's size - once a frame (the first try copied every same-size target at each switch: up to
+// ~35 pass breaks a frame, 30 -> 25 real frames).
+static TexBackend *hud_cap_b;  // (the final image the copy is of; NULL: none)
+static uint64_t hud_cap_frame = ~0ull;  // (renderer_present_count when it was taken)
+static uint64_t stat_hud_caps;
+// (diagnosis) the targets the layouts drew into, the frame before: each its image, size, format and draws
+static struct { TexBackend *b; uint32_t n; } hud_seen[4], hud_last[4];
+static uint64_t hud_seen_frame;
+static TexBackend *hud_lock;  // (the target the layouts drew into most, the frame before)
+void vk_fg_hud_targets(char *out, size_t n) {
+    size_t o = 0;
+    out[0] = 0;
+    for (int i = 0; i < 4 && hud_last[i].b && o + 64 < n; i++)
+        o += (size_t)snprintf(out + o, n - o, "%s%p %ux%u fmt %d: %u", i ? "; " : "", (void *)hud_last[i].b, hud_last[i].b->width,
+                              hud_last[i].b->height, (int)hud_last[i].b->format, hud_last[i].n);
+}
+static void hud_capture(NvnTexture *rt) {
+    extern bool fg_hud_capture_wanted(uint32_t w, uint32_t h);
+    TexBackend *b = vk_tex(rt, false);
+    if (!b || !b->image) return;
+    uint64_t now = renderer_present_count();
+    if (hud_seen_frame != now) {
+        memcpy(hud_last, hud_seen, sizeof hud_last), memset(hud_seen, 0, sizeof hud_seen);
+        hud_seen_frame = now;
+        hud_lock = NULL;
+        uint32_t most = 0;
+        for (int i = 0; i < 4 && hud_last[i].b; i++)
+            if (hud_last[i].n > most) hud_lock = hud_last[i].b, most = hud_last[i].n;
+    }
+    for (int i = 0; i < 4; i++)
+        if (!hud_seen[i].b || hud_seen[i].b == b) { hud_seen[i].b = b, hud_seen[i].n++; break; }
+    if (hud_cap_frame == now || (hud_lock && b != hud_lock) || b->samples != 1 || b->layers != 1 || b->levels < 1 ||
+        (b->aspect & ~VK_IMAGE_ASPECT_COLOR_BIT) || !fg_hud_capture_wanted(b->width, b->height))
+        return;
+    vk_end_pass();  // (the scene drawn into it so far, stored; the HUD's draw begins its pass again)
+    VkCommandBuffer cb = vk_cmd();
+    TexBackend *pre = post_image(7, b->width, b->height, b->format);
+    vk_full_barrier(cb);
+    VkImageCopy c = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+                     .extent = {b->width, b->height, 1}};
+    vkCmdCopyImage(cb, b->image, VK_IMAGE_LAYOUT_GENERAL, pre->image, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
+    vk_full_barrier(cb);
+    hud_cap_b = b;
+    hud_cap_frame = renderer_present_count();
+    stat_hud_caps++;
+}
+uint64_t vk_fg_hud_captures(void) { return stat_hud_caps; }
+
+// The mask of the presented image p, laid out as the window gets it (vx..vh, pv) into an image of size e: red = how
+// much HUD (soft, widened a little) - from the HUD's target as it is now against its copy from before the HUD, the
+// same size as p (its conversion into the window texture keeps the layout). NULL: no copy this frame (the HUD wasn't
+// seen: no mask). Outside any rendering.
+VkImageView vk_fg_hud_mask(VkCommandBuffer cb, TexBackend *p, VkExtent2D e, float vx, float vy, float vw, float vh, const float pv[8]) {
+    TexBackend *b = hud_cap_b;
+    bool have = p && b && b->image && b->width == p->width && b->height == p->height && hud_cap_frame != ~0ull &&
+                renderer_present_count() - hud_cap_frame <= 1;
+    hud_cap_b = NULL;  // (the next frame takes its own)
+    if (!have) return VK_NULL_HANDLE;
+    TexBackend *pre = post_image(7, b->width, b->height, b->format);
+    TexBackend *m = post_image(8, b->width, b->height, VK_FORMAT_R8G8B8A8_UNORM);
+    float w = (float)b->width, h = (float)b->height;
+    float pc[8] = {1.0f / w, 1.0f / h, w, h, 3.0f / 255.0f, 40.0f / 255.0f};  // (the difference that starts / makes HUD)
+    VkImageView in[3] = {post_view(b), post_view(pre)};
+    gp_mark(cb, "framegen: HUD mask %ux%u", b->width, b->height);
+    post_pass(cb, "fg_hud_mask.frag", in, 2, m, pc, false);
+    const VkFormat f = VK_FORMAT_R8G8B8A8_UNORM;
+    TexBackend *mw = post_image(9, e.width, e.height, f);
+    vk_full_barrier(cb);
+    VkRenderingAttachmentInfo ca = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = post_view(mw),
+                                    .imageLayout = VK_IMAGE_LAYOUT_GENERAL, .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+                                    .storeOp = VK_ATTACHMENT_STORE_OP_STORE};
+    VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{0, 0}, e}, .layerCount = 1,
+                          .colorAttachmentCount = 1, .pColorAttachments = &ca};
+    vk_begin_rendering(cb, &ri, &f, VK_FORMAT_UNDEFINED, VK_SAMPLE_COUNT_1_BIT);
+    VkRect2D sc = {{0, 0}, e};
+    vkCmdSetScissor(cb, 0, 1, &sc);
+    vk_present_draw_view(cb, post_view(m), f, e, vx, vy, vw, vh, pv);
+    vk_end_rendering(cb);
+    vk_full_barrier(cb);
+    return post_view(mw);
+}
+
+// A generated frame (gen) with the real frame's pixels (real) where the mask says HUD, all of size e: its view
+VkImageView vk_fg_hud_composite(VkCommandBuffer cb, VkImageView gen, VkImageView real, VkImageView mask, VkExtent2D e) {
+    TexBackend *o = post_image(10, e.width, e.height, VK_FORMAT_R8G8B8A8_UNORM);
+    float pc[8] = {1.0f / (float)e.width, 1.0f / (float)e.height, (float)e.width, (float)e.height};
+    VkImageView in[3] = {gen, real, mask};
+    gp_mark(cb, "framegen: HUD over a generated frame");
+    post_pass(cb, "fg_hud.frag", in, 3, o, pc, false);
+    return post_view(o);
+}
+#endif
 
 // Screenshot of a game texture (presented crop applied to build/frame_* shots), via the present shader into RGBA8.
 // (debug frame, LARECOMP_DEBUG_RAW_PASSES=1) a color target's texels as they are, level 0 / layer 0: <path>.raw, its

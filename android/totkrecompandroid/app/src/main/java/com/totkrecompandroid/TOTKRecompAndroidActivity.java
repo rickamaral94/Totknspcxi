@@ -91,6 +91,8 @@ public class TOTKRecompAndroidActivity extends SDLActivity {
     static native void nativePackageCancel();
     private static native void nativePackageStep(String step);
     private static native void nativePackageFailed(int kind, String detail);
+    private static native String nativeLsfgImport(int fd);
+    private static final int REQ_LSFG = 0x4c60;  // (clear of REQ_PKG + 0..3, 0x4c50-0x4c53)
     private static final int REQ_PKG = 0x4c50;  // + slot: 0 base .nsp/.xci, 1 update .nsp, 2 prod.keys, 3 title.keys
     private static final int PKG_NOT_SEEKABLE = 2, PKG_FAILED_NOT_SEEKABLE = 1, PKG_FAILED_OTHER = 3, PKG_FAILED_SPACE = 4;
     private static final Uri[] pkgUri = new Uri[4];
@@ -356,6 +358,11 @@ public class TOTKRecompAndroidActivity extends SDLActivity {
 
     @Override
     protected void onActivityResult(int req, int result, Intent data) {
+        if (req == REQ_LSFG) {
+            Uri u = result == Activity.RESULT_OK && data != null ? data.getData() : null;
+            if (u != null) new Thread(() -> importLosslessDll(u), "lsfg-dll").start();
+            return;
+        }
         if (req >= REQ_PKG && req < REQ_PKG + 4) {
             int slot = req - REQ_PKG;
             Uri u = result == Activity.RESULT_OK && data != null ? data.getData() : null;
@@ -1355,6 +1362,30 @@ public class TOTKRecompAndroidActivity extends SDLActivity {
             Log.w(TAG, "file size: " + e);
         }
         return -1;
+    }
+
+    // The user's own Lossless.dll (Video > Frame generation): read through its descriptor by the native side, which keeps
+    // only the shaders translated from it (filesDir/lsfg/spirv) - the DLL is never copied
+    public static void pickLosslessDll() {
+        self.runOnUiThread(() -> {
+            Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+            i.addCategory(Intent.CATEGORY_OPENABLE);
+            i.setType("*/*");
+            try {
+                self.startActivityForResult(i, REQ_LSFG);
+            } catch (Exception e) {
+                Log.e(TAG, "Lossless.dll picker", e);
+            }
+        });
+    }
+
+    private void importLosslessDll(Uri u) {
+        try {
+            String r = nativeLsfgImport(openFd(u));
+            Log.i(TAG, "Lossless.dll: " + r);
+        } catch (Exception e) {
+            Log.e(TAG, "Lossless.dll import", e);
+        }
     }
 
     public static void pickPackageFile(int slot) {
