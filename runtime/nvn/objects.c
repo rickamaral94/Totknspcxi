@@ -1463,6 +1463,8 @@ static bool rt_cutscene(void) {
     if (now != last) LOG("[totk] %s\n", (last = now) ? "cutscene: presents held at 30 fps" : "cutscene over");
     return now;
 }
+bool rt_cutscene_now(void) { return rt_cutscene(); }  // (output_scale.c: the dynamic resolution keeps 30 then)
+
 // (diag.c) playing: TOTK's 3D scene drawn within the last 20 presents (so not the title screen, a loading screen or
 // a menu over a still image), no cutscene and no movie. BOTW's menu and event addresses (framepace.c) are 1.8.2's.
 bool diag_in_gameplay(void) {
