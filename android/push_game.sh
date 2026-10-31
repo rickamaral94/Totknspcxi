@@ -9,9 +9,12 @@
 # 304k files that adb copies slowly.
 set -euo pipefail
 export MSYS_NO_PATHCONV=1  # (Git Bash: leave the device paths alone)
+# (or the packages: android/push_game.sh --nsp base.nsp [--update update.nsp] --keys prod.keys [--title-keys ...] /
+# --xci game.xci ...: imported first by android/nximport_dump.sh, docs/IMPORT-NSP-XCI.md)
+if [ "${1:-}" != "${1#--}" ]; then SRC=$("$(dirname "$0")/nximport_dump.sh" "$@"); fi
 cd "$(dirname "$0")/.."
 R=$PWD
-SRC=${1:?usage: android/push_game.sh <folder with exefs/ and romfs/>}
+SRC=${SRC:-${1:?usage: android/push_game.sh <folder with exefs/ and romfs/> | --nsp/--xci ... --keys prod.keys}}
 # (GAME_DEST / GAMELIB_OUT: another game version in its own data root, files/v<version> - android/run_ver.sh)
 D=${GAME_DEST:-/sdcard/Android/data/com.totkrecompandroid/files/extracted}
 LIB=${GAMELIB_OUT:-android/out}

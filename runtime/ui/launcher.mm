@@ -43,6 +43,7 @@ extern "C" {
 #include <libswscale/swscale.h>
 #endif
 #include "platform.h"
+#include "diag.h"
 #include "paths.h"
 #include "gamebuild.h"
 #include "gamelib.h"
@@ -497,6 +498,8 @@ done:
 // on as on the desktop with the game code (runtime/gamebuild.c, on the phone itself). The Vulkan driver is
 // picked the same way (a Turnip .zip, copied to the drivers folder the activity loads from at start).
 #include <jni.h>
+#include "package_import.h"  // (android/totkrecompandroid/app/src/main/cpp: Import from NSP/XCI)
+#include "lsfg_extract.h"     // (the same: frame generation's shaders from Lossless.dll)
 std::atomic<bool> g_android_imported{false};
 static std::string g_driver_msg;
 static bool g_driver_restart;  // (the message asks for a restart: a Restart now button beside it)
@@ -525,10 +528,14 @@ static void android_call_int(const char *method, int v) {  // (one int argument)
     env->DeleteLocalRef(act);
 }
 
+// (menu.mm, Video > Frame generation) the system's file picker for the user's Lossless.dll
+extern "C" void launcher_pick_lossless_dll(void) { android_call("pickLosslessDll"); }
+
 // The log file (Driver compatibility; runtime/platform/android.c): written to a folder the player picks
 // (TOTKRecompAndroidActivity pickLogFolder / openLog), where a file manager can open it - Android/data/ is out of its reach
 extern "C" void android_log_file(bool on);
 extern "C" bool vk_adreno_8xx(const char *name);  // (Driver compatibility's Automatic: runtime/nvn/vulkan/device.c)
+extern "C" bool vk_lrz_auto(const char *name);    // (the LRZ's Automatic: the Adreno 8xx and the 740)
 extern "C" bool vk_lrz_at_start(void);
 extern "C" const char *vk_gpu_name(void);
 extern "C" const char *vk_driver_rejected(void);  // (runtime/nvn/vulkan/android_driver.c)
@@ -808,6 +815,165 @@ extern "C" JNIEXPORT void JNICALL Java_com_totkrecompandroid_TOTKRecompAndroidAc
         set_job("Setup didn't finish", true,
                 "A file in the chosen folder couldn't be read. Copy the whole game folder again and try again.");
     set_job_detail(detail);
+}
+
+// The user's Lossless.dll, picked under Video > Frame generation (TOTKRecompAndroidActivity importLosslessDll): its shaders
+// into filesDir/lsfg/spirv (lsfg_extract.cpp), read through the descriptor - the DLL itself is never stored. The
+// descriptor is owned from here on. Returns "<lsfg::Result>|<detail>"; the menu shows the state (lsfg_state).
+extern "C" JNIEXPORT jstring JNICALL Java_com_totkrecompandroid_TOTKRecompAndroidActivity_nativeLsfgImport(JNIEnv *env, jclass,
+                                                                                                         jint fd) {
+    char detail[512] = "";
+    int r = lsfg_import_fd(fd, detail, sizeof detail);
+    return env->NewStringUTF((std::to_string(r) + "|" + detail).c_str());
+}
+
+// ------------------------------------------------------------------ Android: Import from NSP/XCI
+// The player's own packages and keys (docs/IMPORT-NSP-XCI.md): TOTKRecompAndroidActivity picks the files (pickPackageFile:
+// the base .nsp/.xci, an update .nsp, prod.keys, title.keys), keeps the keys in its private no-backup folder when
+// "Remember the keys" is on, and hands the descriptors to nativePackageImport on its import thread. The import itself is
+// package_import.cpp's (transactional: an earlier setup stays until the new one is whole); then the setup goes on as
+// a picked folder's would (extract_thread: the game code).
+static std::string g_pkg_name[4];  // (g_lock) the picked files' names ("": none) - base, update, prod.keys, title.keys
+static bool g_pkg_keys_remembered;  // (g_lock) prod.keys kept by the app (TOTKRecompAndroidActivity.keysRemembered)
+static bool g_pkg_remember = true;  // the toggle
+static std::atomic<bool> g_pkg_cancel{false}, g_pkg_importing{false};
+
+static bool android_call_bool(const char *method) {  // (a static method of the activity returning a boolean)
+    JNIEnv *env = (JNIEnv *)SDL_GetAndroidJNIEnv();
+    jobject act = (jobject)SDL_GetAndroidActivity();
+    if (!env || !act) return false;
+    jclass c = env->GetObjectClass(act);
+    jmethodID m = env->GetStaticMethodID(c, method, "()Z");
+    bool r = m && env->CallStaticBooleanMethod(c, m);
+    if (env->ExceptionCheck()) env->ExceptionClear(), r = false;
+    env->DeleteLocalRef(c);
+    env->DeleteLocalRef(act);
+    return r;
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_totkrecompandroid_TOTKRecompAndroidActivity_nativePackagePicked(JNIEnv *env, jclass,
+                                                                                                          jint slot, jstring name) {
+    if (slot < 0 || slot > 3) return;
+    const char *n = name ? env->GetStringUTFChars(name, NULL) : NULL;
+    pthread_mutex_lock(&g_lock);
+    g_pkg_name[slot] = n ? n : "";
+    pthread_mutex_unlock(&g_lock);
+    if (n) env->ReleaseStringUTFChars(name, n);
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_totkrecompandroid_TOTKRecompAndroidActivity_nativeKeysRemembered(JNIEnv *, jclass, jboolean on) {
+    pthread_mutex_lock(&g_lock);
+    g_pkg_keys_remembered = on;
+    pthread_mutex_unlock(&g_lock);
+}
+
+// (BuildService.onTimeout, the overlay's Cancel): the import stops at its next block; the earlier setup stays
+extern "C" JNIEXPORT void JNICALL Java_com_totkrecompandroid_TOTKRecompAndroidActivity_nativePackageCancel(JNIEnv *, jclass) {
+    if (g_pkg_importing) g_pkg_cancel = true;
+}
+
+// A step of the activity's own around the import (a package copied to the phone first), on the overlay
+extern "C" JNIEXPORT void JNICALL Java_com_totkrecompandroid_TOTKRecompAndroidActivity_nativePackageStep(JNIEnv *env, jclass, jstring step) {
+    const char *t = step ? env->GetStringUTFChars(step, NULL) : NULL;
+    pthread_mutex_lock(&g_lock);
+    g_busy = true;
+    pthread_mutex_unlock(&g_lock);
+    g_done = 0, g_total = 0, g_phase_base = 0, g_build_frac = -1, g_copy_skipped = false;
+    set_job(t ? t : "");
+    if (t) env->ReleaseStringUTFChars(step, t);
+}
+
+static void pkg_progress(uint64_t done, uint64_t total) {
+    g_total = total, g_done = done;
+    static int pct = -1;  // (the foreground service's notification, a whole percent at a time)
+    int p = total ? (int)(done * 100 / total) : 0;
+    if (p != pct) pct = p, android_call_int("buildServiceProgress", p);
+}
+
+// The import, on the activity's import thread: the descriptors are owned from here on. Returns a PackageImportResult,
+// with the package's slot in the bits above 8 for PKG_NOT_SEEKABLE (the activity offers to copy it to the phone first).
+extern "C" JNIEXPORT jint JNICALL Java_com_totkrecompandroid_TOTKRecompAndroidActivity_nativePackageImport(
+        JNIEnv *, jclass, jint base_fd, jboolean xci, jint update_fd, jint prod_fd, jint title_fd, jboolean verify) {
+    pthread_mutex_lock(&g_lock);
+    g_busy = true;
+    g_src.clear();
+    pthread_mutex_unlock(&g_lock);
+    g_done = 0, g_total = 0, g_phase_base = 0, g_build_frac = -1, g_copy_skipped = false;
+    g_pkg_cancel = false, g_pkg_importing = true;
+    PackageImportInputs in;
+    in.base_fd = base_fd, in.base_xci = xci, in.update_fd = update_fd, in.prod_keys_fd = prod_fd, in.title_keys_fd = title_fd;
+    PackageImportHooks h;
+    h.step = [](const char *s) { set_job(s); };
+    h.progress = pkg_progress;
+    h.keep_loose = keep_loose;
+    h.portuguese = settings_host_portuguese();
+    h.verify_only = verify;
+    PackageImportOutcome o = package_import_run(in, h, &g_pkg_cancel);
+    g_pkg_importing = false;
+    fprintf(stderr, "[launcher] package %s: %d %s\n", verify ? "verify" : "import", (int)o.result, o.detail.c_str());
+    if (verify && (o.result == PKG_DONE || o.result == PKG_UNUSABLE)) {  // (nothing set up: only the answer)
+        pthread_mutex_lock(&g_lock);
+        g_busy = false;
+        pthread_mutex_unlock(&g_lock);
+        if (o.result == PKG_DONE)
+            set_job("Packages verified: each one matches the SHA-256 its own metadata records.");
+        else
+            set_job("The package is damaged", true,
+                    "Its contents differ from the SHA-256 its own metadata records. Copy it again from the original, or "
+                    "dump it again from the game card or the console.");
+        set_job_detail(o.detail);
+        return (jint)o.result;
+    }
+    if (o.result == PKG_DONE) {  // as a picked folder's setup: the game code next (extract_thread)
+        pthread_mutex_lock(&g_lock);
+        g_dest = o.dest;
+        g_src = std::string(tr("Imported from NSP/XCI")) + " (" + version_name(o.version) + ")";
+        pthread_mutex_unlock(&g_lock);
+        g_android_imported = true;
+        pthread_t t;
+        pthread_create(&t, NULL, extract_thread, NULL);
+        pthread_detach(t);
+        return 0;
+    }
+    pthread_mutex_lock(&g_lock);
+    g_busy = false;
+    g_dest.clear();
+    pthread_mutex_unlock(&g_lock);
+    switch (o.result) {
+    case PKG_CANCELLED: set_job("Import cancelled. The game files set up before are as they were."); break;
+    case PKG_NOT_SEEKABLE: return (jint)(PKG_NOT_SEEKABLE | o.slot << 8);  // (the activity says it, or copies the file)
+    case PKG_VERSION: set_failure(FAIL_VERSION); break;
+    case PKG_ROMFS_SET: set_failure(FAIL_MISSING); break;
+    case PKG_SPACE:
+        set_job("Not enough free space", true, "Free up space on the phone and try again. The game files set up before stay as they were.");
+        break;
+    case PKG_UNUSABLE:
+        set_job("Those packages can't be used", true,
+                "Choose your own copy of the game (and its update), with prod.keys from a console whose firmware is as new "
+                "as the update's, and title.keys if the packages need them.");
+        break;
+    default: set_failure(FAIL_COPY); break;
+    }
+    set_job_detail(o.detail);
+    return (jint)o.result;
+}
+
+// The activity couldn't go on (a file it couldn't open, a package that can't be read in place and wasn't copied)
+extern "C" JNIEXPORT void JNICALL Java_com_totkrecompandroid_TOTKRecompAndroidActivity_nativePackageFailed(JNIEnv *env, jclass,
+                                                                                                          jint kind, jstring detail) {
+    const char *d = detail ? env->GetStringUTFChars(detail, NULL) : NULL;
+    pthread_mutex_lock(&g_lock);
+    g_busy = false;
+    pthread_mutex_unlock(&g_lock);
+    if (kind == 1)
+        set_job("That file can't be read in place", true,
+                "Copy it to the phone's own storage (for example Download) and choose it there.");
+    else if (kind == 4)
+        set_job("Not enough free space", true, "Free up space on the phone and try again. The game files set up before stay as they were.");
+    else
+        set_job("Those packages can't be used", true, "Choose the files again.");
+    if (d && *d) set_job_detail(d);
+    if (d) env->ReleaseStringUTFChars(detail, d);
 }
 
 extern "C" JNIEXPORT void JNICALL Java_com_totkrecompandroid_TOTKRecompAndroidActivity_nativeDriverPicked(JNIEnv *env, jclass, jstring name) {
@@ -1381,10 +1547,11 @@ static void prelaunch_tab(float sc) {
         // LASRecompAndroid's, with BOTW's in-place reads of draw targets)
         bool changed = false;
         const bool a8 = vk_adreno_8xx(vk_gpu_name());  // (Automatic: on for Adreno 8xx only)
-        auto tri = [&](const char *id, int *v) {  // Automatic / On / Off: -1 / 1 / 0
+        const bool lrz_auto = vk_lrz_auto(vk_gpu_name());  // (the LRZ's: the 740 too)
+        auto tri = [&](const char *id, int *v, bool auto_on) {  // Automatic / On / Off: -1 / 1 / 0
             bool ch = false;
             ImGui::PushID(id);
-            ch |= ImGui::RadioButton(tr(a8 ? "Automatic (on for this GPU)" : "Automatic (off for this GPU)"), v, -1);
+            ch |= ImGui::RadioButton(tr(auto_on ? "Automatic (on for this GPU)" : "Automatic (off for this GPU)"), v, -1);
             ImGui::SameLine();
             ch |= ImGui::RadioButton(tr("On"), v, 1);
             ImGui::SameLine();
@@ -1401,7 +1568,7 @@ static void prelaunch_tab(float sc) {
             ImGui::TextDisabled("%s", tr("These options are for Turnip: the driver in use takes the safer paths anyway."));
         ImGui::Spacing();
         ImGui::Text("%s", tr("Game memory on the GPU (Turnip)"));
-        changed |= tri("heap", &g_settings.gpu_heap);
+        changed |= tri("heap", &g_settings.gpu_heap, a8);
         ImGui::TextDisabled("%s", tr("On: the game's memory is mapped straight into the GPU's, the fastest way. Off: what each "
                                   "frame uses is copied instead - it draws right where the fast way doesn't, but this game "
                                   "runs at about half the frame rate (15 fps instead of 35 on an Adreno 830). Automatic: on "
@@ -1409,17 +1576,17 @@ static void prelaunch_tab(float sc) {
                                   "the game starts."));
         ImGui::Spacing();
         ImGui::Text("%s", tr("Draw-target reads in place (Turnip)"));
-        changed |= tri("inplace", &g_settings.inplace_reads);
+        changed |= tri("inplace", &g_settings.inplace_reads, a8);
         ImGui::TextDisabled("%s", tr("On: decals and effects read the image they draw on as it is, the fastest way. Off: a copy "
                                   "of it each time, slower (fewer fps) but by the Vulkan rules. Automatic: on for Adreno 8xx "
                                   "GPUs, off for the others. Applies when the game starts."));
         ImGui::Spacing();
         ImGui::Text("%s", tr("Turnip low-resolution Z (LRZ)"));
-        changed |= tri("lrz", &g_settings.turnip_lrz);
+        changed |= tri("lrz", &g_settings.turnip_lrz, lrz_auto);
         ImGui::TextDisabled("%s", tr("Turnip's early depth test, a little faster. Off can fix missing or broken drawing on "
-                                  "some Adreno GPUs. Automatic: on for Adreno 8xx GPUs, off for the others. Applies when "
-                                  "TOTKRecompAndroid restarts."));
-        bool lrz_now = g_settings.turnip_lrz < 0 ? a8 : g_settings.turnip_lrz != 0;
+                                  "some Adreno GPUs. Automatic: on for Adreno 8xx GPUs and the Adreno 740, off for the "
+                                  "others. Applies when TOTKRecompAndroid restarts."));
+        bool lrz_now = g_settings.turnip_lrz < 0 ? lrz_auto : g_settings.turnip_lrz != 0;
         if (lrz_now != vk_lrz_at_start()) {  // (Turnip reads it once, when the app starts)
             ImGui::Text("%s", tr("Restart TOTKRecompAndroid to apply it."));
             ImGui::SameLine();
@@ -1453,6 +1620,27 @@ static void prelaunch_tab(float sc) {
         ImGui::PushID("logdir");
         if (ImGui::Button(tr(folder.empty() ? "Choose folder" : "Change folder"))) android_call("pickLogFolder");
         ImGui::PopID();
+        {   // the performance diagnosis (runtime/diag.c, docs/DESEMPENHO-DIAG.md)
+            ImGui::Spacing();
+            char msg[1100];
+            int st = diag_status(msg, sizeof msg);
+            if (st == 1) ImGui::TextDisabled("%s", tr("Performance measurement: waiting for 5 s of gameplay, out of the menus."));
+            else if (st == 2) ImGui::Text(tr("Measuring performance: %s s left."), msg);
+            else {
+                if (ImGui::Button(tr("Measure performance (60 s)"))) diag_request(60);
+                ImGui::SameLine();
+                if (ImGui::Button(tr("Compare: constant buffers (120 s)"))) diag_request_ab_feature(120, 1);
+                ImGui::SameLine();
+                if (ImGui::Button(tr("Compare: ADPF threads (120 s)"))) diag_request_ab_feature(120, 2);
+                if (st == 3) ImGui::Text(tr("Measurement done: the report is in the log and in %s"), msg);
+            }
+            ImGui::TextDisabled("%s", tr("In the next game session, records 60 s of gameplay once you have played 5 s out of "
+                                         "the menus: where each frame's time goes (the game's threads, the GPU, the clocks). "
+                                         "A line in the corner shows it. Play the same stretch as usual, then send the log. "
+                                         "Compare: 120 s, the change being tested turned on and off every 10 s, so both share the "
+                                         "clocks and the heat - the constant buffers read in place (with Sync lag off), or the "
+                                         "game's busiest threads in the ADPF session."));
+        }
         ImGui::PopTextWrapPos();
         if (changed) settings_save();
     }
@@ -1646,6 +1834,10 @@ extern "C" void launcher_run(const char *root) {
     launcher_pad_open_all();
     io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
 
+#ifdef __ANDROID__
+    package_import_recover();  // (an NSP/XCI import the app was stopped in: finished, or its half removed)
+    lsfg_startup();            // (a Lossless.dll import the app was stopped in: its half removed)
+#endif
     std::string status = check_game_files(g_root);
 #ifdef __ANDROID__
     if (status.empty()) android_prune_loose();
@@ -2099,6 +2291,64 @@ extern "C" void launcher_run(const char *root) {
                     SDL_ShowOpenFolderDialog(picked, NULL, win, NULL, false);
 #endif
                 check_left_of_value(src_v);
+#ifdef __ANDROID__
+                {   // Import from NSP/XCI: the player's own packages and keys instead of a folder (nativePackageImport)
+                    static bool asked;  // (whether the app keeps keys: asked once, then told by each change)
+                    if (!asked) {
+                        asked = true;
+                        bool r = android_call_bool("keysRemembered");
+                        pthread_mutex_lock(&g_lock);
+                        g_pkg_keys_remembered = r;
+                        pthread_mutex_unlock(&g_lock);
+                    }
+                    pthread_mutex_lock(&g_lock);
+                    std::string pn[4] = {g_pkg_name[0], g_pkg_name[1], g_pkg_name[2], g_pkg_name[3]};
+                    bool remembered = g_pkg_keys_remembered;
+                    pthread_mutex_unlock(&g_lock);
+                    opt_section("Import from NSP/XCI");
+                    if (busy) opt_disable_next();
+                    if (opt_action("Game package", pn[0].empty() ? "Choose..." : pn[0].c_str(),
+                                   "Your own Tears of the Kingdom for Nintendo Switch as an NSP or XCI file (the base game, "
+                                   "version 1.0.0). It is read where it is: nothing is copied but what the game needs.", true))
+                        android_call_int("pickPackageFile", 0);
+                    if (busy) opt_disable_next();
+                    if (opt_action("Update", pn[1].empty() ? "None" : pn[1].c_str(),
+                                   "Required: the 1.4.3 update as an NSP file (v720896), applied over the base game. "
+                                   "This app runs version 1.4.3 only.", true))
+                        android_call_int("pickPackageFile", 1);
+                    if (busy) opt_disable_next();
+                    if (opt_action("prod.keys", !pn[2].empty() ? pn[2].c_str() : remembered ? "Remembered" : "Choose...",
+                                   "The keys file dumped from your own console. It is needed to read the packages. It stays "
+                                   "inside TOTKRecompAndroid's private storage, only if Remember the keys is on.", true))
+                        android_call_int("pickPackageFile", 2);
+                    if (busy) opt_disable_next();
+                    if (opt_action("title.keys", pn[3].empty() ? "None" : pn[3].c_str(),
+                                   "Optional: your console's title keys, for packages without a ticket of their own. To remove "
+                                   "it, choose it again and cancel the picker.", true))
+                        android_call_int("pickPackageFile", 3);
+                    if (busy) opt_disable_next();
+                    opt_toggle("Remember the keys", &g_pkg_remember, true,
+                               "Keeps prod.keys (and title.keys) in TOTKRecompAndroid's private storage, out of backups and "
+                               "device transfers, for the next import. Off: they are only read for this import.");
+                    if (remembered) {
+                        if (busy) opt_disable_next();
+                        if (opt_action("Forget the keys", "", "Deletes the keys TOTKRecompAndroid kept.", true)) android_call("forgetKeys");
+                    }
+                    bool can = !busy && !pn[0].empty() && (!pn[2].empty() || remembered);
+                    if (!can || pn[1].empty()) opt_disable_next();  // (TOTK runs as 1.4.3 only: the update is required)
+                    if (opt_action("Import", busy ? "Working..." : "",
+                                   "Reads the packages, checks every byte against their own hashes, and sets the game "
+                                   "files up as version 1.4.3. The game files set up before are replaced only once the new "
+                                   "ones are complete. It needs about 17 GB free (the exact amount is checked first) and "
+                                   "may take a while.", true))
+                        android_call_int("importPackages", g_pkg_remember ? 1 : 0);
+                    if (!can) opt_disable_next();
+                    if (opt_action("Verify packages", "",
+                                   "Reads the chosen packages whole and checks each of their contents against the SHA-256 "
+                                   "the package's own metadata records. Nothing is written. A damaged copy is named.", true))
+                        android_call_int("verifyPackages", g_pkg_remember ? 1 : 0);
+                }
+#endif
                 if (!ready || !src.empty()) {  // (Android: picking the folder sets it up at once)
                     opt_section("Set up");
                     if (busy || (src.empty() && !copied)) opt_disable_next();
@@ -2180,6 +2430,10 @@ extern "C" void launcher_run(const char *root) {
                         pw = fmaxf(pw, g_font_small->CalcTextSizeA(sfs, FLT_MAX, 0, notes[i]).x + 96 * sc);
                     pw = fminf(fmaxf(pw, ts.x + 96 * sc), ds.x - 32 * sc);
                     float ph = bar_y + 24 * sc + 26 * sc + line_h + (nnotes ? 14 * sc + nnotes * line_h : 0) + 40 * sc;
+#ifdef __ANDROID__
+                    bool can_cancel = g_pkg_importing && !g_pkg_cancel;  // (an NSP/XCI import: Cancel under the bar)
+                    if (can_cancel) ph += line_h + 28 * sc;
+#endif
                     ImVec2 a(o.x + (ds.x - pw) * 0.5f, o.y + (ds.y - ph) * 0.5f), b(a.x + pw, a.y + ph);
                     fg->AddRectFilled(a, b, IM_COL32(15, 23, 20, 250), 14 * sc);
                     fg->AddRect(a, b, IM_COL32(236, 194, 84, 140), 14 * sc, 0, 1.5f * sc);
@@ -2197,6 +2451,21 @@ extern "C" void launcher_run(const char *root) {
                         fg->AddText(g_font_small, sfs, ImVec2((a.x + b.x - ns.x) * 0.5f, bb.y + 26 * sc + (i + 1) * line_h + 14 * sc),
                                     IM_COL32(150, 148, 140, 255), notes[i]);
                     }
+#ifdef __ANDROID__
+                    if (can_cancel) {  // tapped, or B / Esc: the import stops; the earlier setup stays (package_import.cpp)
+                        const char *c = tr("Cancel");
+                        ImVec2 cs = g_font_small->CalcTextSizeA(sfs, FLT_MAX, 0, c);
+                        ImVec2 ca((a.x + b.x - cs.x) * 0.5f - 24 * sc, b.y - 40 * sc - cs.y - 12 * sc),
+                               cb((a.x + b.x + cs.x) * 0.5f + 24 * sc, b.y - 40 * sc + 12 * sc);
+                        ImVec2 m = ImGui::GetIO().MousePos;
+                        bool hit = m.x >= ca.x && m.x <= cb.x && m.y >= ca.y && m.y <= cb.y;
+                        fg->AddRect(ca, cb, IM_COL32(236, 194, 84, hit ? 255 : 140), 10 * sc, 0, 1.5f * sc);
+                        fg->AddText(g_font_small, sfs, ImVec2(ca.x + 24 * sc, ca.y + 12 * sc), IM_COL32(236, 194, 84, 255), c);
+                        if ((hit && ImGui::IsMouseClicked(0)) || ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) ||
+                            ImGui::IsKeyPressed(ImGuiKey_Escape, false))
+                            g_pkg_cancel = true;
+                    }
+#endif
                 }
             }
 

@@ -12,6 +12,7 @@
 //                  can (each change reallocates the render targets: a short hitch, so it changes rarely, with hysteresis)
 // Test overrides: LARECOMP_SCALE=<f> (the scene's height = 900 x f), LARECOMP_WIDE_TEST=<f> (forced shape).
 #include <math.h>
+#include <stdint.h>
 #include <stdlib.h>
 
 #include "../hle.h"
@@ -28,36 +29,92 @@ static double g_dyn_gpu_sum, g_dyn_dt_sum, g_last_t;
 static int g_dyn_n, g_dyn_gpu_n, g_dyn_good;
 static double g_dyn_cool_until, g_dyn_probe_wait = 5.0, g_dyn_probe_at;
 static double g_dyn_last_raise = -100;
+#ifdef __ANDROID__
+// The GPU's time per frame over the whole window (from BOTWRecompAndroid): its busy total (vulkan/exec.c) at the
+// window's start and end over the frames in it. The per-frame value comes in bursts (a submission's timestamps are read
+// when its ring slot is reused): frames that read 0 were left out of the average, which doubled it - 23 ms "a frame"
+// where the GPU worked ~13 (BOTW, Odin 2, 2026-10-30) - and windows that read only 0s had no GPU time at all; the scale
+// fell to its floor in a scene the CPU held, the image softer for nothing
+extern uint64_t diag_gpu_busy_total_ns(void);
+static uint64_t g_dyn_gpu_t0;
+#endif
+
+static void dyn_window_start(void) {
+    g_dyn_dt_sum = g_dyn_gpu_sum = 0;
+    g_dyn_n = g_dyn_gpu_n = 0;
+#ifdef __ANDROID__
+    g_dyn_gpu_t0 = diag_gpu_busy_total_ns();
+#endif
+}
 
 static void dyn_update(double now, double gpu_ms) {
-    double dt = g_last_t > 0 ? (now - g_last_t) * 1000.0 : 16.7;
+    if (g_last_t <= 0) { g_last_t = now; dyn_window_start(); return; }
+    double dt = (now - g_last_t) * 1000.0;
     g_last_t = now;
-    if (dt > 250) return;  // (loading, menus, a stall: not the GPU's steady state)
+    if (dt > 250) { dyn_window_start(); return; }  // (loading, menus, a stall: not the GPU's steady state)
     double want = framepace_on() && framepace_target() > 0 ? 1000.0 / framepace_target() : 1000.0 / 30;  // (ms a frame)
+#ifdef __ANDROID__
+    // The frame rate it keeps: 60 with Frame rate at 60 fps (TOTK: rt_fps60, the frame controller allowed interval 1)
+    // outside a cutscene (held at 30: nvn/objects.c), else 30 - Auto's 60 comes by itself where the GPU has room
+    // (aiming at Auto's tries for 60 took BOTW's scale to its floor while the game stayed at 30: POCO F7 Ultra, 2026-10-25)
+    {
+        extern bool rt_fps60(void), rt_cutscene_now(void);
+        want = g_settings.fps_mode == 2 && rt_fps60() && !rt_cutscene_now() ? 1000.0 / 60 : 1000.0 / 30;
+        extern int fg_base_fps(void);  // (Frame generation: the game held at its multiplier's base, 30 or 40)
+        int base = fg_base_fps();
+        if (base > 0) want = 1000.0 / base;
+    }
+#endif
     g_dyn_dt_sum += dt;
     g_dyn_n++;
     if (gpu_ms >= 0) { g_dyn_gpu_sum += gpu_ms; g_dyn_gpu_n++; }
     if (g_dyn_n < 30) return;  // decide every ~half second
     double avg_dt = g_dyn_dt_sum / g_dyn_n, avg_gpu = g_dyn_gpu_n ? g_dyn_gpu_sum / g_dyn_gpu_n : -1;
-    g_dyn_dt_sum = g_dyn_gpu_sum = 0;
-    g_dyn_n = g_dyn_gpu_n = 0;
+#ifdef __ANDROID__
+    {
+        uint64_t total = diag_gpu_busy_total_ns();
+        bool measured = total > 0;  // (no GPU timestamps on this device: the frame time alone, below)
+        avg_gpu = total > g_dyn_gpu_t0 ? (double)(total - g_dyn_gpu_t0) / 1e6 / g_dyn_n : -1;
+        (void)gpu_ms;
+        if (measured && avg_gpu < 0) { dyn_window_start(); return; }  // (no submission read back yet: decide next time)
+    }
+#endif
+    dyn_window_start();
     if (now < g_dyn_cool_until) return;
     double prev = g_dyn;
-    bool slow = avg_dt > want * 1.04 || (avg_gpu >= 0 && avg_gpu > want * 0.87);
+    // The GPU's share of the frame: with the frame generation on, its own work (not in the busy total: it submits apart)
+    // comes out of the frame's budget too - the real frame has to leave it room, or it misses its slot and the screen
+    // shows an image twice (vulkan/framegen.c)
+    double want_gpu = want;
+#ifdef __ANDROID__
+    {
+        extern double fg_gpu_ms_per_real(void);
+        double fg = fg_gpu_ms_per_real();
+        if (fg > 0) want_gpu = fmax(want * 0.5, want - fg);
+    }
+#endif
+    // With the GPU's time: slow frames lower the scale only while the GPU is busy most of them - else the CPU holds
+    // them, and a smaller image doesn't help (on BOTW's POCO 36 ms frames with 25 ms of GPU kept lowering it; TOTK's
+    // render thread is its limit, docs/TOTK-PORT.md)
+    bool slow = avg_gpu >= 0 ? avg_gpu > want_gpu * 0.87 || (avg_dt > want * 1.08 && avg_gpu > want_gpu * 0.7)
+                             : avg_dt > want * 1.04;
     if (slow) {
         g_dyn = fmax(0.5, g_dyn - (avg_dt > want * 1.3 ? 0.1 : 0.05));
         g_dyn_good = 0;
         if (now - g_dyn_last_raise < 3.0) g_dyn_probe_wait = fmin(g_dyn_probe_wait * 2, 60.0);  // raised too eagerly
     } else if (g_dyn < 1.0) {
         g_dyn_good++;
-        // with GPU timing: raise when there is clear headroom; without (Vulkan): probe upwards now and then
-        bool room = avg_gpu >= 0 ? avg_gpu < want * 0.63 && g_dyn_good >= 4 : now >= g_dyn_probe_at && g_dyn_good >= 2 * (int)g_dyn_probe_wait;
+        // with GPU timing: raise when there is clear headroom; without: probe upwards now and then (with it too, a
+        // raise that had to be taken back soon waits longer before the next: g_dyn_probe_wait - BOTW's POCO swung
+        // 0.55 <-> 0.70 every couple of seconds, each change reallocating the targets)
+        bool room = avg_gpu >= 0 ? avg_gpu < want_gpu * 0.63 && g_dyn_good >= 4 && now >= g_dyn_probe_at
+                                 : now >= g_dyn_probe_at && g_dyn_good >= 2 * (int)g_dyn_probe_wait;
         if (room) { g_dyn = fmin(1.0, g_dyn + 0.05); g_dyn_good = 0; g_dyn_last_raise = now; g_dyn_probe_at = now + g_dyn_probe_wait; }
     }
     g_dyn = round(g_dyn * 20) / 20;
     if (g_dyn != prev) {
         g_dyn_cool_until = now + 1.5;
-        LOG("[dynres] %.2f -> %.2f (frame %.1f ms, gpu %.1f ms)\n", prev, g_dyn, avg_dt, avg_gpu);
+        LOG("[dynres] %.2f -> %.2f (frame %.1f ms, gpu %.1f ms of %.1f)\n", prev, g_dyn, avg_dt, avg_gpu, want_gpu);
     }
 }
 

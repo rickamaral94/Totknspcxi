@@ -20,6 +20,7 @@
 #include <time.h>
 
 #include "../nvn.h"
+#include "../../diag.h"
 #include "../../platform.h"
 #include "../../rt.h"
 
@@ -78,20 +79,27 @@ static void *render_main(void *arg) {
     (void)arg;
     extern void plat_thread_unpin(void);
     plat_thread_unpin();
+    diag_name_thread("render", DG_RUN);
     // Keep the established ADPF signal by default. CPU-only timing is an explicit experiment:
     // excluding descheduling/waits can understate the work seen by Android's frequency governor.
     const char *timing = getenv("LARECOMP_ADPF_CPU_TIME");
     bool cpu_timing = timing && atoi(timing) != 0;
     pthread_mutex_lock(&q_lock);
     for (;;) {
+        DIAG_PUSH(DG_RENDER_IDLE, 0);
         while (q_head == q_tail) pthread_cond_wait(&q_more, &q_lock);
+        DIAG_POP();
         Req r = q[q_head % QN];
         pthread_mutex_unlock(&q_lock);
         uint64_t t0 = plat_now_ns(), cpu0 = cpu_timing ? render_cpu_ns() : 0;
         extern void vk_tl(const char *what, uint64_t a, uint64_t b);  // (exec.c: LARECOMP_FRAME_TIMELINE)
         vk_tl(r.type == REQ_EXEC ? "render: list start" : r.type == REQ_PRESENT ? "render: present start" : "render: fence", r.id, 0);
         if (r.type == REQ_EXEC) { vk_execute_now(r.a); free(r.p); }  // (r.p: the list copy, vk_async_execute)
-        else if (r.type == REQ_PRESENT) vk_present_now((NvnTexture *)r.p);
+        else if (r.type == REQ_PRESENT) {
+            DIAG_PUSH(DG_RENDER_PRESENT, 0);
+            vk_present_now((NvnTexture *)r.p);
+            DIAG_POP();
+        }
         if (r.type != REQ_FENCE) vk_tl(r.type == REQ_EXEC ? "render: list end" : "render: present end", r.id, 0);
         else if (r.type == REQ_FENCE) nvn_sync_set_seq(r.a, renderer_fence_seq());
         uint64_t elapsed = plat_now_ns() - t0;

@@ -12,6 +12,12 @@
 #include <atomic>
 #include <vector>
 
+#include "diag.h"
+#ifdef __ANDROID__
+#include "lsfg_extract.h"  // (android/totkrecompandroid/app/src/main/cpp)
+extern "C" void launcher_pick_lossless_dll(void);  // (launcher.mm)
+extern "C" int fg_status(char *why, size_t n);       // (nvn/vulkan/framegen.c)
+#endif
 #include "i18n.h"
 #include "imgui.h"
 #include "option_rows.h"
@@ -656,6 +662,14 @@ static void tab_display(void) {
                "The game starts its next frame while the GPU still finishes the last one: a few more fps. What the game reads "
                "back from the GPU then comes a frame late, and Link's legs can sink into the ground while he stands "
                "still. Turn it off if that bothers you. Applies at once.");
+    opt_toggle("Constant buffers read in place (experimental)", &g_settings.cbuf_inplace, false,
+               "With Sync lag off: the GPU reads the game's per-draw constants where the game keeps them instead of copies - "
+               "less work for the render thread. Being tested: if Link's legs sink into the ground with it on, leave it off. "
+               "Applies at once.");
+    opt_toggle("ADPF: the game's threads (experimental)", &g_settings.adpf_workers, false,
+               "Adds the game's busiest threads (up to 3) to Android's performance hint session, beside the presenting and "
+               "render threads, so a late frame raises their clocks too. Gained nothing in BOTW; measure it with Settings > "
+               "Files > Compare: ADPF threads. Applies at once.");
     opt_toggle("Native game code (experimental)", &g_settings.native_code, false,
                "Runs the game's own code directly on the phone's CPU instead of the game code built at setup: no build "
                "needed. An experiment - report what goes wrong. Applies the next time the game starts.");
@@ -663,6 +677,50 @@ static void tab_display(void) {
                "Translates the game's shaders with 32-bit address math, the path used for drivers without 64-bit "
                "integers (Adreno 6xx / 7xx and Mali stock drivers). Try it if lighting, grass or text are missing or wrong "
                "on your GPU. Applies to shaders translated from now on: restart the app for all of them.");
+    {   // Frame generation's shaders from the user's own Lossless.dll (docs/FRAMEGEN.md: B1 - the generation itself comes later)
+        opt_section("Frame generation (Lossless Scaling)");
+        char line[512];
+        int st = lsfg_state(line, sizeof line);
+        std::string value = st == 2 ? tr("Importing...") : st == 1 ? tr("Shaders ready") : line[0] ? tr("Not compatible") : tr("Not imported");
+        if (st == 1 || (st == 0 && line[0])) value += std::string(" - ") + line;
+        if (opt_action("Lossless.dll", value.c_str(),
+                       "Your own Lossless.dll from Lossless Scaling (bought on Steam): its frame generation shaders are "
+                       "translated and kept in the app's private storage; the DLL itself is not kept. A Lossless.dll that "
+                       "doesn't fit this version of TOTKRecompAndroid is refused: use a compatible version of Lossless "
+                       "Scaling.",
+                       false) && st != 2) {
+            launcher_pick_lossless_dll();
+        }
+        if (st == 1) {
+            char why[256];
+            int fs = fg_status(why, sizeof why);
+            std::string desc = tr("Shows frames made by Lossless Scaling's frame generation between the game's own (the multiplier "
+                                  "below). Input feels about one frame later; the menus, "
+                                  "events and movies show the real frames. Turning it on takes effect when TOTKRecompAndroid "
+                                  "starts again; off, at once.");
+            desc += "\n\n";
+            desc += fs == 1 ? tr("On.") : fs == 2 ? tr("On when TOTKRecompAndroid starts again.") : fs == 3 ? tr("Unavailable: ") : tr("Off.");
+            if (fs == 3 || (fs == 1 && why[0])) desc += std::string(fs == 1 ? "\n" : "") + why;
+            opt_toggle("Frame generation", &g_settings.framegen, false, desc.c_str());
+            static const char *mults[] = {"2x (30 -> 60)", "3x (40 -> 120)", "4x (30 -> 120)"};
+            opt_choice("Frame generation multiplier", &g_settings.fg_mult, mults, 3, 0,
+                       "How many frames are shown for each of the game's. 2x: the game at 30, 60 shown. 3x and 4x need a "
+                       "120 Hz screen (the Odin 2 Portal's, for one): the game at 40 or 30, 120 shown - each generated frame costs the "
+                       "GPU, input feels a little later. Where the screen can't, 2x. Applies at once.");
+            static const char *flows[] = {"100%", "75%", "50%"};
+            opt_choice("Frame generation flow scale", &g_settings.fg_flow, flows, 3, 2,
+                       "The size at which the motion between two frames is estimated, a share of the screen's. Lower: the "
+                       "generation costs the GPU much less, with more mistakes on small moving details. Applies at once.");
+            opt_toggle("Frame generation performance mode", &g_settings.fg_performance, false,
+                       "Lossless Scaling's lighter frame generation: cheaper on the GPU, a little less accurate. Applies at once.");
+            opt_toggle("Frame generation HUD mask", &g_settings.fg_hud, true,
+                       "Keeps the game's HUD (hearts, map, text) sharp in the generated frames: where it is, they show the real "
+                       "frame's pixels instead of the interpolated ones, which bend and smear it. Costs the GPU about 1 ms a "
+                       "frame. Applies at once.");
+        }
+        if (st == 1 && opt_button("Remove shaders", "Deletes the shaders translated from your Lossless.dll."))
+            lsfg_remove();
+    }
 #endif
     opt_end();
 }
@@ -1327,6 +1385,20 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
     if (g_settings.show_fps) {  // (the full performance overlay: ui/perf_overlay.mm)
         extern void perf_overlay_draw(ImVec2 display, float scale);
         perf_overlay_draw(io.DisplaySize, scale);
+    }
+    {   // the performance measurement under way (runtime/diag.c): a small line in the corner, so it's clear when it runs
+        char left[1100];
+        int st = diag_status(left, sizeof left);
+        if (st == 1 || st == 2) {
+            ImGui::SetNextWindowPos(ImVec2(16 * scale, io.DisplaySize.y - 16 * scale), 0, ImVec2(0, 1));
+            ImGui::SetNextWindowBgAlpha(0.45f);
+            ImGui::Begin("##diag", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+                                            ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing);
+            ImGui::SetWindowFontScale(0.6f);
+            if (st == 1) ImGui::TextUnformatted(tr("Performance measurement: waiting for 5 s of gameplay, out of the menus."));
+            else ImGui::Text(tr("Measuring performance: %s s left."), left);
+            ImGui::End();
+        }
     }
 #else
     if (g_settings.show_fps) {

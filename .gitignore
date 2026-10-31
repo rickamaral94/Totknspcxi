@@ -24,3 +24,16 @@ __pycache__/
 
 # test captures (screenshots, videos from testers)
 testes/
+# NSP/XCI import (tools/nximport): the player's own keys and packages are never committed
+*.keys
+*.nsp
+*.xci
+*.nsz
+*.xcz
+*.nca
+*.ncz
+*.tik
+
+# Lossless Scaling: the user's own DLL and the shaders translated from it never go into the repository
+Lossless.dll
+*.spv

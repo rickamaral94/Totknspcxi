@@ -40,8 +40,30 @@ Android only (arm64, Vulkan). Windows, Linux or macOS may be used as development
 > tested and reviewed by a human.
 
 > [!NOTE]
-> **No game files are included.** You need your own legally obtained dump of *Tears of the Kingdom* with the 1.4.3
-> update applied (`exefs` and the `romfs`). Instructions on how to obtain it will not be provided.
+> **No game files are included.** You need your own legally obtained *Tears of the Kingdom* with the 1.4.3 update:
+> an extracted folder (`exefs` and `romfs`, update applied), or the base NSP/XCI and the 1.4.3 update NSP dumped from
+> your own console together with that console's keys (see [Importing from NSP/XCI](#importing-from-nspxci)).
+> Instructions on obtaining game files or keys are not provided.
+
+## Importing from NSP/XCI
+
+The app (and the `nximport` tool on a PC) can set the game up straight from the base game's NSP or XCI and the 1.4.3
+update NSP (`0100F2C0115B6800`, v720896), using the `prod.keys` (and, when a package has no ticket, `title.keys`) from
+**your own console**. No keys come with this project, and none are downloaded. The base game alone is 1.0.0, which this
+app doesn't run: the update is required.
+
+- **In the app:** **Game Files > Import from NSP/XCI > Game package** and **Update**, then **prod.keys** / **title.keys**,
+  then **Import**. The previous setup stays playable until the new one is complete and checked. **Remember the keys**
+  keeps them in the app's private storage, excluded from backups and device transfer; **Forget the keys** deletes
+  them. **Verify packages** checks each NCA against its SHA-256 in the package's metadata, useful when an import
+  reports damaged data.
+- **On a PC:** `tools/nximport` builds a CLI that writes `Dump/0100F2C0115B6000/{exefs,romfs}`;
+  `android/build_gamelib.sh` and `android/push_game.sh` accept `--nsp/--xci … --update … --keys … [--title-keys …]`.
+- Every block read is checked against the hashes in the package (and the update's patched RomFS against the update's
+  own hashes), so a successful import is the game's data exactly. NSZ/XCZ are not supported.
+
+Details, formats and tests: [docs/IMPORT-NSP-XCI.md](docs/IMPORT-NSP-XCI.md). The importer is BOTWRecompAndroid's,
+with TOTK's title IDs and version.
 
 ## Building (developers)
 
@@ -76,6 +98,12 @@ android/run_boot.sh 120                                      # start the game, l
 - [Nycolazs](https://github.com/Nycolazs) for LASRecomp-Android-Plus (MIT): Vulkan driver compatibility.
 - The [zeldaret/botw](https://github.com/zeldaret/botw) decompilation and [open-ead/sead](https://github.com/open-ead/sead),
   for what is known about the engine TOTK grew from.
+- [Mbed TLS](https://github.com/Mbed-TLS/mbedtls) (Apache 2.0, AES and SHA-256 for the NSP/XCI import) and
+  [hactool](https://github.com/SciresM/hactool) by SciresM (ISC), the reference for the Switch package formats (no code
+  taken) and for `tools/nximport/verify.sh`.
+- [lsfg-vk](https://lsfg-vk.dev) 1.0.0 by PancakeTAS (MIT) through [GameNative/lsfg-vk-android](https://github.com/GameNative/lsfg-vk-android)
+  (MIT), with [DXVK](https://github.com/doitsujin/dxvk)'s dxbc (zlib) and [pe-parse](https://github.com/trailofbits/pe-parse) (MIT):
+  the frame generation's shaders, translated on the phone from the user's own Lossless.dll (none included).
 - Upscaling and anti-aliasing: [AMD FidelityFX FSR 1](https://github.com/GPUOpen-Effects/FidelityFX-FSR) (MIT),
   [Qualcomm Snapdragon GSR](https://github.com/SnapdragonStudios/snapdragon-gsr) (BSD-3-Clause),
   [SMAA](https://github.com/iryoku/smaa) (MIT).

@@ -4,6 +4,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "diag.h"
 #include "hle.h"
 #include "kernel.h"
 
@@ -362,8 +363,10 @@ static void core0_acquire(KThread *t) {
     else c0_head = t;
     c0_tail = t;
     uint64_t t0 = plat_now_ns();
+    DIAG_PUSH(DG_CORE0, 0);
     while ((c0_holder || c0_head != t) && __atomic_load_n(&t->core, __ATOMIC_ACQUIRE) == 0 && !g_rt_unwind)
         pthread_cond_wait(&c0_cv, &c0_m);
+    DIAG_POP();
     uint64_t now = plat_now_ns(), w = now - t0;
     g_blocked_ns += w;
     c0_stat.takes++, c0_stat.waited += w;
@@ -420,8 +423,10 @@ static __thread uint64_t blocking_t0;
 void kernel_blocking_begin(void) {
     blocking_t0 = plat_now_ns();
     core0_release(t_cur);
+    DIAG_PUSH(DG_HOST_WAIT, 0);
 }
 void kernel_blocking_end(void) {
+    DIAG_POP();
     core0_acquire(t_cur);
     if (blocking_t0) g_blocked_ns += plat_now_ns() - blocking_t0;
     blocking_t0 = 0;
@@ -432,6 +437,7 @@ static void *thread_main(void *arg) {
     KThread *t = arg;
     t_cur = t;
 #ifdef __ANDROID__
+    t->tid = (int32_t)gettid();
     plat_thread_unpin();  // (not the presenting thread's fast cores: platform.h)
 #endif
     crash_handler_install();
@@ -532,6 +538,46 @@ void kernel_run_main(KThread *t, uint64_t x0, uint64_t x1, uint64_t x2, uint64_t
 uint32_t kernel_current_thread_handle(void) { return t_cur ? t_cur->handle : 0; }
 Cpu *kernel_current_cpu(void) { return t_cur ? &t_cur->cpu : NULL; }
 KThread *kernel_current_thread(void) { return t_cur; }
+
+// (diag.c) no address sampling with Native game code: the game's own ARM64 code runs with the thread's registers
+// rewritten (native.c), and a signal handler between its instructions is untested
+bool diag_sampler_allowed(void) { return !native_on(); }
+
+#ifdef __ANDROID__
+// (platform/android.c, the ADPF session) up to max host thread ids of the game's threads that used the most CPU since
+// the last call, busiest first, each at least min_share of the wall time between the calls; skip: one left out
+int kernel_busiest_threads(int32_t *tids, int max, double min_share, int32_t skip) {
+    static uint64_t last;
+    uint64_t now = plat_now_ns(), span = last ? now - last : 0, best[8];
+    last = now;
+    if (max > 8) max = 8;
+    int n = 0;
+    pthread_mutex_lock(&g_klock);
+    for (KThread *t = g_threads; t; t = t->anext) {
+        struct timespec ts;
+        if (!t->tid || t->finished || clock_gettime((clockid_t)((~(unsigned)t->tid << 3) | 6), &ts)) continue;
+        uint64_t cpu = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec, d = t->cpu_seen ? cpu - t->cpu_seen : 0;
+        t->cpu_seen = cpu;
+        if (t->tid == skip || !span || (double)d < min_share * (double)span) continue;
+        int i = n < max ? n++ : max;  // (insertion, busiest first; past the last: dropped)
+        while (i > 0 && best[i - 1] < d) {
+            if (i < max) best[i] = best[i - 1], tids[i] = tids[i - 1];
+            i--;
+        }
+        if (i < max) best[i] = d, tids[i] = t->tid;
+    }
+    pthread_mutex_unlock(&g_klock);
+    return n;
+}
+#endif
+
+// (diag.c) the calling thread's KThread
+bool diag_thread_identity(uint64_t *id, uint32_t *handle, int *prio) {
+    KThread *t = t_cur;
+    if (!t) return false;
+    *id = t->id, *handle = t->handle, *prio = t->prio;
+    return true;
+}
 
 // ------------------------------------------------------------------ mutex / condvar (Horizon semantics)
 // Mutex word: owner handle | WAITERS_BIT. Waiting threads sleep on the global cond and are handed ownership.
@@ -908,7 +954,10 @@ void rt_svc(Cpu *c, uint32_t imm, uint64_t pc) {
     kernel_preempt_point();
     bool blocks = svc_blocks(imm);
     if (blocks) core0_release(t_cur);
+    // (SleepThread 0 / -1 / -2: a yield; diag.h)
+    DIAG_PUSH(imm == 0x0B && (int64_t)c->x[0] <= 0 ? DG_SPIN : blocks ? DG_SVC_BLOCK : DG_SVC, (int)imm);
     svc_entry(c, imm, pc);
+    DIAG_POP();
     if (blocks) core0_acquire(t_cur);
     kernel_preempt_point();
 #else

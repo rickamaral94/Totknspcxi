@@ -4,9 +4,12 @@
 # with the NDK against the app's libmain.so (build the app first). Output: android/out/totkgame.so and totkgame.so.id,
 # for <data root>/extracted/ on the device (android/push_game.sh), where the app picks them up.
 set -euo pipefail
+# (or the packages: android/build_gamelib.sh --nsp base.nsp [--update update.nsp] --keys prod.keys [--title-keys ...]
+# / --xci game.xci ...: imported first by android/nximport_dump.sh, docs/IMPORT-NSP-XCI.md)
+if [ "${1:-}" != "${1#--}" ]; then EXEFS=$("$(dirname "$0")/nximport_dump.sh" "$@")/exefs; fi
 cd "$(dirname "$0")/.."
 R=$PWD
-EXEFS=${1:?usage: android/build_gamelib.sh <exefs folder (main, sdk, ...)>}
+EXEFS=${EXEFS:-${1:?usage: android/build_gamelib.sh <exefs folder (main, sdk, ...)> | --nsp/--xci ... --keys prod.keys}}
 # (GAMELIB_GEN / GAMELIB_OUT: another game version beside the usual one, e.g. generated-android-dyn-<version>)
 GEN=${GAMELIB_GEN:-$R/generated-android-dyn}
 OUT=${GAMELIB_OUT:-$R/android/out}

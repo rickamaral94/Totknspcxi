@@ -13,4 +13,10 @@
     <string name="build_channel">Compilação do código do jogo</string>
     <string name="build_title">Compilando o código do jogo</string>
     <string name="build_text">O BOTWRecompAndroid continua compilando com a tela apagada. Deixe o celular carregando.</string>
+    <string name="import_title">Importando os arquivos do jogo</string>
+    <string name="import_text">O TOTKRecompAndroid continua importando com a tela apagada. Deixe o celular carregando.</string>
+    <string name="import_copy_title">Este arquivo não pode ser lido onde está</string>
+    <string name="import_copy_text">O Android não consegue ler %1$s onde ele está (uma pasta na nuvem ou de streaming). O TOTKRecompAndroid pode copiá-lo antes para o próprio armazenamento: mais %2$s GB, apagados depois da importação (%3$s GB livres). Copiar?</string>
+    <string name="import_copy_yes">Copiar</string>
+    <string name="import_copy_no">Cancelar</string>
 </resources>

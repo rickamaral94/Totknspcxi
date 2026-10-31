@@ -4,10 +4,13 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "../diag.h"
 #include "../kernel.h"
 #include "../settings.h"
 #include "../framepace.h"
 #include "nvn.h"
+
+volatile bool g_sync_lag_now;  // (nvnSyncWait: the last wait was one frame back, the CPU may run a frame ahead of the GPU)
 
 void renderer_sync(void);
 
@@ -335,6 +338,7 @@ NVN(nvnSyncWait) {  // NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED
     extern int vk_ab(const char *what);
     int ab = vk_ab("synclag");
     bool lag_now = vk_async_on() && !flush && !whole && (ab >= 0 ? ab == 1 : lag > 0);
+    g_sync_lag_now = lag_now;  // (vulkan/exec.c ubo_direct: constant buffers read in place only without the lag)
     static uint64_t prev_newest_seq;  // (kept with the lag off too: turned on, it waits one frame back, not more)
     bool newest = vk_async_on() && sync_of(A(0))->lseq == g_newest_fence_lseq;
     uint64_t newest_prev = prev_newest_seq;
@@ -1435,9 +1439,15 @@ NVN(nvnWindowGetPresentInterval) { RET(WIN->interval); }
 // TOTK 1.4.3's frame controller may go down to interval 1 - 60 fps - where a frame fits (tools/patches.py, after
 // MacNativeGames; the world, cloth and fades step by the measured time): with Video > Frame rate Auto or 60. 30, or
 // LARECOMP_FPS60=0, keeps the game's lowest (2); LARECOMP_FPS60=1 takes 1 at 30 too (the presents still wait for 2).
+// With the frame generation on (Video > Frame generation, vulkan/framegen.c), never: the game is held at its
+// multiplier's base (30 or 40), the generated frames make up the rest.
 bool rt_fps60(void) {
     static int env = -2;
     if (env == -2) env = getenv("LARECOMP_FPS60") ? atoi(getenv("LARECOMP_FPS60")) : -1;
+#ifdef __ANDROID__
+    extern int fg_base_fps(void);
+    if (fg_base_fps() > 0) return false;
+#endif
     return env >= 0 ? env != 0 : g_game_version == GAME_V_143 && g_settings.fps_mode != 1;
 }
 
@@ -1459,6 +1469,18 @@ static bool rt_cutscene(void) {
     if (now != last) LOG("[totk] %s\n", (last = now) ? "cutscene: presents held at 30 fps" : "cutscene over");
     return now;
 }
+bool rt_cutscene_now(void) { return rt_cutscene(); }  // (output_scale.c: the dynamic resolution keeps 30 then)
+
+// (diag.c) playing: TOTK's 3D scene drawn within the last 20 presents (so not the title screen, a loading screen or
+// a menu over a still image), no cutscene and no movie. BOTW's menu and event addresses (framepace.c) are 1.8.2's.
+bool diag_in_gameplay(void) {
+    extern uint64_t vk_scene_frame(void), renderer_present_count(void);
+    extern volatile int g_movie_playing;
+    uint64_t now = renderer_present_count(), seen = vk_scene_frame();
+    return !framepace_on_title() && seen && now - seen < 20 && !rt_cutscene() &&
+           __atomic_load_n(&g_movie_playing, __ATOMIC_RELAXED) <= 0;
+}
+
 // ... and the frame controller's own pick is 2 then (tools/patches.py, main+0x2db238): some of a cutscene's animation
 // steps by the interval the game believes in, not by the measured time - held at 30 while it believed 1 (a light
 // cutscene frame fits 60) they played in slow motion, and at 60 while it believed 2, fast (2026-10-29).
@@ -1631,7 +1653,10 @@ NVN(nvnQueuePresentTexture) {
     {   // (which guest thread presents: LARECOMP_PROF_SVC_TID, kernel.c)
         static uint64_t last_id = ~0ull;
         KThread *kt = kernel_current_thread();
-        if (kt && kt->id != last_id) LOG("[pace] presenting thread t%llu\n", (unsigned long long)(last_id = kt->id));
+        if (kt && kt->id != last_id) {
+            LOG("[pace] presenting thread t%llu\n", (unsigned long long)(last_id = kt->id));
+            diag_note_presenting(kt->id);
+        }
     }
     {   // Frame limiter: a present waits until N vsyncs have gone by since the previous one, as NVN does on the Switch -
         // N is the larger of the window's interval (BOTW asks for 2: its world steps 1/30 s a frame) and the Video
@@ -1649,7 +1674,23 @@ NVN(nvnQueuePresentTexture) {
         // cutscene's 2 stayed there after it; a cutscene at 30, as on the Switch)
         if (g_game_version == GAME_V_143 && g_settings.fps_mode == 2 && rt_fps60()) n = 1;
         if (n < 2 && rt_cutscene()) n = 2;
-        if (on && framepace_on()) {
+#ifdef __ANDROID__
+        extern int fg_base_fps(void);
+        int fg_base = fg_base_fps();  // (Video > Frame generation: the game at its multiplier's base, 30 or 40 a second)
+#else
+        int fg_base = 0;
+#endif
+        if (on && fg_base > 0) {
+            // A steady grid at the base rate, whatever the interval (40 a second is no whole number of 60 Hz vsyncs);
+            // after a long frame the grid starts again. The frame generation shows its frames on its own times.
+            static uint64_t last;
+            uint64_t period = 1000000000ull / (uint64_t)fg_base, target = last + period, t0 = plat_now_ns();
+            if (last && t0 < target) plat_sleep_until_ns(target);
+            uint64_t t1 = plat_now_ns();
+            g_blocked_ns += t1 - t0;
+            last = last && t1 < target + period ? target : t1;
+            last_vs = __atomic_load_n(&g_vsync_count, __ATOMIC_RELAXED);
+        } else if (on && framepace_on()) {
             // BOTW 1.8.2 (runtime/hle/framepace.c): a steady grid at the chosen frame rate, whatever the interval;
             // after a long frame the grid starts again. framepace.c sets the game's clock from when it went out.
             static uint64_t last;
