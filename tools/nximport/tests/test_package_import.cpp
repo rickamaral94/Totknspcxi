@@ -24,11 +24,10 @@ synth::Bytes read_file(const std::string &p);
 static std::string g_root;
 static uint8_t g_build[8];
 extern "C" bool rt_version_root(int v, char *out, size_t n) {
-    if (v == 100) return (size_t)snprintf(out, n, "%s", g_root.c_str()) < n;
-    if (v == 160 || v == 182 || v == 190) return (size_t)snprintf(out, n, "%s/v%d", g_root.c_str(), v) < n;
+    if (v == 143) return (size_t)snprintf(out, n, "%s", g_root.c_str()) < n;  // (GAME_V_MAIN: the data root itself)
     return false;
 }
-static const char *const GAME_FILES[] = {"exefs", "romfs", "romfs.bin", "romfs.link", "botwgame.so", "botwgame.so.id"};
+static const char *const GAME_FILES[] = {"exefs", "romfs", "romfs.bin", "romfs.link", "totkgame.so", "totkgame.so.id"};
 extern "C" bool rt_remove_game_file(const char *dir, const char *name) {
     bool known = false;
     for (const char *g : GAME_FILES) known |= !strcmp(g, name);
@@ -40,7 +39,7 @@ extern "C" bool rt_remove_game_files_for_setup(const char *dir) {
     for (const char *g : GAME_FILES) rt_remove_game_file(dir, g);
     return true;
 }
-extern "C" int game_version_of_build(const uint8_t id[8]) { return memcmp(id, g_build, 8) ? 0 : 100; }
+extern "C" int game_version_of_build(const uint8_t id[8]) { return memcmp(id, g_build, 8) ? 0 : 143; }
 
 namespace {
 
@@ -78,7 +77,7 @@ struct PkgFixture {
         g_root = dir + "/data";
         mkdir(g_root.c_str(), 0755);
         for (int i = 0; i < 4; i++) romfs.push_back({"Pack/Big" + std::to_string(i) + ".pack", synth::random_bytes(rng, 2500000)});
-        memcpy(g_build, exefs[0].second.data() + 0x40, 8);  // (the synthetic main's build id is version 100's here)
+        memcpy(g_build, exefs[0].second.data() + 0x40, 8);  // (the synthetic main's build id is version 143 (GAME_V_143) here)
         synth::GameSpec s;
         s.exefs = exefs, s.romfs = romfs;
         nsp_bytes = synth::pfs0(synth::game(keys, s, rng).package);
@@ -99,13 +98,13 @@ struct PkgFixture {
         mkdir((d + "/exefs").c_str(), 0755);
         put(d + "/exefs/main", "OLD MAIN");
         put(d + "/romfs.bin", "OLD IMAGE");
-        put(d + "/botwgame.so", "OLD CODE");
+        put(d + "/totkgame.so", "OLD CODE");
         mkdir((d + "/.gamebuild").c_str(), 0755);
         put(d + "/.gamebuild/obj.o", "OBJECTS");
     }
     bool old_intact() {
         std::string d = g_root + "/extracted";
-        return get(d + "/exefs/main") == "OLD MAIN" && get(d + "/romfs.bin") == "OLD IMAGE" && get(d + "/botwgame.so") == "OLD CODE";
+        return get(d + "/exefs/main") == "OLD MAIN" && get(d + "/romfs.bin") == "OLD IMAGE" && get(d + "/totkgame.so") == "OLD CODE";
     }
 };
 
@@ -124,13 +123,13 @@ TEST(pkg_import_fresh_and_replacing) {
     h.progress = [&](uint64_t d, uint64_t) { CHECK(d >= last); last = d; };
     PackageImportOutcome o = package_import_run(fx.inputs(), h, nullptr);
     REQUIRE(o.result == PKG_DONE);
-    CHECK(o.version == 100);
+    CHECK(o.version == 143);
     std::string d = g_root + "/extracted";
     CHECK(o.dest == d);
     CHECK(steps.size() == 3);
     // the new files in place, the old ones gone (the compiled objects stay), no staging left
     for (auto &f : fx.exefs) CHECK(read_file(d + "/exefs/" + f.first) == f.second);
-    CHECK(!exists(d + "/botwgame.so"));
+    CHECK(!exists(d + "/totkgame.so"));
     CHECK(get(d + "/.gamebuild/obj.o") == "OBJECTS");
     CHECK(!exists(g_root + "/extracted.importing"));
     CHECK(read_file(d + "/romfs/Movie/Demo101.mp4") == fx.romfs[6].second);
@@ -240,17 +239,17 @@ TEST(pkg_import_recovery) {
         mkdir((st + "/exefs").c_str(), 0755);
         put(st + "/exefs/main", "NEW MAIN");
         put(st + "/romfs.bin", "NEW IMAGE");
-        put(st + "/COMPLETE", "100\n");
+        put(st + "/COMPLETE", "143\n");
         package_import_recover();
         CHECK(!exists(st));
         CHECK(get(d + "/exefs/main") == "NEW MAIN");
         CHECK(get(d + "/romfs.bin") == "NEW IMAGE");
-        CHECK(!exists(d + "/botwgame.so"));
+        CHECK(!exists(d + "/totkgame.so"));
     }
     {  // complete, killed after exefs/ was moved: the rest moved, the new exefs/ kept
         mkdir(st.c_str(), 0755);
         put(st + "/romfs.bin", "NEWER IMAGE");
-        put(st + "/COMPLETE", "100\n");
+        put(st + "/COMPLETE", "143\n");
         put(d + "/exefs/main", "NEWER MAIN");
         package_import_recover();
         CHECK(!exists(st));

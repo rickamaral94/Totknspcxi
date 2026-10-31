@@ -58,7 +58,7 @@ Bytes bucket_tree(const std::vector<Bytes> &entries, const std::vector<uint64_t>
 
 struct NcaSpec {
     nx::ContentType type = nx::ContentType::Program;
-    uint64_t title_id = 0x01007EF00011E000ull;
+    uint64_t title_id = 0x0100F2C0115B6000ull;
     uint8_t keygen = 0;  // the header's 0x220 (0x206 stays 0)
     std::vector<SectionSpec> sections;
     bool nca2 = false;
@@ -86,7 +86,7 @@ Bytes ticket(const uint8_t rights_id[16], const uint8_t enc_title_key[16], bool 
 
 // A whole game package: Program NCA (exefs + RomFS), Meta NCA, ticket when it uses a title key
 struct GameSpec {
-    uint64_t title_id = 0x01007EF00011E000ull;
+    uint64_t title_id = 0x0100F2C0115B6000ull;
     uint8_t meta_type = 0x80;
     uint32_t version = 0;
     Files exefs;
@@ -108,7 +108,7 @@ struct Game {
 };
 Game game(const Keys &keys, const GameSpec &spec, std::mt19937_64 &rng);
 
-// A small BOTW-like file set
+// A small TOTK-like file set
 Files sample_exefs(std::mt19937_64 &rng);
 Files sample_romfs(std::mt19937_64 &rng);
 

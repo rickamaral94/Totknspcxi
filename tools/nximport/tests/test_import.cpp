@@ -52,7 +52,7 @@ struct Fixture {
     // extracts and checks every file against what went in
     void check_extract(const Importer &imp) {
         std::string dir = temp_dir();
-        std::string out = dir + "/01007EF00011E000";
+        std::string out = dir + "/0100F2C0115B6000";
         uint64_t last = 0, total = 0;
         imp.extract_to(out, [&](uint64_t d, uint64_t t) { last = d, total = t; }, nullptr);
         CHECK(last == total);
@@ -69,7 +69,7 @@ TEST(import_nsp_key_area) {
     Importer imp(fx.input(g.package));
     CHECK(imp.exefs().size() == fx.exefs.size());
     CHECK(imp.romfs().files.size() == fx.romfs.size());
-    CHECK(imp.version_txt() == "1.0.0");
+    CHECK(imp.version_txt() == "1.4.3");
     CHECK(!imp.has_update());
     fx.check_extract(imp);
     imp.verify_ncas(nullptr, nullptr);
@@ -157,9 +157,9 @@ TEST(import_refuses_other_games_and_missing_content) {
     s.title_id = 0x0100000000010000ull;
     auto other = synth::game(fx.keys, s, fx.rng);
     std::string e = ERROR_OF(Importer(fx.input(other.package)));
-    CHECK(contains(e, "is not Breath of the Wild"));
+    CHECK(contains(e, "is not Tears of the Kingdom"));
     CHECK(contains(e, "0100000000010000"));
-    CHECK(contains(e, "não é o Breath of the Wild"));
+    CHECK(contains(e, "não é o Tears of the Kingdom"));
 
     auto g = synth::game(fx.keys, fx.spec(), fx.rng);
     synth::Files no_program(g.package.begin() + 1, g.package.end());
@@ -216,7 +216,7 @@ int write_sample(const std::string &dir, int mib) {
     for (int i = 0; i < mib; i++) fx.romfs.push_back({"Pack/Big" + std::to_string(i) + ".pack", synth::random_bytes(fx.rng, (1u << 20) - 13 * i)});
     auto g = synth::game(fx.keys, fx.spec(), fx.rng);
     synth::GameSpec u = fx.spec();
-    u.title_id = BOTW_PATCH_ID, u.meta_type = 0x81, u.version = 786432, u.rights = true, u.keygen = 3;
+    u.title_id = GAME_PATCH_ID, u.meta_type = 0x81, u.version = 786432, u.rights = true, u.keygen = 3;
     u.exefs = synth::sample_exefs(fx.rng);
     u.romfs[0].second = {'1', '.', '6', '.', '0'};
     for (size_t i = 0; i < u.romfs[1].second.size(); i += 4096) u.romfs[1].second[i] ^= 0x33;

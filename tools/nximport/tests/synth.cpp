@@ -495,7 +495,7 @@ Files sample_exefs(std::mt19937_64 &rng) {
 }
 
 Files sample_romfs(std::mt19937_64 &rng) {
-    return {{"System/Version.txt", Bytes{'1', '.', '0', '.', '0'}},
+    return {{"System/Version.txt", Bytes{'1', '.', '4', '.', '3'}},
             {"Pack/Bootup.pack", random_bytes(rng, 20000)},
             {"Pack/Dungeon000.pack", random_bytes(rng, 7000)},
             {"Actor/Pack/Enemy_Bokoblin.sbactorpack", random_bytes(rng, 3333)},

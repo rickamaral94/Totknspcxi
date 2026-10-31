@@ -1,5 +1,5 @@
-// nximport CLI: the player's own NSP/XCI (+ update) and keys into Dump/01007EF00011E000/{exefs,romfs}, the layout
-// android/build_gamelib.sh, android/push_game.sh and tools/botw_dump.py take. Written into <title id>.partial and
+// nximport CLI: the player's own NSP/XCI (+ update) and keys into Dump/0100F2C0115B6000/{exefs,romfs}, the layout
+// android/build_gamelib.sh, android/push_game.sh and tools/totk_dump.py take. Written into <title id>.partial and
 // renamed when whole: an interrupted run leaves no folder that looks finished.
 #include "nximport.h"
 
@@ -25,7 +25,7 @@ static int usage() {
     fprintf(stderr,
             "usage: nximport --keys prod.keys [--title-keys title.keys] (--nsp base.nsp | --xci game.xci)\n"
             "                [--update update.nsp] -o <out dir> [--verify-nca] [--list]\n"
-            "  writes <out dir>/01007EF00011E000/exefs and .../romfs (as hactool extracts them)\n"
+            "  writes <out dir>/0100F2C0115B6000/exefs and .../romfs (as hactool extracts them)\n"
             "  --verify-nca  also check each NCA's SHA-256 against the package metadata (reads the packages once more)\n"
             "  --list        print what would be extracted, write nothing\n"
             "  --programs    print the Program NCAs used (\"base <file>\", \"update <file>\"), write nothing\n");
@@ -64,7 +64,7 @@ int main(int argc, char **argv) {
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
 
-    std::string dest = out + "/01007EF00011E000", partial = dest + ".partial";
+    std::string dest = out + "/0100F2C0115B6000", partial = dest + ".partial";
     try {
         nx::ImportInput in;
         in.prod_keys = nx::open_file(keys);

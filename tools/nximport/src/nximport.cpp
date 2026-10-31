@@ -96,7 +96,7 @@ struct Importer::Impl {
         const Cnmt *found = nullptr;
         for (auto &m : p.metas) {
             if (m.type != type || m.title_id != title) continue;
-            if (type == META_PATCH && m.application_id != BOTW_TITLE_ID) continue;
+            if (type == META_PATCH && m.application_id != GAME_TITLE_ID) continue;
             if (found)
                 fail(p.what + " holds more than one " + (type == META_PATCH ? "update" : "copy") + " of the game: choose a package with one",
                      p.what + " tem mais de um " + (type == META_PATCH ? "update" : "jogo base") + " deste jogo: escolha um pacote com um só");
@@ -107,10 +107,10 @@ struct Importer::Impl {
             for (auto &m : p.metas) others += (others.empty() ? "" : ", ") + tid(m.title_id);
             if (others.empty()) others = "none";
             if (type == META_PATCH)
-                fail(p.what + " is not an update of Breath of the Wild (" + tid(BOTW_PATCH_ID) + "); it holds: " + others,
-                     p.what + " não é um update do Breath of the Wild (" + tid(BOTW_PATCH_ID) + "); ele contém: " + others);
-            fail(p.what + " is not Breath of the Wild (" + tid(BOTW_TITLE_ID) + "); it holds: " + others,
-                 p.what + " não é o Breath of the Wild (" + tid(BOTW_TITLE_ID) + "); ele contém: " + others);
+                fail(p.what + " is not an update of Tears of the Kingdom (" + tid(GAME_PATCH_ID) + "); it holds: " + others,
+                     p.what + " não é um update do Tears of the Kingdom (" + tid(GAME_PATCH_ID) + "); ele contém: " + others);
+            fail(p.what + " is not Tears of the Kingdom (" + tid(GAME_TITLE_ID) + "); it holds: " + others,
+                 p.what + " não é o Tears of the Kingdom (" + tid(GAME_TITLE_ID) + "); ele contém: " + others);
         }
         const CnmtContent *c = found->find(CNT_PROGRAM);
         if (!c) corrupt(p.what + " (no program in the CNMT)");
@@ -121,7 +121,7 @@ struct Importer::Impl {
         if (e->data->size() != c->size) corrupt(e->name + " (size differs from its CNMT record)");
         auto nca = std::make_shared<Nca>(e->data, keys, tickets);
         // (an update's program may carry the application's id or the patch's: the CNMT already said which content it is)
-        if (nca->content_type() != ContentType::Program || (nca->title_id() != BOTW_TITLE_ID && nca->title_id() != found->title_id))
+        if (nca->content_type() != ContentType::Program || (nca->title_id() != GAME_TITLE_ID && nca->title_id() != found->title_id))
             corrupt(e->name + " (not the game's program)");
         return {*found, &p, nca, e->name};
     }
@@ -164,10 +164,10 @@ Importer::Importer(const ImportInput &in) : impl_(new Impl) {
     m.packages.push_back(m.open(in.base, in.base_kind));
     if (in.update) m.packages.push_back(m.open(in.update, PackageKind::NSP));
     for (auto &p : m.packages) m.read_metas(p);
-    m.base = m.pick(m.packages[0], META_APPLICATION, BOTW_TITLE_ID);
+    m.base = m.pick(m.packages[0], META_APPLICATION, GAME_TITLE_ID);
     if (in.update) {
         m.has_update = true;
-        m.update = m.pick(m.packages[1], META_PATCH, BOTW_PATCH_ID);
+        m.update = m.pick(m.packages[1], META_PATCH, GAME_PATCH_ID);
     }
     m.open_exefs(m.has_update ? *m.update.program : *m.base.program);
     m.open_romfs();

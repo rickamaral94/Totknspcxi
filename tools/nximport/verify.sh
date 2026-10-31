@@ -43,7 +43,7 @@ ARGS=(--keys "$KEYS" "--$KIND" "$BASE")
 
 echo "== nximport"
 "$NX" "${ARGS[@]}" -o "$WORK/nximport"
-OURS=$WORK/nximport/01007EF00011E000
+OURS=$WORK/nximport/0100F2C0115B6000
 
 # each file of a tree: "path size sha256", sorted
 listing() { (cd "$1" && find . -type f -printf '%P\n' | LC_ALL=C sort | while IFS= read -r f; do

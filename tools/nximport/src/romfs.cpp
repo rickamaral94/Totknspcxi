@@ -8,7 +8,7 @@ namespace nx {
 
 enum : uint64_t {
     EMPTY = 0xFFFFFFFFu,
-    MAX_TABLE = 64ull << 20,  // (BOTW: ~40000 files, a few MB of tables)
+    MAX_TABLE = 64ull << 20,  // (TOTK: ~304000 files, ~20 MB of tables)
     MAX_ENTRIES = 4u << 20,
     MAX_DEPTH = 64,
     MAX_NAME = 0x300,

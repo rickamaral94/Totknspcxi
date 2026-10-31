@@ -2,8 +2,8 @@
 // takes (exefs/ + romfs/, as hactool extracts them). The desktop CLI (cli/main.cpp) and the Android app (JNI,
 // android/totkrecompandroid/app/src/main/cpp/nximport_jni.cpp) share this.
 //
-// The game is found through the packages' content metadata: the base's Application CNMT of 01007EF00011E000 and,
-// with an update, its Patch CNMT of 01007EF00011E800; their Program NCAs by content id. Which game version that is
+// The game is found through the packages' content metadata: the base's Application CNMT of 0100F2C0115B6000 and,
+// with an update, its Patch CNMT of 0100F2C0115B6800; their Program NCAs by content id. Which game version that is
 // stays the loader's decision (runtime/loader.c, game_version_of_build, on exefs/main): nothing here keeps a list
 // of versions.
 #pragma once
@@ -19,8 +19,8 @@
 
 namespace nx {
 
-constexpr uint64_t BOTW_TITLE_ID = 0x01007EF00011E000ull;
-constexpr uint64_t BOTW_PATCH_ID = 0x01007EF00011E800ull;
+constexpr uint64_t GAME_TITLE_ID = 0x0100F2C0115B6000ull;  // The Legend of Zelda: Tears of the Kingdom
+constexpr uint64_t GAME_PATCH_ID = 0x0100F2C0115B6800ull;  // its updates (1.4.3: v720896)
 
 struct ImportInput {
     ReaderPtr base;  // .nsp or .xci

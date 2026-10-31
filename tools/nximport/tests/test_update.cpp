@@ -41,7 +41,7 @@ struct UpdateFixture {
     }
     synth::Game update(bool rights = false, size_t chunk = 0x200, bool split = false, const synth::Files *against = nullptr) {
         synth::GameSpec s;
-        s.title_id = BOTW_PATCH_ID;
+        s.title_id = GAME_PATCH_ID;
         s.meta_type = 0x81;
         s.version = 786432;
         s.exefs = new_exefs, s.romfs = new_romfs, s.rights = rights, s.keygen = rights ? 3 : 0;
@@ -121,10 +121,10 @@ TEST(update_package_checks) {
     UpdateFixture fx;
     auto b = fx.base(), u = fx.update();
     std::string e = ERROR_OF(Importer(fx.input(b.package, b.package)));  // (the base given as the update)
-    CHECK(contains(e, "is not an update of Breath of the Wild"));
+    CHECK(contains(e, "is not an update of Tears of the Kingdom"));
     CHECK(contains(e, "não é um update"));
     e = ERROR_OF(Importer(fx.input(u.package, u.package)));  // (the update given as the base)
-    CHECK(contains(e, "is not Breath of the Wild"));
+    CHECK(contains(e, "is not Tears of the Kingdom"));
 }
 
 TEST(update_corruption) {
