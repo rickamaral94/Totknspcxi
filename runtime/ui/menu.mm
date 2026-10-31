@@ -657,6 +657,10 @@ static void tab_display(void) {
                "The game starts its next frame while the GPU still finishes the last one: a few more fps. What the game reads "
                "back from the GPU then comes a frame late, and Link's legs can sink into the ground while he stands "
                "still. Turn it off if that bothers you. Applies at once.");
+    opt_toggle("Constant buffers read in place (experimental)", &g_settings.cbuf_inplace, false,
+               "With Sync lag off: the GPU reads the game's per-draw constants where the game keeps them instead of copies - "
+               "less work for the render thread. Being tested: if Link's legs sink into the ground with it on, leave it off. "
+               "Applies at once.");
     opt_toggle("Native game code (experimental)", &g_settings.native_code, false,
                "Runs the game's own code directly on the phone's CPU instead of the game code built at setup: no build "
                "needed. An experiment - report what goes wrong. Applies the next time the game starts.");

@@ -135,3 +135,26 @@ Amostradas: a thread principal, a que apresenta, a de render e as listadas em `L
     fora das estatísticas.
 - **No aparelho:** o relatório precisa mostrar as categorias somando a janela, as amostras perdidas e o custo do
   amostrador (ligado vs desligado).
+
+## Fase C, item 1: constant buffers lidos no lugar (TOTK)
+
+Veio do BOTWRecompAndroid (`feea08c`, `1ef6454`, `e08cb28`). Em vez de copiar os constant buffers do jogo a cada
+bind, a GPU lê direto do heap do jogo, que já está importado como memória de GPU (`gmem_placed`). Isso vale para o
+buffer inteiro (`ubo_direct`) e para a janela por draw (`cbwin_bind`), e tira cópias da thread de render, que está no
+caminho crítico quando o jogo espera a GPU.
+
+- **Só com o Sync lag desligado.** Com o lag, a CPU escreve as constantes do próximo quadro enquanto a GPU ainda lê as
+  deste. Cada draw decide, por `g_sync_lag_now` (`nvn/objects.c`).
+- **Desligado por padrão.** Liga em **Vídeo > Constant buffers lidos no lugar (experimental)**. No BOTW, a thread de
+  render caiu 11% sem artefatos no A/B, mas depois as pernas do Link afundaram com ela ligada, mesmo sem o lag: as
+  alturas do terreno para os pés vêm de passes de GPU que leem esses buffers. No TOTK ainda não foi testado.
+- **Medir e comparar** alterna a leitura no lugar a cada 10 s, independente da opção, e mostra a diferença. A linha
+  `run:` diz se ela estava ligada.
+- **Shaders:** quando o heap está importado, eles saem sempre com o teste da janela (`LARECOMP_CB_WINDOW=0`: nunca).
+  Com a opção desligada, a janela de cada draw diz "nenhuma" e o shader lê a cópia, como antes.
+- **HUD em widescreen:** o primeiro buffer do vertex shader não é lido no lugar enquanto o HUD está alargado, porque
+  os painéis são movidos numa cópia dele. Sem essa proteção, o HUD voltaria ao meio da tela com a opção ligada.
+- **Para testar:** `LARECOMP_INPLACE_CBUF=0/1` força a leitura no lugar; `LARECOMP_AB=<quadros>:inplace` alterna.
+- **Como avaliar no aparelho:** com o Sync lag desligado, rode **Medir e comparar** num trecho de jogo e compare a CPU
+  da thread de render e o intervalo de present dos dois lados. Depois jogue com a opção ligada olhando os pés do Link
+  parado em ladeiras, a água e o terreno ao longe. Se não houver artefato, ela pode passar a ser o padrão.

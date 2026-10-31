@@ -3781,7 +3781,9 @@ static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32
         if (stage == 0 ? up_patch(r.addr, size, &d) : up_patch_frag(r.addr, size, &d)) return d;
     }
 #ifdef __ANDROID__
-    {
+    // (not the vertex stage's first buffer while the HUD is widened: its layouts' panes get moved in a copy, below)
+    extern bool widescreen_ui_centred(void);
+    if (!(stage == 0 && idx == 0 && size >= 64 && widescreen_ui_centred())) {
         VkDescriptorBufferInfo d;
         if (ubo_direct(r.addr, size, &d)) return d;
     }
@@ -3871,14 +3873,38 @@ static uint64_t gmem_size;
 #ifdef __ANDROID__
 static bool gmem_placed;  // (gmem_buf is the guest heap itself, usable as a uniform buffer: vk_heap_place)
 
-// LARECOMP_UBO_DIRECT=1: always; LARECOMP_AB=<frames>:ubo alternates it, and so does Settings > Files > Measure and
-// compare (diag.c g_diag_ab) - that one only without Sync lag (a frame ahead, the CPU would write what the GPU still reads).
+// Constant buffers read in place - ubo_direct and the per-draw window (cbwin_bind) - instead of a copy per bind, from
+// BOTWRecompAndroid (phase C, item 1): only while the game waits for the GPU every frame (Video > Sync lag off). With the
+// lag the CPU writes the next frame's constants while the GPU still reads this one's (BOTW 2026-10-27: white water,
+// terrain "curtains", spikes on far objects); without it, as on the Switch, the GPU is done with a frame before the game
+// writes the next. Every draw decides (the lag can be turned on in play: frames already sent may read one frame early,
+// once). Saves the render thread its copies, on the critical path when the game waits for the GPU (BOTW on the Odin 2:
+// render thread -11%). Off by default, as in BOTW, where Link's legs sank with it on even without the lag (the terrain's
+// heights for the feet come from GPU passes reading these buffers): Video > Constant buffers read in place
+// (experimental) turns it on; Settings > Files > Measure and compare alternates it (diag.c g_diag_ab).
+// LARECOMP_INPLACE_CBUF=0: never, 1: always (also with the lag); LARECOMP_AB=<frames>:inplace alternates it.
 extern volatile bool g_sync_lag_now;  // (nvn/objects.c nvnSyncWait)
+static bool inplace_cbufs(void) {
+    static int env = -2;
+    if (env == -2) env = getenv("LARECOMP_INPLACE_CBUF") ? atoi(getenv("LARECOMP_INPLACE_CBUF")) : -1;
+    int ab = AB("inplace");
+    bool on = env >= 0 ? env > 0
+            : ab >= 0  ? ab == 1
+                       : !g_sync_lag_now && (g_diag_ab >= 0 ? g_diag_ab == 1 : g_settings.cbuf_inplace);
+    static int last = -1;
+    if (gmem_placed && (int)on != last) {
+        LOG("[vk] constant buffers read in place: %s\n", on ? "on" : g_sync_lag_now ? "off (sync lag)" : "off");
+        last = on;
+    }
+    return on && gmem_placed;
+}
+
+// LARECOMP_UBO_DIRECT=1: always; LARECOMP_AB=<frames>:ubo alternates it alone.
 static bool ubo_direct(uint64_t addr, uint64_t size, VkDescriptorBufferInfo *out) {
     static int on = -1;
     if (on < 0) on = getenv("LARECOMP_UBO_DIRECT") && atoi(getenv("LARECOMP_UBO_DIRECT"));
     extern int vk_ab(const char *what);
-    if (!(on || AB("ubo") == 1 || (g_diag_ab == 1 && !g_sync_lag_now)) || !gmem_placed || addr < HEAP_BASE || addr + size > HEAP_BASE + gmem_size) return false;
+    if (!(on || AB("ubo") == 1 || inplace_cbufs()) || !gmem_placed || addr < HEAP_BASE || addr + size > HEAP_BASE + gmem_size) return false;
     uint64_t off = addr - HEAP_BASE;
     if ((off & (g_vk.props.limits.minUniformBufferOffsetAlignment - 1)) || size > g_vk.props.limits.maxUniformBufferRange)
         return false;
@@ -3909,10 +3935,18 @@ static bool ubo_direct(uint64_t addr, uint64_t size, VkDescriptorBufferInfo *out
 // Off by default since 2026-10-27: in play (1.9.0) the water turned white and the terrain showed stretched "curtains",
 // and objects far away grew spikes on a hit - the buffer read in place while the CPU already writes the next frame's
 // rows there (the sync lag lets the CPU run a frame ahead). LARECOMP_CB_WINDOW=1: on (a test).
+// The shaders are translated with the window's test whenever the heap is placed (LARECOMP_CB_WINDOW=0: never); each
+// draw uses the window only with LARECOMP_CB_WINDOW=1 or the constant buffers in place (inplace_cbufs), else its patch
+// buffer says "none" and the shaders read the buffer's copy as before.
 static bool cbwin_wanted(void) {
     static int on = -1;
-    if (on < 0) on = getenv("LARECOMP_CB_WINDOW") && atoi(getenv("LARECOMP_CB_WINDOW"));
+    if (on < 0) on = getenv("LARECOMP_CB_WINDOW") ? atoi(getenv("LARECOMP_CB_WINDOW")) : 1;
     return on && gmem_placed;
+}
+static bool cbwin_now(void) {
+    static int forced = -1;
+    if (forced < 0) forced = getenv("LARECOMP_CB_WINDOW") && atoi(getenv("LARECOMP_CB_WINDOW")) == 1;
+    return forced || inplace_cbufs();
 }
 // (the update marks are guest addresses: a reboot's game puts other things there)
 RT_ON_RESET(ubo_inline_reset) {
@@ -3950,7 +3984,7 @@ static uint64_t cbwin_rows(uint64_t addr, uint64_t size) {
 }
 
 static bool cbwin_bind(int stage, int k, uint64_t addr, uint64_t size, VkDescriptorBufferInfo *out) {
-    if ((stage != 0 && stage != 1) || !gmem_placed || cbw_patch[stage].m[0] || AB("cbwin") == 1) return false;
+    if ((stage != 0 && stage != 1) || !gmem_placed || cbw_patch[stage].m[0] || AB("cbwin") == 1 || !cbwin_now()) return false;
     if (addr < HEAP_BASE || addr + size > HEAP_BASE + gmem_size) return false;
     uint64_t off = addr - HEAP_BASE;
     if ((off & (g_vk.props.limits.minUniformBufferOffsetAlignment - 1)) || size > g_vk.props.limits.maxUniformBufferRange ||

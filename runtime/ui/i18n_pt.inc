@@ -644,3 +644,7 @@
  "Na próxima sessão de jogo, grava 60 s de jogo depois de 5 s jogando fora dos menus: para onde vai o tempo de cada quadro (as threads do jogo, a GPU, os clocks). Uma linha no canto mostra a gravação. Jogue o mesmo trecho de sempre e depois envie o log. Medir e comparar: 120 s, com a mudança em teste (agora: os constant buffers lidos no lugar, com o Sync lag desligado) ligada e desligada a cada 10 s, para os dois lados terem os mesmos clocks e o mesmo calor."},
 {"Measure and compare (120 s)",
  "Medir e comparar (120 s)"},
+{"Constant buffers read in place (experimental)",
+ "Constant buffers lidos no lugar (experimental)"},
+{"With Sync lag off: the GPU reads the game's per-draw constants where the game keeps them instead of copies - less work for the render thread. Being tested: if Link's legs sink into the ground with it on, leave it off. Applies at once.",
+ "Com o Sync lag desligado: a GPU lê as constantes de cada draw onde o jogo as guarda, em vez de cópias - menos trabalho para a thread de render. Em teste: se as pernas do Link afundarem no chão com isso ligado, deixe desligado. Vale na hora."},

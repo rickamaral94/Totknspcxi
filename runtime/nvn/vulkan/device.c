@@ -1756,10 +1756,11 @@ void vk_diag_context(char *buf, size_t n) {
     if (m >= 0 && m <= 8) snprintf(rs, sizeof rs, "%s", res[m]);
     else if (m == RES_DYNAMIC) snprintf(rs, sizeof rs, "Dynamic (now %.2f)", output_scale_dynamic_factor());
     else snprintf(rs, sizeof rs, "%s", m == RES_Q75 ? ".75x" : m == RES_Q50 ? ".50x" : m == RES_Q25 ? ".25x" : "?");
-    snprintf(buf, n, "GPU %s | driver %s | LRZ %s | internal resolution %s | upscaler %d | AA %d | frame rate %s | sync lag %s",
+    snprintf(buf, n, "GPU %s | driver %s | LRZ %s | internal resolution %s | upscaler %d | AA %d | frame rate %s | sync lag %s"
+             " | constant buffers in place %s",
              g_vk.props.deviceName, g_vk_driver_desc, g_lrz_at_start ? "on" : "off", rs, g_settings.upscaler,
              g_settings.antialias, g_settings.fps_mode == 1 ? "30" : g_settings.fps_mode == 2 ? "60" : "auto",
-             g_settings.sync_lag ? "on" : "off");
+             g_settings.sync_lag ? "on" : "off", g_settings.cbuf_inplace ? "on" : "off");
 }
 bool vk_lrz_at_start(void) { return g_lrz_at_start; }  // (the start screen: a change needs a restart)
 const char *vk_gpu_name(void) { return g_vk.props.deviceName; }
