@@ -2269,13 +2269,13 @@ extern "C" void launcher_run(const char *root) {
                     opt_section("Import from NSP/XCI");
                     if (busy) opt_disable_next();
                     if (opt_action("Game package", pn[0].empty() ? "Choose..." : pn[0].c_str(),
-                                   "Your own Breath of the Wild for Nintendo Switch as an NSP or XCI file (the base game, "
+                                   "Your own Tears of the Kingdom for Nintendo Switch as an NSP or XCI file (the base game, "
                                    "version 1.0.0). It is read where it is: nothing is copied but what the game needs.", true))
                         android_call_int("pickPackageFile", 0);
                     if (busy) opt_disable_next();
                     if (opt_action("Update", pn[1].empty() ? "None" : pn[1].c_str(),
-                                   "Optional: the update as an NSP file (1.6.0, 1.8.2 or 1.9.0), applied over the base game. "
-                                   "Without it, version 1.0.0 is set up. To remove it, choose it again and cancel the picker.", true))
+                                   "Required: the 1.4.3 update as an NSP file (v720896), applied over the base game. "
+                                   "This app runs version 1.4.3 only.", true))
                         android_call_int("pickPackageFile", 1);
                     if (busy) opt_disable_next();
                     if (opt_action("prod.keys", !pn[2].empty() ? pn[2].c_str() : remembered ? "Remembered" : "Choose...",
@@ -2296,12 +2296,12 @@ extern "C" void launcher_run(const char *root) {
                         if (opt_action("Forget the keys", "", "Deletes the keys TOTKRecompAndroid kept.", true)) android_call("forgetKeys");
                     }
                     bool can = !busy && !pn[0].empty() && (!pn[2].empty() || remembered);
-                    if (!can) opt_disable_next();
+                    if (!can || pn[1].empty()) opt_disable_next();  // (TOTK runs as 1.4.3 only: the update is required)
                     if (opt_action("Import", busy ? "Working..." : "",
                                    "Reads the packages, checks every byte against their own hashes, and sets the game "
-                                   "files up for the version they hold, beside the others. The game files set up before "
-                                   "for that version are replaced only once the new ones are complete. It needs about 16 "
-                                   "GB free (the exact amount is checked first) and may take a while.", true))
+                                   "files up as version 1.4.3. The game files set up before are replaced only once the new "
+                                   "ones are complete. It needs about 17 GB free (the exact amount is checked first) and "
+                                   "may take a while.", true))
                         android_call_int("importPackages", g_pkg_remember ? 1 : 0);
                     if (!can) opt_disable_next();
                     if (opt_action("Verify packages", "",
