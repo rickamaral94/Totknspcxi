@@ -3,6 +3,15 @@
 O diagnóstico responde onde vai o tempo de cada quadro: em que threads do jogo, na GPU, e em que clocks e
 temperaturas. É o primeiro passo antes de qualquer otimização de CPU (Fase C). Código: `runtime/diag.c`.
 
+Veio do BOTWRecompAndroid. No TOTK, as diferenças são:
+- **"Jogo"** (`diag_in_gameplay`, em `nvn/objects.c`): a cena 3D do TOTK desenhada nos últimos 20 presents, fora da
+  tela de título, sem cutscene (`rt_cutscene`) e sem filme. Os endereços de menu e de evento do BOTW (`framepace.c`)
+  são da 1.8.2 e não valem aqui. Um menu sobre a cena congelada pode contar como jogo.
+- **Medir e comparar** alterna o `ubo_direct` que o TOTK já tem: constant buffers lidos direto do heap importado, só
+  com o Sync lag desligado.
+- **Sem geração de quadros:** todo present é um quadro real, e o resumo usa os intervalos de present.
+- **Seção de gráficos** (só no TOTK): o tempo de GPU por passe de alguns quadros, descrito abaixo.
+
 ## Como usar
 
 1. Na tela inicial, em **Configurações > Arquivos**, deixe **Salvar um arquivo de log** ligado e toque em **Medir desempenho (60 s)**.
@@ -10,7 +19,8 @@ temperaturas. É o primeiro passo antes de qualquer otimização de CPU (Fase C)
 2. Inicie o jogo e jogue normalmente. A gravação começa depois de **5 s seguidos de jogo**, fora de menus, pausa,
    eventos e filmes, e dura 60 s. Uma linha no canto da tela mostra a espera e quanto falta.
 3. No fim, o relatório vai para o log, em linhas `[diag]`, e para `perf-diag.txt` na pasta de dados do app. Mande o
-   `botwrecomp-log.txt`.
+   `totkrecomp-log.txt`. Cada relatório também é copiado como `perf-diag-<data>-<hora>.txt`, para juntar várias rodadas
+   (uma por driver ou configuração).
 
 Por adb, `LARECOMP_DIAG=<segundos>` mede a partir do início da sessão. `LARECOMP_DIAG_TID=<id>[,<id>]` acrescenta
 threads do jogo à amostragem.
@@ -19,6 +29,13 @@ Desligado, o diagnóstico custa um teste de flag em cada svc e em cada espera in
 timer existe.
 
 ## O que o relatório traz
+
+### Rodada e resumo (as duas primeiras linhas)
+
+- `run:` a GPU, o driver (pacote e o nome/versão que ele informa), LRZ, resolução interna, upscaler, AA, taxa de
+  quadros e Sync lag.
+- `summary:` quadros por segundo no jogo, p50/p95/p99 do intervalo entre presents, GPU por quadro, MHz médio de cada
+  cluster e a faixa de temperatura do SoC. É a linha para comparar rodadas.
 
 ### Quadros
 
@@ -34,6 +51,19 @@ O intervalo entre dois `vkQueuePresentKHR` na thread de render:
   entre elas (`gpu_busy_total`, em exec.c).
 - **Composição final:** dois timestamps em volta de "a imagem do jogo na janela + menus/overlay" (device.c), lidos 16
   quadros depois.
+
+### Gráficos: tempo de GPU por passe
+
+Durante a janela, um quadro de jogo é perfilado a cada 15 s, a partir dos 10 s (60 s: aos 10, 25, 40 e 55 s). Ele
+usa os timestamps que o `exec.c` já põe depois de cada passe, dispatch e cópia (`gp_mark`, o mesmo do
+`LARECOMP_GPUPROF_AT`). Para cada quadro, o relatório traz:
+- o tempo total de GPU do quadro, do primeiro ao último timestamp, incluindo a GPU ociosa entre submissões;
+- o tempo por tipo: passes de render, dispatches de compute, cópias, e present/upscale/AA;
+- os 12 trechos mais pesados, com o rótulo (tamanho e formato do alvo, nº de draws) e a fração do quadro.
+
+Com mais de um quadro, vem também a média por tipo. Ler os timestamps espera a GPU, então o quadro perfilado e os
+dois seguintes ficam fora das estatísticas de quadros (contam como "não jogo"). É o ponto de partida para otimizar
+os gráficos: mostra quais passes pagar primeiro, por exemplo a iluminação diferida, a névoa, as sombras ou a água.
 
 ### Aparelho, a cada 2 s
 
@@ -99,6 +129,9 @@ Amostradas: a thread principal, a que apresenta, a de render e as listadas em `L
   - contabilidade exclusiva com relógio falso: soma igual à janela, recorte nas bordas, pop sem push ignorado;
   - amostrador real com o timer na própria thread, sem amostras perdidas e sem amostras na thread errada;
   - nomes por módulo;
-  - o fluxo inteiro do relatório.
+  - o fluxo inteiro do relatório;
+  - a comparação A/B;
+  - os gráficos: os pontos de 15 s, as linhas em ordem com só as 24 mais pesadas mantidas, e os quadros perfilados
+    fora das estatísticas.
 - **No aparelho:** o relatório precisa mostrar as categorias somando a janela, as amostras perdidas e o custo do
   amostrador (ligado vs desligado).

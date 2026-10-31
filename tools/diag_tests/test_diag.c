@@ -145,12 +145,53 @@ static void test_ab(void) {
     diag_test_set_clock(NULL);
 }
 
+// Graphics: a gameplay frame profiled every 15 s from 10 s into the window (as vulkan/device.c and exec.c do), its rows
+// kept heaviest first, and the profiled frame and the next two left out of the frame statistics
+static void test_graphics(void) {
+    diag_test_set_clock(fake_now);
+    fake_ns = 200000000000ull;
+    diag_request(40);
+    int profiled = 0;
+    bool pending = false;
+    for (int f = 0; f < 60 * 50; f++) {  // 50 s at 60 fps: 5 s of waiting, then the 40 s window
+        fake_ns += 16666667;
+        if (pending) {  // (the frame after: vk_gpuprof_report)
+            pending = false;
+            CHECK(diag_gpuprof_begin(40, 9.5));
+            for (int r = 0; r < 39; r++) {
+                char l[64];
+                snprintf(l, sizeof l, r % 3 ? "pass: %d color 1600x896" : "dispatch %d", r);
+                diag_gpuprof_row(l, r == 17 ? 2.5 : 0.1 + r * 0.001, r % 3 ? 100 : 0);
+            }
+            diag_gpuprof_end(true);
+            profiled++;
+        }
+        if (diag_want_gpuprof()) pending = true;
+        diag_present(100000, 200000);
+    }
+    CHECK(!diag_gpuprof_begin(1, 1));  // (not asked for: an LARECOMP_GPUPROF_AT frame isn't the diagnosis's)
+    struct timespec ts = {1, 0};
+    nanosleep(&ts, NULL);
+    CHECK(diag_status(NULL, 0) == 3);
+    int n, nrows, skipped;
+    double top_ms;
+    char top[112];
+    diag_test_gpuprof(&n, &nrows, &top_ms, top, sizeof top, &skipped);
+    fprintf(stderr, "graphics: %d frames profiled, %d rows kept, top %.2f ms %s, %d frames left out\n", n, nrows, top_ms, top, skipped);
+    CHECK(profiled == 2 && n == 2);  // (10 and 25 s; 40 s is the window's end - a 60 s window gets 10, 25, 40, 55)
+    CHECK(nrows == 24);
+    CHECK(top_ms == 2.5 && strstr(top, "pass: 17") != NULL);
+    CHECK(skipped == 2 * 3);
+    diag_test_set_clock(NULL);
+}
+
 int main(void) {
     test_percentiles();
     test_accounting();
     test_sampler();
     test_report();
     test_ab();
+    test_graphics();
     if (fails) { fprintf(stderr, "%d failed\n", fails); return 1; }
     fprintf(stderr, "all passed\n");
     return 0;

@@ -19,6 +19,7 @@
 #include "../renderer.h"
 
 VkG g_vk;
+static char g_vk_driver_desc[400] = "?";  // (vk_diag_context: the driver package and its own name / version)
 static SDL_Window *window;
 static atomic_bool ui_ready;
 static VkDebugUtilsMessengerEXT messenger;
@@ -632,6 +633,18 @@ static void create_device(void) {
                                               .pNext = driver_props ? &driver : NULL};
     vkGetPhysicalDeviceProperties2(g_vk.phys, &properties);
     if (!driver_props) snprintf(driver.driverName, sizeof driver.driverName, "unknown");
+    {   // (diag.c: the report says which driver it measured - comparing drivers, docs/DESEMPENHO-DIAG.md)
+        const char *drv = getenv("LARECOMP_VK_DRIVER"), *slash = drv ? strrchr(drv, '/') : NULL;
+        char pkg[128] = "the system's";
+        if (slash && slash > drv) {  // (.../drivers/<package>/libvulkan_*.so: the package's folder)
+            const char *b = slash - 1;
+            while (b > drv && b[-1] != '/') b--;
+            snprintf(pkg, sizeof pkg, "%.*s", (int)(slash - b), b);
+        }
+        snprintf(g_vk_driver_desc, sizeof g_vk_driver_desc, "%s (%s %s)", pkg, driver.driverName, driver.driverInfo);
+        for (char *c = g_vk_driver_desc; *c; c++)  // (Qualcomm's info runs over several lines: one line in the report)
+            if (*c == '\n' || *c == '\r') *c = ' ';
+    }
     LOG("[vk-cap] gpu %s vendor %#x device %#x api %u.%u.%u driver-id %u name %s info %s\n",
         g_vk.props.deviceName, g_vk.props.vendorID, g_vk.props.deviceID, VK_API_VERSION_MAJOR(g_vk.props.apiVersion),
         VK_API_VERSION_MINOR(g_vk.props.apiVersion), VK_API_VERSION_PATCH(g_vk.props.apiVersion),
@@ -1429,6 +1442,7 @@ void backend_present(NvnTexture *t) {
         extern bool g_gpuprof_frame;
         extern void vk_gpuprof_report(void);
         if (g_gpuprof_frame) { g_gpuprof_frame = false; vk_gpuprof_report(); }
+        if (diag_want_gpuprof()) g_gpuprof_frame = true;  // (the performance diagnosis's graphics section, diag.c)
         const char *e = getenv("LARECOMP_GPUPROF_AT");
         for (const char *p = e; p && *p;) {
             long at = strtol(p, (char **)&p, 10);
@@ -1733,6 +1747,20 @@ bool vk_adreno_8xx(const char *name) {
 // A Turnip path's setting (-1 Automatic, 1 on, 0 off) for this GPU
 bool vk_turnip_path_on(int setting) { return setting < 0 ? vk_adreno_8xx(g_vk.props.deviceName) : setting != 0; }
 static bool g_lrz_at_start = true;
+// (diag.c) what the measurement ran with: the GPU, the driver and the settings that move the GPU's work
+void vk_diag_context(char *buf, size_t n) {
+    extern double output_scale_dynamic_factor(void);
+    static const char *res[] = {"Match display", "1x", "2x", "3x", "4x", "5x", "6x", "7x", "8x"};
+    char rs[48];
+    int m = g_settings.res_mode;
+    if (m >= 0 && m <= 8) snprintf(rs, sizeof rs, "%s", res[m]);
+    else if (m == RES_DYNAMIC) snprintf(rs, sizeof rs, "Dynamic (now %.2f)", output_scale_dynamic_factor());
+    else snprintf(rs, sizeof rs, "%s", m == RES_Q75 ? ".75x" : m == RES_Q50 ? ".50x" : m == RES_Q25 ? ".25x" : "?");
+    snprintf(buf, n, "GPU %s | driver %s | LRZ %s | internal resolution %s | upscaler %d | AA %d | frame rate %s | sync lag %s",
+             g_vk.props.deviceName, g_vk_driver_desc, g_lrz_at_start ? "on" : "off", rs, g_settings.upscaler,
+             g_settings.antialias, g_settings.fps_mode == 1 ? "30" : g_settings.fps_mode == 2 ? "60" : "auto",
+             g_settings.sync_lag ? "on" : "off");
+}
 bool vk_lrz_at_start(void) { return g_lrz_at_start; }  // (the start screen: a change needs a restart)
 const char *vk_gpu_name(void) { return g_vk.props.deviceName; }
 #endif

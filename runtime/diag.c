@@ -283,6 +283,119 @@ static uint64_t tid_cpu(int tid) {
 
 static void report_start(void);
 
+// ---------------------------------------------------------------- graphics: GPU time per pass of a few gameplay frames
+// (vulkan/exec.c gp_mark / vk_gpuprof_report: a timestamp after each pass, dispatch and copy). One frame every 15 s of
+// the window, from 10 s in; reading the timestamps back waits for the GPU, so that frame and the next two are left out
+// of the frame statistics (counted as not gameplay).
+#define GPCAP 4
+#define GPROWS 24
+enum { GK_PASS, GK_DISPATCH, GK_COPY, GK_PRESENT, GK_OTHER, GK_N };
+static const char *const gk_name[GK_N] = {"render passes", "compute dispatches", "copies", "present / upscale / AA", "other"};
+typedef struct {
+    double total, kind_ms[GK_N];
+    int marks, nrows;
+    uint32_t kind_n[GK_N];
+    struct { char label[112]; double ms; uint32_t draws; } row[GPROWS];
+} GpCapture;
+static GpCapture g_gp[GPCAP];
+static int g_gp_n;
+static _Atomic int g_gp_pending, g_gp_skip;
+static uint64_t g_gp_next;
+static pthread_mutex_t g_gp_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static int gp_kind(const char *l) {
+    if (!strncmp(l, "pass", 4)) return GK_PASS;
+    if (!strncmp(l, "dispatch", 8)) return GK_DISPATCH;
+    if (!strncmp(l, "copy", 4) || !strncmp(l, "feedback", 8)) return GK_COPY;
+    if (!strncmp(l, "present", 7) || !strncmp(l, "scene upscale", 13)) return GK_PRESENT;
+    return GK_OTHER;
+}
+
+// (vulkan/device.c, each present) whether the next frame should be profiled for the report
+bool diag_want_gpuprof(void) {
+    if (atomic_load_explicit(&g_state, memory_order_relaxed) != 2 || g_gp_n >= GPCAP || atomic_load(&g_gp_pending)) return false;
+    uint64_t now = now_fn();
+    if (now < g_gp_next || now + 1000000000ull > atomic_load(&win_t1) || !diag_in_gameplay()) return false;  // (not in the last 1 s)
+    g_gp_next = now + 15000000000ull;
+    atomic_store(&g_gp_pending, 1);
+    atomic_store(&g_gp_skip, 3);
+    return true;
+}
+// (vulkan/exec.c vk_gpuprof_report) a profiled frame's rows, if it was the diagnosis's
+bool diag_gpuprof_begin(int marks, double total_ms) {
+    if (!atomic_load(&g_gp_pending)) return false;
+    pthread_mutex_lock(&g_gp_lock);
+    bool ok = g_gp_n < GPCAP;
+    if (ok) {
+        memset(&g_gp[g_gp_n], 0, sizeof g_gp[0]);
+        g_gp[g_gp_n].marks = marks, g_gp[g_gp_n].total = total_ms;
+    }
+    pthread_mutex_unlock(&g_gp_lock);
+    if (!ok) atomic_store(&g_gp_pending, 0);
+    return ok;
+}
+void diag_gpuprof_row(const char *label, double ms, uint32_t draws) {
+    if (!atomic_load(&g_gp_pending)) return;
+    pthread_mutex_lock(&g_gp_lock);
+    GpCapture *c = &g_gp[g_gp_n];
+    int k = gp_kind(label);
+    c->kind_ms[k] += ms, c->kind_n[k]++;
+    int at = c->nrows < GPROWS ? c->nrows : GPROWS - 1;  // (kept sorted, heaviest first; the lightest falls off)
+    if (c->nrows < GPROWS || ms > c->row[GPROWS - 1].ms) {
+        while (at > 0 && c->row[at - 1].ms < ms) {
+            if (at < GPROWS) c->row[at] = c->row[at - 1];
+            at--;
+        }
+        snprintf(c->row[at].label, sizeof c->row[at].label, "%s", label);
+        c->row[at].ms = ms, c->row[at].draws = draws;
+        if (c->nrows < GPROWS) c->nrows++;
+    }
+    pthread_mutex_unlock(&g_gp_lock);
+}
+void diag_gpuprof_end(bool kept) {
+    if (!atomic_load(&g_gp_pending)) return;
+    pthread_mutex_lock(&g_gp_lock);
+    if (kept && g_gp_n < GPCAP) g_gp_n++;
+    pthread_mutex_unlock(&g_gp_lock);
+    atomic_store(&g_gp_pending, 0);
+}
+
+static void out(const char *fmt, ...);
+static void gp_report(void) {
+    pthread_mutex_lock(&g_gp_lock);
+    out("-- graphics: GPU time per pass, %d gameplay frame(s) profiled (a timestamp after each pass, dispatch and copy; "
+        "the frame's whole GPU time, idle between submissions included)", g_gp_n);
+    if (!g_gp_n) out("(none: no gameplay at the profiling points, or the GPU has no timestamps)");
+    double kind_sum[GK_N] = {0}, total_sum = 0;
+    for (int i = 0; i < g_gp_n; i++) {
+        GpCapture *c = &g_gp[i];
+        total_sum += c->total;
+        char kinds[400];
+        int o = 0;
+        for (int k = 0; k < GK_N; k++) {
+            kind_sum[k] += c->kind_ms[k];
+            if (c->kind_n[k] && o < (int)sizeof kinds - 80)
+                o += snprintf(kinds + o, sizeof kinds - (size_t)o, "%s%s %.2f ms (%u)", o ? ", " : "", gk_name[k], c->kind_ms[k],
+                              c->kind_n[k]);
+        }
+        out("frame %d: %.2f ms on the GPU, %d marks: %s", i + 1, c->total, c->marks, kinds);
+        for (int r = 0; r < c->nrows && r < 12; r++) {
+            if (c->row[r].draws) out("  %7.3f ms %5.1f%%  %s, %u draws", c->row[r].ms, 100 * c->row[r].ms / (c->total > 0 ? c->total : 1),
+                                     c->row[r].label, c->row[r].draws);
+            else out("  %7.3f ms %5.1f%%  %s", c->row[r].ms, 100 * c->row[r].ms / (c->total > 0 ? c->total : 1), c->row[r].label);
+        }
+    }
+    if (g_gp_n > 1) {
+        char kinds[400];
+        int o = 0;
+        for (int k = 0; k < GK_N; k++)
+            if (kind_sum[k] > 0 && o < (int)sizeof kinds - 64)
+                o += snprintf(kinds + o, sizeof kinds - (size_t)o, "%s%s %.2f", o ? ", " : "", gk_name[k], kind_sum[k] / g_gp_n);
+        out("mean of the %d frames: %.2f ms - %s ms", g_gp_n, total_sum / g_gp_n, kinds);
+    }
+    pthread_mutex_unlock(&g_gp_lock);
+}
+
 void diag_request_ab(int seconds) {
     if (atomic_load(&g_state) == 1 || atomic_load(&g_state) == 2 || atomic_load(&g_state) == 3) return;
     g_ab_want = 1;
@@ -295,6 +408,7 @@ void diag_request(int seconds) {
     g_seconds = seconds > 0 ? seconds : 60;
     atomic_store(&win_t0, ~0ull);
     atomic_store(&win_t1, ~0ull);
+    g_gp_n = 0, atomic_store(&g_gp_pending, 0), atomic_store(&g_gp_skip, 0);
     f_n = f_ncomp = f_nmenu = 0;
     f_last = f_last_gpu = 0;
     cl_n = cl_samples = 0;
@@ -350,6 +464,7 @@ void diag_present(uint64_t acquire_ns, uint64_t present_ns) {
         f_last_gpu = diag_gpu_busy_total_ns();
         atomic_store(&win_t1, now + (uint64_t)g_seconds * 1000000000ull);
         atomic_store(&win_t0, now);
+        g_gp_next = now + 10000000000ull;
         if (g_ab_want) g_diag_ab = 1, f_next_ab = now + 10000000000ull;
         f_last_rcpu = thread_cpu(), f_last_mcpu = tid_cpu(atomic_load(&g_main_tid));
         atomic_store(&g_state, 2);
@@ -363,6 +478,7 @@ void diag_present(uint64_t acquire_ns, uint64_t present_ns) {
         f_rcpu[f_n] = rcpu - f_last_rcpu;
         f_mcpu[f_n] = mcpu >= f_last_mcpu ? mcpu - f_last_mcpu : 0;
         bool game = diag_in_gameplay();
+        if (atomic_load(&g_gp_skip) > 0) atomic_fetch_sub(&g_gp_skip, 1), game = false;  // (a GPU profile's wait)
         f_interval[f_n] = now - f_last;
         f_acquire[f_n] = acquire_ns;
         f_present[f_n] = present_ns;
@@ -651,6 +767,39 @@ static void *report_main(void *arg) {
     int frames = f_n, game = f_n - f_nmenu;
     out("===== performance diagnosis: %.0f s, %d presents (%d in gameplay, %d in menus or events)", (t1 - t0) / 1e9, frames, game,
         f_nmenu);
+    {   // what it ran with, and one line to compare runs by (drivers, settings: docs/DESEMPENHO-DIAG.md)
+        char ctx[768] = "n/a";
+#if defined(__ANDROID__) && !defined(DIAG_TESTING)
+        extern void vk_diag_context(char *buf, size_t n);
+        vk_diag_context(ctx, sizeof ctx);
+#endif
+        out("run: %s", ctx);
+        // (TOTK has no frame generation: every present is a real frame - gameplay presents under 250 ms)
+        uint64_t rf_n = 0, rf_ns = 0;
+        double gpu = 0;
+        uint64_t *c = malloc(sizeof *c * (size_t)(f_n ? f_n : 1));
+        for (int i = 0; i < f_n; i++)
+            if ((f_flags[i] & 1) && f_interval[i] < 250000000ull) {
+                if (c) c[rf_n] = f_interval[i];
+                rf_n++, rf_ns += f_interval[i], gpu += f_gpu[i] / 1e6;
+            }
+        double p50 = 0, p95 = 0, p99 = 0;
+        if (c && rf_n) {
+            qsort(c, (size_t)rf_n, sizeof *c, cmp_u64);
+            p50 = c[rf_n / 2] / 1e6, p95 = c[(size_t)(rf_n * 0.95)] / 1e6, p99 = c[(size_t)(rf_n * 0.99)] / 1e6;
+        }
+        free(c);
+        char cl[160] = "n/a";
+        if (cl_samples && cl_n) {
+            int o = 0;
+            for (int i = 0; i < cl_n && o < (int)sizeof cl - 16; i++)
+                o += snprintf(cl + o, sizeof cl - (size_t)o, "%s%llu", i ? "/" : "", (unsigned long long)(cl_sum[i] / (uint64_t)cl_samples));
+        }
+        out("summary: %.2f frames a second | present p50 %.2f p95 %.2f p99 %.2f ms | GPU %.2f ms a frame | "
+            "CPU clusters %s MHz | SoC %.0f-%.0f C",
+            rf_ns ? rf_n * 1e9 / rf_ns : 0.0, p50, p95, p99, rf_n ? gpu / (double)rf_n : 0.0, cl,
+            temp_max > -1e8f ? temp_min : 0.0f, temp_max > -1e8f ? temp_max : 0.0f);
+    }
     out("-- frames (the time between two vkQueuePresentKHR on the render thread)");
     stat_line("present interval, gameplay", f_interval, f_n, f_flags, 1, 1);
     stat_line("  of which with the sampler on", f_interval, f_n, f_flags, 3, 3);
@@ -750,6 +899,7 @@ static void *report_main(void *arg) {
             top_list("callers", s, n, true);
         }
     }
+    gp_report();
     out("-- modules (for offline symbols: tools/diag_symbolize.py)");
     for (int i = 0; i < g_nmods; i++)
         if (strstr(g_mods[i].name, "libmain") || strstr(g_mods[i].name, "totkgame") || strstr(g_mods[i].name, "vulkan"))
@@ -758,6 +908,25 @@ static void *report_main(void *arg) {
     out("===== end of the diagnosis");
     if (g_out) fclose(g_out);
     g_out = NULL;
+    if (path) {  // (a copy by date and time, so several runs - one per driver or setting - can be sent together)
+        char copy[1200];
+        time_t now = time(NULL);
+        struct tm tm;
+        localtime_r(&now, &tm);
+        const char *dot = strrchr(path, '.');
+        int stem = dot ? (int)(dot - path) : (int)strlen(path);
+        snprintf(copy, sizeof copy, "%.*s-%04d%02d%02d-%02d%02d%02d.txt", stem, path, tm.tm_year + 1900, tm.tm_mon + 1,
+                 tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec);
+        FILE *in = fopen(path, "r"), *o = in ? fopen(copy, "w") : NULL;
+        if (o) {
+            char buf[8192];
+            size_t k;
+            while ((k = fread(buf, 1, sizeof buf, in)) > 0) fwrite(buf, 1, k, o);
+            fclose(o);
+            LOG("[diag] report copied to %s\n", copy);
+        }
+        if (in) fclose(in);
+    }
     // (the sampler stays installed, its timers stopped; the hooks stop counting)
     for (int i = 0; i < ns && i < SLOTS; i++)
         if (g_slots[i].live) { timer_delete(g_slots[i].timer); g_slots[i].live = false; free(g_slots[i].ring); g_slots[i].ring = NULL; }
@@ -798,6 +967,10 @@ void diag_test_name(uint64_t pc, char *buf, size_t n) {
     g_nmods = 0;
     dl_iterate_phdr(on_phdr, NULL);
     name_of(pc, buf, n, true);
+}
+void diag_test_gpuprof(int *n, int *nrows, double *top_ms, char *top, size_t top_n, int *skipped) {
+    *n = g_gp_n, *nrows = g_gp_n ? g_gp[0].nrows : 0, *top_ms = g_gp_n ? g_gp[0].row[0].ms : 0, *skipped = f_nmenu;
+    snprintf(top, top_n, "%s", g_gp_n ? g_gp[0].row[0].label : "");
 }
 void diag_test_end(void) {
     for (int i = 0; i < atomic_load(&g_nslots) && i < SLOTS; i++)

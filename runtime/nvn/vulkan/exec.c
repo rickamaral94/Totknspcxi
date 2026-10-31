@@ -811,19 +811,23 @@ static void gp_mark(VkCommandBuffer cb, const char *fmt, ...) {
 }
 void renderer_flush(void);
 void vk_gpuprof_report(void) {
-    if (!gp_n) return;
+    if (!gp_n) { diag_gpuprof_end(false); return; }
     renderer_flush();
     static uint64_t t[GP_MAX];
     if (vkGetQueryPoolResults(g_vk.dev, gp_qp, 0, (uint32_t)gp_n, sizeof t, t, 8, VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT) == VK_SUCCESS) {
         double per = g_vk.props.limits.timestampPeriod / 1e6, total = (t[gp_n - 1] - t[0]) * per;
         LOG("[gpuprof] %d marks, %.2f ms first to last (rows: the work after each mark, until the next)\n", gp_n, total);
+        bool diag = diag_gpuprof_begin(gp_n, total);  // (the performance diagnosis's graphics section, diag.c)
         for (int i = 0; i + 1 < gp_n; i++) {
             double ms = (t[i + 1] - t[i]) * per;
+            if (diag) diag_gpuprof_row(gp_label[i], ms, gp_draws[i]);
             LOG("[gpuprof] %6.3f ms %5.1f%%  %s%s", ms, 100 * ms / (total > 0 ? total : 1), gp_label[i], gp_draws[i] ? "" : "\n");
             if (gp_draws[i]) LOG(", %u draws\n", gp_draws[i]);
         }
         LOG("[gpuprof] (last mark: %s)\n", gp_label[gp_n - 1]);
+        if (diag) diag_gpuprof_end(true);
     }
+    diag_gpuprof_end(false);  // (the timestamps couldn't be read: nothing kept, the next point may try again)
     gp_n = 0;
 }
 

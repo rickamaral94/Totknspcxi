@@ -42,6 +42,11 @@ void diag_present(uint64_t acquire_ns, uint64_t present_ns);
 // The final composition's GPU time of a frame (device.c, from timestamps), when diag_want_gpu_ts()
 bool diag_want_gpu_ts(void);
 void diag_gpu_composition(uint64_t ns);
+// graphics: a few gameplay frames profiled per GPU pass (vulkan/device.c asks, vulkan/exec.c vk_gpuprof_report feeds)
+bool diag_want_gpuprof(void);
+bool diag_gpuprof_begin(int marks, double total_ms);
+void diag_gpuprof_row(const char *label, double ms, uint32_t draws);
+void diag_gpuprof_end(bool kept);  // (kept false: the timestamps couldn't be read)
 
 // Start a measurement of `seconds` of gameplay (it begins once the game is out of its menus for 5 s)
 void diag_request(int seconds);
@@ -69,6 +74,7 @@ void diag_test_thread_totals(uint64_t cat_ns[DG_N], uint64_t *unattributed);
 void diag_test_samples(uint32_t *n, uint32_t *lost, uint32_t *wrong, uint64_t *pc0);
 void diag_test_name(uint64_t pc, char *buf, size_t n);
 void diag_test_end(void);
+void diag_test_gpuprof(int *n, int *nrows, double *top_ms, char *top, size_t top_n, int *skipped);
 #endif
 
 #ifdef __cplusplus
