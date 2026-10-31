@@ -1,3 +1,6 @@
 [submodule "third_party/libadrenotools"]
 	path = third_party/libadrenotools
 	url = https://github.com/bylaws/libadrenotools
+[submodule "third_party/mbedtls"]
+	path = third_party/mbedtls
+	url = https://github.com/Mbed-TLS/mbedtls
