@@ -80,6 +80,7 @@ static __thread DiagT *t_self;
 static __thread char t_name[16];
 static __thread int t_base = DG_RUN;
 static _Atomic uint64_t g_presenting = ~0ull;
+static _Atomic int g_main_tid;  // (the main thread's tid: its CPU clock read from the render thread)
 
 void diag_name_thread(const char *name, int base_cat) {
     snprintf(t_name, sizeof t_name, "%s", name);
@@ -211,6 +212,7 @@ static DiagT *self(void) {
     int prio = 0;
     diag_thread_identity(&d->kid, &d->handle, &prio);
     d->prio = prio;
+    if (d->handle == 0x101) atomic_store(&g_main_tid, d->tid);
     return d;
 }
 
@@ -254,7 +256,8 @@ void diag_pop_(void) {
 // ---------------------------------------------------------------- frames
 #define FMAX 16384
 static uint64_t f_interval[FMAX], f_acquire[FMAX], f_present[FMAX], f_gpu[FMAX], f_comp[FMAX];
-static uint8_t f_flags[FMAX];  // 1 gameplay, 2 sampler on
+static uint8_t f_flags[FMAX];  // 1 gameplay, 2 sampler on, 4 the compared feature on (diag_request_ab)
+static uint64_t f_rcpu[FMAX], f_mcpu[FMAX];  // the render thread's and the main thread's own CPU time per interval
 static int f_n, f_ncomp, f_nmenu;
 static uint64_t f_last, f_last_gpu, f_next_stats, f_next_block;
 #define CL 8
@@ -264,11 +267,31 @@ static int cl_n, cl_samples;
 static float temp_min = 1e9f, temp_max = -1e9f, headroom_min = 1e9f;
 static int thermal_max = -1;
 static uint64_t g_move_cost_ns;
+// A/B (diag_request_ab): the feature alternates every 10 s in the window, so both sides share the clocks and the heat
+volatile int g_diag_ab = -1;
+static int g_ab_want;
+static uint64_t f_next_ab;
+static uint64_t ab_cl_sum[2][CL];
+static int ab_cl_samples[2];
+static uint64_t f_last_rcpu, f_last_mcpu;
+// Another thread's CPU clock by its tid (Linux: the per-thread scheduler clock, as pthread_getcpuclockid makes it)
+static uint64_t tid_cpu(int tid) {
+    struct timespec ts;
+    if (tid <= 0 || clock_gettime((clockid_t)((~(unsigned)tid << 3) | 6), &ts)) return 0;
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
 
 static void report_start(void);
 
+void diag_request_ab(int seconds) {
+    if (atomic_load(&g_state) == 1 || atomic_load(&g_state) == 2 || atomic_load(&g_state) == 3) return;
+    g_ab_want = 1;
+    diag_request(seconds);
+}
+
 void diag_request(int seconds) {
     if (atomic_load(&g_state) == 1 || atomic_load(&g_state) == 2 || atomic_load(&g_state) == 3) return;
+    memset(ab_cl_sum, 0, sizeof ab_cl_sum), memset(ab_cl_samples, 0, sizeof ab_cl_samples);
     g_seconds = seconds > 0 ? seconds : 60;
     atomic_store(&win_t0, ~0ull);
     atomic_store(&win_t1, ~0ull);
@@ -327,23 +350,32 @@ void diag_present(uint64_t acquire_ns, uint64_t present_ns) {
         f_last_gpu = diag_gpu_busy_total_ns();
         atomic_store(&win_t1, now + (uint64_t)g_seconds * 1000000000ull);
         atomic_store(&win_t0, now);
+        if (g_ab_want) g_diag_ab = 1, f_next_ab = now + 10000000000ull;
+        f_last_rcpu = thread_cpu(), f_last_mcpu = tid_cpu(atomic_load(&g_main_tid));
         atomic_store(&g_state, 2);
-        LOG("[diag] recording %d s from here\n", g_seconds);
+        LOG("[diag] recording %d s from here%s\n", g_seconds, g_ab_want ? " (the compared feature alternating every 10 s)" : "");
         return;
     }
     if (st != 2) return;
     uint64_t gpu = diag_gpu_busy_total_ns();
+    uint64_t rcpu = thread_cpu(), mcpu = tid_cpu(atomic_load(&g_main_tid));
     if (f_last && f_n < FMAX) {
+        f_rcpu[f_n] = rcpu - f_last_rcpu;
+        f_mcpu[f_n] = mcpu >= f_last_mcpu ? mcpu - f_last_mcpu : 0;
         bool game = diag_in_gameplay();
         f_interval[f_n] = now - f_last;
         f_acquire[f_n] = acquire_ns;
         f_present[f_n] = present_ns;
         f_gpu[f_n] = gpu - f_last_gpu;
-        f_flags[f_n] = (uint8_t)((game ? 1 : 0) | (atomic_load(&g_sampler_on) ? 2 : 0));
+        f_flags[f_n] = (uint8_t)((game ? 1 : 0) | (atomic_load(&g_sampler_on) ? 2 : 0) | (g_diag_ab == 1 ? 4 : 0));
         f_nmenu += !game;
         f_n++;
     }
-    f_last = now, f_last_gpu = gpu;
+    f_last = now, f_last_gpu = gpu, f_last_rcpu = rcpu, f_last_mcpu = mcpu;
+    if (g_diag_ab >= 0 && now >= f_next_ab) {
+        f_next_ab = now + 10000000000ull;
+        g_diag_ab = !g_diag_ab;
+    }
 #ifdef __ANDROID__
     if (now >= f_next_stats) {  // the clocks and the heat, every 2 s
         f_next_stats = now + 2000000000ull;
@@ -356,7 +388,9 @@ void diag_present(uint64_t acquire_ns, uint64_t present_ns) {
             if (!cl_samples || m < cl_min[i]) cl_min[i] = m;
             if (m > cl_max[i]) cl_max[i] = m;
             cl_sum[i] += m;
+            if (g_diag_ab >= 0) ab_cl_sum[g_diag_ab][i] += m;
         }
+        if (g_diag_ab >= 0) ab_cl_samples[g_diag_ab]++;
         cl_samples++;
         if (ds.soc_temp_c > 0) {
             if (ds.soc_temp_c < temp_min) temp_min = ds.soc_temp_c;
@@ -376,6 +410,7 @@ void diag_present(uint64_t acquire_ns, uint64_t present_ns) {
     if (now >= atomic_load(&win_t1)) {
         int n = atomic_load(&g_nslots);
         for (int i = 0; i < n && i < SLOTS; i++) if (g_slots[i].live) arm_timer(g_slots[i].timer, false);
+        g_diag_ab = -1;  // (the feature back to its normal state)
         atomic_store(&g_state, 3);
         report_start();
     }
@@ -622,6 +657,25 @@ static void *report_main(void *arg) {
     stat_line("  of which with the sampler off", f_interval, f_n, f_flags, 3, 1);
     stat_line("acquire (vkAcquireNextImageKHR), gameplay", f_acquire, f_n, f_flags, 1, 1);
     stat_line("present call (vkQueuePresentKHR), gameplay", f_present, f_n, f_flags, 1, 1);
+    if (g_ab_want) {
+        out("-- A/B: constant buffers read in place (on / off, alternating every 10 s; gameplay frames)");
+        stat_line("present interval, in place ON ", f_interval, f_n, f_flags, 5, 5);
+        stat_line("present interval, in place OFF", f_interval, f_n, f_flags, 5, 1);
+        stat_line("render thread CPU per interval, ON ", f_rcpu, f_n, f_flags, 5, 5);
+        stat_line("render thread CPU per interval, OFF", f_rcpu, f_n, f_flags, 5, 1);
+        stat_line("main thread CPU per interval, ON ", f_mcpu, f_n, f_flags, 5, 5);
+        stat_line("main thread CPU per interval, OFF", f_mcpu, f_n, f_flags, 5, 1);
+        stat_line("GPU busy per interval (use the mean), ON ", f_gpu, f_n, f_flags, 5, 5);
+        stat_line("GPU busy per interval (use the mean), OFF", f_gpu, f_n, f_flags, 5, 1);
+        for (int s = 1; s >= 0; s--) {
+            if (!ab_cl_samples[s] || !cl_n) continue;
+            char line[256];
+            int o = snprintf(line, sizeof line, "CPU clusters mean MHz with it %s:", s ? "ON " : "OFF");
+            for (int i = 0; i < cl_n; i++)
+                o += snprintf(line + o, sizeof line - o, " [%d] %llu", i, (unsigned long long)(ab_cl_sum[s][i] / (uint64_t)ab_cl_samples[s]));
+            out("%s", line);
+        }
+    }
     out("-- GPU (timestamps at each submission's start and end, idle excluded)");
     // (the busy time arrives in batches, as submissions' timestamps are read back: the mean is the GPU's time per frame,
     // the percentiles are those of the batches)
@@ -710,6 +764,7 @@ static void *report_main(void *arg) {
     atomic_store(&g_nslots, 0);
     snprintf(g_done_msg, sizeof g_done_msg, "%s", path ? path : "log");
     g_diag_armed = 0;
+    g_ab_want = 0;
     atomic_store(&g_state, 4);
     return NULL;
 }

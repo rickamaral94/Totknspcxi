@@ -3867,16 +3867,29 @@ static uint64_t gmem_size;
 #ifdef __ANDROID__
 static bool gmem_placed;  // (gmem_buf is the guest heap itself, usable as a uniform buffer: vk_heap_place)
 
+// LARECOMP_UBO_DIRECT=1: always; LARECOMP_AB=<frames>:ubo alternates it, and so does Settings > Files > Measure and
+// compare (diag.c g_diag_ab) - that one only without Sync lag (a frame ahead, the CPU would write what the GPU still reads).
+extern volatile bool g_sync_lag_now;  // (nvn/objects.c nvnSyncWait)
 static bool ubo_direct(uint64_t addr, uint64_t size, VkDescriptorBufferInfo *out) {
     static int on = -1;
     if (on < 0) on = getenv("LARECOMP_UBO_DIRECT") && atoi(getenv("LARECOMP_UBO_DIRECT"));
     extern int vk_ab(const char *what);
-    if (!(on || AB("ubo") == 1) || !gmem_placed || addr < HEAP_BASE || addr + size > HEAP_BASE + gmem_size) return false;
+    if (!(on || AB("ubo") == 1 || (g_diag_ab == 1 && !g_sync_lag_now)) || !gmem_placed || addr < HEAP_BASE || addr + size > HEAP_BASE + gmem_size) return false;
     uint64_t off = addr - HEAP_BASE;
     if ((off & (g_vk.props.limits.minUniformBufferOffsetAlignment - 1)) || size > g_vk.props.limits.maxUniformBufferRange)
         return false;
-    for (uint64_t blk = addr >> 8; blk <= (addr + size - 1) >> 8; blk++)
-        if (ubo_inline_has(blk)) return false;
+    {   // (does an update inside a command list touch the range? Memoized per range until a block is marked anew:
+        // the walk over its 256-byte blocks for every bind of a 64 KB buffer showed in the render thread's profile)
+        static struct { uint64_t addr, size; uint32_t gen; bool marked; } memo[256];
+        uint32_t gen = atomic_load_explicit(&ubo_inline_gen, memory_order_acquire);
+        uint32_t h = (uint32_t)((addr ^ size * 31) * 0x9E3779B97F4A7C15ull >> 56);
+        if (memo[h].addr != addr || memo[h].size != size || memo[h].gen != gen) {
+            bool marked = false;
+            for (uint64_t blk = addr >> 8; !marked && blk <= (addr + size - 1) >> 8; blk++) marked = ubo_inline_has(blk);
+            memo[h].addr = addr, memo[h].size = size, memo[h].gen = gen, memo[h].marked = marked;
+        }
+        if (memo[h].marked) return false;
+    }
     *out = (VkDescriptorBufferInfo){gmem_buf, off, size};
     return true;
 }

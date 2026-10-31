@@ -125,11 +125,32 @@ static void test_report(void) {
     diag_test_set_clock(NULL);
 }
 
+// The comparison: the feature alternates every 10 s inside the window, and goes back to "not compared" at its end
+static void test_ab(void) {
+    diag_test_set_clock(fake_now);
+    fake_ns = 100000000000ull;
+    diag_request_ab(30);
+    CHECK(g_diag_ab == -1);  // (not before the window)
+    int seen[2] = {0, 0};
+    for (int f = 0; f < 60 * 40; f++) {  // 40 s at 60 fps: 5 s of waiting, then the 30 s window
+        fake_ns += 16666667;
+        if (g_diag_ab >= 0) seen[g_diag_ab]++;
+        diag_present(100000, 200000);
+    }
+    CHECK(seen[0] > 500 && seen[1] > 500);
+    CHECK(g_diag_ab == -1);
+    struct timespec ts = {1, 0};
+    nanosleep(&ts, NULL);
+    CHECK(diag_status(NULL, 0) == 3);
+    diag_test_set_clock(NULL);
+}
+
 int main(void) {
     test_percentiles();
     test_accounting();
     test_sampler();
     test_report();
+    test_ab();
     if (fails) { fprintf(stderr, "%d failed\n", fails); return 1; }
     fprintf(stderr, "all passed\n");
     return 0;
