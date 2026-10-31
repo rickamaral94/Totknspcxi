@@ -274,6 +274,12 @@ TEST(pkg_verify_packages) {
     std::string p = fx.dir + "/bad.nsp";
     put(p, std::string(bad.begin(), bad.end()));
     o = package_import_run(fx.inputs(p), h, nullptr);
-    CHECK(o.result == PKG_UNUSABLE);
+    CHECK(o.result == PKG_DAMAGED);
     CHECK(contains(o.detail, ".nca: its SHA-256 doesn't match"));
+    // a file that isn't a package at all: can't be used - not "damaged" (no checksum was compared)
+    std::string z = fx.dir + "/zeros.nsp";
+    put(z, std::string(0x10000, '\0'));
+    o = package_import_run(fx.inputs(z), h, nullptr);
+    CHECK(o.result == PKG_UNUSABLE);
+    CHECK(contains(o.detail, "neither an NSP nor an XCI"));
 }

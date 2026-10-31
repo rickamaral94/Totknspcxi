@@ -61,7 +61,43 @@ static bool ends_with(const std::string &s, const char *suffix) {
     return s.size() >= n && s.compare(s.size() - n, n, suffix) == 0;
 }
 
+// What the file is, from its own bytes - not from its name (a picker can hand over a name without its extension, or
+// one that doesn't match: an XCI named .nsp). PFS0 at 0: an NSP (NSZ too: its .ncz entries are refused below); the
+// card header's "HEAD" at 0x100 (or 0x1100, with the key area in front): an XCI. Anything else is said with what it
+// starts with, so a zip, a split part or an empty placeholder (a cloud file not downloaded) can be told apart.
+PackageKind detect_package(const Reader &file) {
+    uint8_t h[0x104] = {};
+    uint64_t n = file.size() < sizeof h ? file.size() : sizeof h;
+    if (n) file.read(h, n, 0);
+    if (n >= 4 && !memcmp(h, "PFS0", 4)) return PackageKind::NSP;
+    if (n >= 0x104 && !memcmp(h + 0x100, "HEAD", 4)) return PackageKind::XCI;
+    if (file.size() >= 0x1104) {
+        uint8_t m[4];
+        file.read(m, 4, 0x1100);
+        if (!memcmp(m, "HEAD", 4)) return PackageKind::XCI;
+    }
+    const std::string w = file.what();
+    if (file.size() == 0) fail(w + " is empty (0 bytes): a cloud file not downloaded, or a copy that didn't finish",
+                               w + " está vazio (0 bytes): um arquivo da nuvem não baixado, ou uma cópia que não terminou");
+    bool zeros = true;
+    for (uint64_t i = 0; i < n; i++) zeros &= h[i] == 0;
+    const char *kind_en = !memcmp(h, "PK\x03\x04", 4) ? " (a ZIP archive: extract the NSP or XCI from it first)"
+                        : !memcmp(h, "7z\xBC\xAF", 4) ? " (a 7-Zip archive: extract the NSP or XCI from it first)"
+                        : !memcmp(h, "Rar!", 4)        ? " (a RAR archive: extract the NSP or XCI from it first)"
+                        : zeros ? " (only zeros at its start: an incomplete copy, or a part of a split dump other than the first)"
+                                : "";
+    const char *kind_pt = !memcmp(h, "PK\x03\x04", 4) ? " (um arquivo ZIP: extraia o NSP ou XCI dele antes)"
+                        : !memcmp(h, "7z\xBC\xAF", 4) ? " (um arquivo 7-Zip: extraia o NSP ou XCI dele antes)"
+                        : !memcmp(h, "Rar!", 4)        ? " (um arquivo RAR: extraia o NSP ou XCI dele antes)"
+                        : zeros ? " (só zeros no começo: uma cópia incompleta, ou uma parte de um dump dividido que não é a primeira)"
+                                : "";
+    std::string start = hex(h, n < 8 ? size_t(n) : 8);
+    fail(w + " is neither an NSP nor an XCI: it starts with " + start + kind_en,
+         w + " não é um NSP nem um XCI: ele começa com " + start + kind_pt);
+}
+
 std::vector<Entry> open_package(const ReaderPtr &file, PackageKind kind) {
+    kind = detect_package(*file);  // (the content decides; the caller's guess from the name only names the file)
     std::vector<Entry> files;
     if (kind == PackageKind::NSP) {
         files = parse_pfs0(file);

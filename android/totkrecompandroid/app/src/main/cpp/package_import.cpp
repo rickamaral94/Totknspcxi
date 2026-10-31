@@ -161,7 +161,8 @@ PackageImportOutcome package_import_run(const PackageImportInputs &in, const Pac
     std::unique_ptr<nx::Importer> imp;
     try {
         nx::ImportInput ii;
-        ii.base = std::make_shared<nx::FdReader>(take(0), true, in.base_xci ? "base.xci" : "base.nsp");
+        // (named "base" in messages; NSP or XCI is the file's own content's call - nx::detect_package - not its name's)
+        ii.base = std::make_shared<nx::FdReader>(take(0), true, "base");
         ii.base_kind = in.base_xci ? nx::PackageKind::XCI : nx::PackageKind::NSP;
         if (fds[1] >= 0) ii.update = std::make_shared<nx::FdReader>(take(1), true, "update.nsp");
         ii.prod_keys = nx::MemReader::from_fd(take(2), 1u << 20, "prod.keys", true);
@@ -169,6 +170,7 @@ PackageImportOutcome package_import_run(const PackageImportInputs &in, const Pac
         imp.reset(new nx::Importer(ii));  // (the keys' text is wiped when ii goes, below)
         for (auto &l : imp->describe()) fprintf(stderr, "[import] %s\n", l.c_str());
     } catch (const nx::Error &e) {
+        fprintf(stderr, "[import] %s\n", e.en().c_str());
         out.result = PKG_UNUSABLE, out.detail = say(e);
         return out;
     }
@@ -178,6 +180,9 @@ PackageImportOutcome package_import_run(const PackageImportInputs &in, const Pac
             imp->verify_ncas(h.progress, cancel);
         } catch (const nx::Cancelled &) {
             return out.result = PKG_CANCELLED, out;
+        } catch (const nx::HashMismatch &e) {
+            fprintf(stderr, "[import] verify: %s\n", e.en().c_str());
+            return out.result = PKG_DAMAGED, out.detail = say(e), out;
         } catch (const nx::Error &e) {
             fprintf(stderr, "[import] verify: %s\n", e.en().c_str());
             return out.result = PKG_UNUSABLE, out.detail = say(e), out;

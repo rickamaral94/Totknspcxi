@@ -911,16 +911,20 @@ extern "C" JNIEXPORT jint JNICALL Java_com_totkrecompandroid_TOTKRecompAndroidAc
     PackageImportOutcome o = package_import_run(in, h, &g_pkg_cancel);
     g_pkg_importing = false;
     fprintf(stderr, "[launcher] package %s: %d %s\n", verify ? "verify" : "import", (int)o.result, o.detail.c_str());
-    if (verify && (o.result == PKG_DONE || o.result == PKG_UNUSABLE)) {  // (nothing set up: only the answer)
+    if (verify && (o.result == PKG_DONE || o.result == PKG_UNUSABLE || o.result == PKG_DAMAGED)) {  // (nothing set up)
         pthread_mutex_lock(&g_lock);
         g_busy = false;
         pthread_mutex_unlock(&g_lock);
         if (o.result == PKG_DONE)
             set_job("Packages verified: each one matches the SHA-256 its own metadata records.");
-        else
+        else if (o.result == PKG_DAMAGED)  // (only an NCA whose SHA-256 was read and differs)
             set_job("The package is damaged", true,
                     "Its contents differ from the SHA-256 its own metadata records. Copy it again from the original, or "
                     "dump it again from the game card or the console.");
+        else  // (it couldn't be opened or read: the detail says why - not a checksum)
+            set_job("Those packages can't be used", true,
+                    "Choose your own copy of the game (and its update), with prod.keys from a console whose firmware is as new "
+                    "as the update's, and title.keys if the packages need them.");
         set_job_detail(o.detail);
         return (jint)o.result;
     }

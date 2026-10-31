@@ -29,6 +29,7 @@ enum PackageImportResult {
     PKG_ROMFS_SET,     // romfs_check_set refused the files
     PKG_SPACE,         // not enough free space (detail: how much is needed and free)
     PKG_WRITE,         // writing or promoting failed
+    PKG_DAMAGED,       // Verify packages: an NCA's SHA-256 differs from its package's metadata (nx::HashMismatch)
 };
 
 struct PackageImportOutcome {

@@ -282,8 +282,8 @@ void Importer::verify_ncas(const Progress &progress, const std::atomic<bool> *ca
         uint8_t d[32];
         h.finish(d);
         if (memcmp(d, t.second->hash.data(), 32) != 0 || memcmp(d, t.second->id.data(), 16) != 0)
-            fail(e->name + ": its SHA-256 doesn't match the package's metadata (corrupt or modified file)",
-                 e->name + ": o SHA-256 não bate com os metadados do pacote (arquivo corrompido ou modificado)");
+            throw HashMismatch(e->name + ": its SHA-256 doesn't match the package's metadata (corrupt or modified file)",
+                               e->name + ": o SHA-256 não bate com os metadados do pacote (arquivo corrompido ou modificado)");
     }
 }
 

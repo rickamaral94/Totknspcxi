@@ -23,6 +23,13 @@ public:
     Cancelled() : Error("Cancelled", "Cancelado") {}
 };
 
+// An NCA whose SHA-256 differs from its package's metadata (Importer::verify_ncas): the one failure that says the
+// file's bytes changed - the app's "damaged" message is for this alone, not for a package it couldn't open
+class HashMismatch : public Error {
+public:
+    HashMismatch(std::string en, std::string pt) : Error(std::move(en), std::move(pt)) {}
+};
+
 [[noreturn]] inline void fail(std::string en, std::string pt) { throw Error(std::move(en), std::move(pt)); }
 
 // A file that isn't what it says (truncated, corrupt, out of bounds): one message shape for all the parsers

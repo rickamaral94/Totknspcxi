@@ -21,6 +21,9 @@ enum class PackageKind { NSP, XCI };
 
 // An NSP's files, or the files of an XCI's secure partition (where its NCAs are; the game card's own keys aren't
 // needed for them). Refuses compressed packages (.ncz entries: NSZ/XCZ) with a clear message.
+// The kind from the file's own bytes (PFS0 at 0, or an XCI's card header), else a message saying what it is
+PackageKind detect_package(const Reader &file);
+// kind: the caller's guess (from the file name); the bytes decide (detect_package)
 std::vector<Entry> open_package(const ReaderPtr &file, PackageKind kind);
 
 const Entry *find_entry(const std::vector<Entry> &entries, const std::string &name);

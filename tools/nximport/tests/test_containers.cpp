@@ -45,7 +45,34 @@ TEST(hfs0_and_xci) {
         CHECK(files[0].name == "x.nca");
         CHECK(files[0].data->read_vec(1000, 0) == secure[0].second);
     }
-    CHECK(contains(ERROR_OF(open_package(mem(synth::Bytes(0x4000, 0), "z.xci"), PackageKind::XCI)), "not an XCI"));
+}
+
+// NSP or XCI from the file's own bytes, whatever the name or the caller's guess: an XCI named .nsp (or a picker that
+// gave no extension) opens as the XCI it is; what is neither is said with what it starts with
+TEST(package_kind_from_content) {
+    std::mt19937_64 rng(5);
+    synth::Files secure = {{"x.nca", synth::random_bytes(rng, 300)}};
+    for (bool prefix : {false, true}) {
+        auto files = open_package(mem(synth::xci(secure, prefix), "base"), PackageKind::NSP);
+        REQUIRE(files.size() == 1);
+        CHECK(files[0].data->read_vec(300, 0) == secure[0].second);
+    }
+    auto files = open_package(mem(synth::pfs0(secure), "base"), PackageKind::XCI);
+    REQUIRE(files.size() == 1);
+    CHECK(files[0].name == "x.nca");
+    std::string zeros = ERROR_OF(open_package(mem(synth::Bytes(0x4000, 0), "base"), PackageKind::XCI));
+    CHECK(contains(zeros, "neither an NSP nor an XCI"));
+    CHECK(contains(zeros, "only zeros"));
+    synth::Bytes zip(0x200, 0x11);
+    zip[0] = 'P', zip[1] = 'K', zip[2] = 3, zip[3] = 4;
+    std::string z = ERROR_OF(open_package(mem(zip, "base"), PackageKind::NSP));
+    CHECK(contains(z, "ZIP"));
+    CHECK(contains(z, "504b0304"));  // (its first bytes, in hex)
+    CHECK(contains(ERROR_OF(open_package(mem(synth::Bytes(), "base"), PackageKind::NSP)), "empty (0 bytes)"));
+    synth::Bytes other(0x40, 0x5A);
+    std::string o;
+    try { open_package(mem(other, "base"), PackageKind::NSP); } catch (const Error &e) { o = e.pt(); }
+    CHECK(contains(o, "não é um NSP nem um XCI"));
 }
 
 TEST(nsz_refused) {
