@@ -53,11 +53,15 @@ Settings g_settings = {
 #endif
 #ifdef __ANDROID__
     .upscaler = UPSCALE_SGSR1,  // (one pass: ~1 ms on the Adreno 830 to 2560x1440, FSR 1's two ~2.7 ms; 40 fps against 38)
-    .native_code = false,       // (an experiment: runtime/native.c)
+    .native_code = true,        // (the game's own code on the CPU, runtime/native.c. Same walk in the prologue cave, 2026-10-30:
+                                // recompiled 27.7 fps, frame time sd 7.4 ms, 25% of frames over 36 ms, 1.5 cores of game
+                                // threads; native 30.0 fps, sd 0.6 ms, none over 36 ms, 0.86 cores)
+    .sync_lag = true,           // (the CPU's reads of GPU results a frame old - nvn/objects.c nvnSyncWait - so the game's next
+                                // frame overlaps the render thread and the GPU: +16.9% in TOTK, 22.0 -> 25.7 fps on the POCO
+                                // F7 Ultra, Great Sky Island, LARECOMP_AB=120:synclag in one launch, 2026-10-30; it starts
+                                // 300 frames after each load. BOTW saw Link's legs sink with it: to check in TOTK's play)
     .cbuf_inplace = false,
-    .adpf_workers = false,      // (BOTW: no gain, 26.3 real frames a second with them against 27.3, higher clocks)
-    .sync_lag = false,          // (on: a few more fps, the CPU's reads of GPU results a frame old - nvn/objects.c nvnSyncWait;
-                                // BOTW saw Link's legs sink and white water with it. Off in TOTK until tested there)
+    .adpf_workers = false,      // experimental; the diagnostic comparison enables it explicitly
     .out_lines = OUT_AUTO,      // (POCO F7 Ultra, 3200x1440, 1.8.2's Great Plateau: GPU 22.8 ms a frame at the screen's,
                                 // 18.6 at 1080 lines with a larger scene - the final image's passes over 2.2x the pixels)
 #else
@@ -321,7 +325,7 @@ void settings_load(void) {
 void settings_save(void) {
     FILE *f = fopen(SETTINGS_FILE, "w");
     if (!f) { LOG("[settings] cannot write %s\n", SETTINGS_FILE); return; }
-    fprintf(f, "# TOTKRecompAndroid settings (edited from the in-game menu: F1, Esc, or Minus+Plus on a controller)\n");
+    fprintf(f, "# TOTKDroid settings (edited from the in-game menu: F1, Esc, or Minus+Plus on a controller)\n");
     fprintf(f, "aspect = %s\n", g_settings.aspect == ASPECT_ORIGINAL ? "original" : "unlocked");
     fprintf(f, "fullscreen = %d\n", g_settings.fullscreen);
     fprintf(f, "volume = %.2f\n", g_settings.volume);

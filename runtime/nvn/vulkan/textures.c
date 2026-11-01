@@ -14,7 +14,7 @@
 #include "../texpatch.h"
 
 // ================================================================== formats
-typedef struct { VkFormat vf; uint8_t expand_rgb, alpha_one; } VkFmt;
+typedef struct { VkFormat vf; uint8_t expand_rgb, alpha_one, chan[4]; } VkFmt;
 
 // DEPTH24_STENCIL8 as itself where the GPU has it for everything the game does with depth (NVIDIA, Intel): half the
 // bytes of D32_SFLOAT_S8_UINT (4 instead of 8 per pixel) for every depth test, clear and copy - the game copies its
@@ -75,17 +75,19 @@ static VkFmt fmt_of(uint32_t f) {
     case 0x2F: return (VkFmt){VK_FORMAT_R32G32B32A32_UINT};
     case 0x30: return (VkFmt){VK_FORMAT_R32G32B32A32_SINT};
     case 0x31: return (VkFmt){VK_FORMAT_S8_UINT};
-    case 0x32: return (VkFmt){VK_FORMAT_D16_UNORM};
+    case 0x32: return (VkFmt){VK_FORMAT_D16_UNORM};  // (screen-sized ones: D32 float, create_image)
     case 0x33: return (VkFmt){VK_FORMAT_D32_SFLOAT};  // DEPTH24 (as on Metal: no 24-bit depth there)
     case 0x34: return (VkFmt){VK_FORMAT_D32_SFLOAT};
     case 0x35: return (VkFmt){depth24_stencil8()};
     case 0x36: return (VkFmt){VK_FORMAT_D32_SFLOAT_S8_UINT};
     case 0x37: return (VkFmt){VK_FORMAT_R8G8B8A8_SRGB, 0, 1};
     case 0x38: return (VkFmt){VK_FORMAT_R8G8B8A8_SRGB};
-    case 0x39: return (VkFmt){VK_FORMAT_R4G4B4A4_UNORM_PACK16};   // Metal ABGR4Unorm
-    case 0x3A: return (VkFmt){VK_FORMAT_R5G6B5_UNORM_PACK16};     // Metal B5G6R5Unorm
-    case 0x3B: return (VkFmt){VK_FORMAT_R5G5B5A1_UNORM_PACK16};   // Metal A1BGR5Unorm
-    case 0x3C: return (VkFmt){VK_FORMAT_R5G6B5_UNORM_PACK16};
+    // 16-bit packed formats: NVN names components from LSB to MSB; Vulkan PACK16 names them from MSB to LSB
+    // (credit: valentderah/totk-pc-recomp commit c4108c4 - TotK uses RGB5A1 and RGB565 for terrain normal/blend maps).
+    case 0x39: return (VkFmt){VK_FORMAT_B4G4R4A4_UNORM_PACK16, 0, 0, {5, 2, 3, 4}};  // RGBA4 (R in low 4 bits)
+    case 0x3A: return (VkFmt){VK_FORMAT_A1R5G5B5_UNORM_PACK16, 0, 1, {4, 3, 2, 5}};  // RGB5 (R in low 5 bits, A=1)
+    case 0x3B: return (VkFmt){VK_FORMAT_A1R5G5B5_UNORM_PACK16, 0, 0, {4, 3, 2, 5}};  // RGB5A1 (R in low 5, A in bit 15)
+    case 0x3C: return (VkFmt){VK_FORMAT_R5G6B5_UNORM_PACK16, 0, 0, {4, 3, 2, 5}};    // RGB565 (R in low 5, B in high 5)
     case 0x3D: return (VkFmt){VK_FORMAT_A2B10G10R10_UNORM_PACK32};
     case 0x3E: return (VkFmt){VK_FORMAT_A2B10G10R10_UINT_PACK32};
     case 0x3F: return (VkFmt){VK_FORMAT_B10G11R11_UFLOAT_PACK32};
@@ -136,11 +138,14 @@ static VkFmt fmt_of(uint32_t f) {
     case 0x92: return (VkFmt){VK_FORMAT_ASTC_10x10_SRGB_BLOCK};
     case 0x93: return (VkFmt){VK_FORMAT_ASTC_12x10_SRGB_BLOCK};
     case 0x94: return (VkFmt){VK_FORMAT_ASTC_12x12_SRGB_BLOCK};
-    case 0x95: case 0x96: case 0x97: return (VkFmt){VK_FORMAT_R5G5B5A1_UNORM_PACK16};
-    case 0x98: return (VkFmt){VK_FORMAT_B8G8R8A8_UNORM, 0, 1};
-    case 0x99: return (VkFmt){VK_FORMAT_B8G8R8A8_UNORM};
-    case 0x9A: return (VkFmt){VK_FORMAT_B8G8R8A8_SRGB, 0, 1};
-    case 0x9B: return (VkFmt){VK_FORMAT_B8G8R8A8_SRGB};
+    case 0x95: return (VkFmt){VK_FORMAT_R5G6B5_UNORM_PACK16};                        // BGR565 (B in low 5, R in high 5)
+    case 0x96: return (VkFmt){VK_FORMAT_A1R5G5B5_UNORM_PACK16, 0, 1};                // BGR5 (B in low 5, R in bits 10..14)
+    case 0x97: return (VkFmt){VK_FORMAT_A1R5G5B5_UNORM_PACK16};                      // BGR5A1 (B in low 5, A in bit 15)
+    case 0x98: return (VkFmt){VK_FORMAT_R5G5B5A1_UNORM_PACK16};                      // A1BGR5 (A in bit 0, R in high 5)
+    case 0x99: return (VkFmt){VK_FORMAT_B8G8R8A8_UNORM, 0, 1};                       // BGRX8
+    case 0x9A: return (VkFmt){VK_FORMAT_B8G8R8A8_UNORM};                             // BGRA8
+    case 0x9B: return (VkFmt){VK_FORMAT_B8G8R8A8_SRGB, 0, 1};                        // BGRX8_SRGB
+    case 0x9C: return (VkFmt){VK_FORMAT_B8G8R8A8_SRGB};                              // BGRA8_SRGB
     default: return (VkFmt){VK_FORMAT_R8G8B8A8_UNORM};
     }
 }
@@ -250,6 +255,12 @@ static uint8_t tex_scale_group(const NvnTexture *t) {
     static int on = -1;
     if (on < 0) on = getenv("LARECOMP_NO_SCALE") == NULL;
     if (!on) return RS_NONE;
+    // (TOTK 1.4.3 makes its final 1920x1080 images - the composition, fmt 0x3f, and its copy, 0x25 - without the
+    // render-target flag: left unscaled, a free aspect's wide view landed in the middle 16:9 part of the screen)
+    extern int g_game_version;
+    bool totk_out = g_game_version == 143 && t->target == 1 && t->samples <= 1 && !(t->flags & 9) && t->width == 1920 &&
+                    t->height == 1080 && (t->format == 0x3f || t->format == 0x25);
+    if (totk_out) return RS_OUT;
     if ((t->target != 1 && t->target != 4) || t->samples > 1 || !(t->flags & 9) || t->width < 32 || t->height < 16) return RS_NONE;
     float a = (float)t->width / (float)t->height;
     if (a < 1.74f || a > 1.81f) return RS_NONE;
@@ -436,6 +447,21 @@ static void create_image(NvnTexture *t, TexBackend *b) {
     uint32_t samples = t->samples > 1 ? t->samples : 1;
     if (samples > 1) levels = 1;
     VkFormat vf = mf.vf;
+    // A screen-sized D16 as 32-bit float. TOTK classifies its lighting tiles with an EQUAL test of a depth one pass
+    // writes as gl_FragDepth = material id against quads the lighting passes rasterise at that z (kuraeow/ultratears) -
+    // in a 16-bit UNORM buffer the two conversions may round apart on a non-Maxwell GPU: tiles the light skipped, black
+    // squares on the Great Sky Island's grass that followed Link, the grass near him unlit (2026-10-31, the user's
+    // recordings and a frame dump: every G-buffer layer right, the squares from the deferred lighting on; the same bug
+    // as Eden's Issue-Reports #492). A float buffer stores both exactly. Only the screen-sized (16:9) ones: with every
+    // D16 as float a shadow that walked with Link appeared - the 424x424 D16 shadow map around him, whose depth
+    // compares Vulkan clamps to [0,1] only for UNORM formats (what lies past its range came out shadowed).
+    // LARECOMP_VK_D16_AS_D32=0: none; =2: every D16.
+    if (t->format == 0x32) {
+        static int f32 = -1;
+        if (f32 < 0) f32 = !getenv("LARECOMP_VK_D16_AS_D32") ? 1 : atoi(getenv("LARECOMP_VK_D16_AS_D32"));
+        float a = (float)t->width / (float)(t->height ? t->height : 1);  // (its 1600x896 / 800x448; the maps: 400x400, 424x424)
+        if (f32 > 1 || (f32 && (b->rs_group != RS_NONE || (a > 1.74f && a < 1.81f)))) vf = VK_FORMAT_D32_SFLOAT;
+    }
     VkFormatFeatureFlags need = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
     b->astc_bw = b->astc_bh = 0;
 #ifdef __ANDROID__
@@ -516,6 +542,13 @@ static void create_image(NvnTexture *t, TexBackend *b) {
         depthfmt = false;
     }
     b->format = vf;
+    if (t->format == 0x32) {  // LARECOMP_LOG_D16=1: the D16 targets as made - which became float, at what scale
+        static int nlog, on = -1;
+        if (on < 0) on = getenv("LARECOMP_LOG_D16") != NULL;
+        if (on && nlog++ < 200)
+            LOG("[vk] D16 %p %ux%ux%u flags %#x group %u -> vk %d %ux%u\n", (void *)t, t->width, t->height, layers, t->flags,
+                b->rs_group, vf, tw, th);
+    }
     b->width = tw; b->height = th; b->depth = depth; b->layers = layers; b->levels = levels; b->samples = samples;
     b->aspect = depthfmt ? aspect_of(t->format) : VK_IMAGE_ASPECT_COLOR_BIT;
     b->base_type = type == VK_IMAGE_TYPE_1D ? (layers > 1 ? VK_IMAGE_VIEW_TYPE_1D_ARRAY : VK_IMAGE_VIEW_TYPE_1D)
@@ -785,6 +818,23 @@ static bool texture_unchanged(TexBackend *b, const uint8_t *mem, uint64_t size) 
     if (enabled < 0) { const char *e = getenv("LARECOMP_TEX_SNAPSHOTS"); enabled = !e || atoi(e) != 0; }
     if (!enabled || !size || size > (1u << 20)) return false;
     TextureSnapshot *e = &texture_snapshots[((uintptr_t)b >> 6) & 7];
+    {   // LARECOMP_LOG_TEX_SNAP=1 (diagnosis): every 2 s, the snapshot compares - same, changed, or the slot another's
+        static int on = -1;
+        static uint64_t n_same, n_changed, n_other, bytes, last;
+        if (on < 0) on = getenv("LARECOMP_LOG_TEX_SNAP") != NULL;
+        if (on) {
+            bool mine = e->owner == b && e->hash == b->data_hash && e->size == size;
+            if (!mine) n_other++; else if (!memcmp(e->bytes, mem, size)) n_same++; else n_changed++;
+            bytes += size;
+            uint64_t now = SDL_GetTicksNS();
+            if (now - last > 2000000000ull) {
+                last = now;
+                LOG("[texsnap] 2 s: %llu same, %llu changed, %llu slot taken by another; %.1f MB\n", (unsigned long long)n_same,
+                    (unsigned long long)n_changed, (unsigned long long)n_other, bytes / 1048576.0);
+                n_same = n_changed = n_other = bytes = 0;
+            }
+        }
+    }
     if (e->owner == b && e->hash == b->data_hash && e->size == size && !memcmp(e->bytes, mem, size)) return true;
     if (e->size != size) {
         uint8_t *next = realloc(e->bytes, size ? size : 1);
@@ -796,7 +846,9 @@ static bool texture_unchanged(TexBackend *b, const uint8_t *mem, uint64_t size) 
     return false;
 }
 
-uint64_t prof_tex_checks, prof_tex_samples, prof_tex_full, prof_tex_full_bytes, prof_tex_dyn, prof_tex_watch_skips;
+uint64_t prof_tex_checks, prof_tex_samples, prof_tex_full, prof_tex_full_bytes, prof_tex_dyn, prof_tex_watch_skips,
+    prof_tex_same_bytes, prof_tex_snap_bytes, prof_tex_calm_bytes;  // (LARECOMP_VK_PROF: full hashes that found no change;
+                                                                    // snapshot compares; calm dynamic textures only sampled)
 // Opt-in CPU measurements only: no GPU queries, flushes or waits. Called on the texture upload path.
 static bool texture_trace_on(void) {
     static int on = -1;
@@ -838,8 +890,10 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
     static int always_full = -1;
     if (always_full < 0) always_full = getenv("LARECOMP_TEX_FULLHASH") ? 1 : 0;
     bool full = b->dynamic || !b->uploaded || always_full;
-    bool periodic = frame - b->full_frame >= 120 && full_hash_budget >= total;  // (safety net: a full hash now and then)
-    if (!full && periodic) { full = true; full_hash_budget -= total; }
+    // (safety net: a full hash now and then - one larger than the frame's budget too, as the frame's first: TOTK's
+    // 26 MB terrain atlas never fit it and a change its samples missed stayed unseen for 20 s)
+    bool periodic = frame - b->full_frame >= 120 && (full_hash_budget >= total || full_hash_budget == (4u << 20));
+    if (!full && periodic) { full = true; full_hash_budget = full_hash_budget > total ? full_hash_budget - total : 0; }
     bool identified_now = !b->tp;  // (button prompts / Hero Mode icon: re-uploaded when their look changes)
     if (identified_now) b->tp = texpatch_marker(t);
     bool restyle = b->tp > 0 && b->uploaded && b->tp_gen != texpatch_generation();
@@ -856,12 +910,31 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
             b->wgen = now;
             if (!ch && b->uploaded && !restyle) {
                 if (!periodic) { prof_tex_watch_skips++; return; }
-                if (b->dynamic) full_hash_budget -= total;  // (the others took theirs above)
+                if (b->dynamic) full_hash_budget = full_hash_budget > total ? full_hash_budget - total : 0;  // (the others took theirs above)
             }
         }
     }
-    if (b->uploaded && b->dynamic && !always_full && !restyle && !periodic && texture_unchanged(b, mem, total)) return;
+    if (b->uploaded && b->dynamic && !always_full && !restyle && !periodic) {
+        prof_tex_snap_bytes += total;
+        if (texture_unchanged(b, mem, total)) return;
+    }
     bool fast = tex_fast_hash();  // (runtime/nvn/tex_hash.h; LARECOMP_TEX_FASTHASH=0: the previous hashes)
+    // A large dynamic texture seen unchanged DYN_CALM full hashes in a row: hashed whole only every dyn_every frames
+    // (spread by its address), and sampled in between - a sample that differs hashes it whole at once. Without page
+    // write tracking (the placed heap) TOTK's cave hashed two of them every frame, ~25 MB: a 5120x5120 BC atlas that
+    // changed once while loading, and a 2048x4096 R8 one (flags 0x14) that changed once in ~38 looks - ~1 GB per 2 s,
+    // 97% unchanged (LARECOMP_VK_PROF, 2026-10-30). A change the sample misses shows up to dyn_every - 1 frames late.
+    // LARECOMP_TEX_DYN_EVERY=<n> (1: every frame, as before); LARECOMP_AB=<frames>:texcalm alternates it.
+    enum { DYN_CALM = 30, DYN_LARGE = 2 << 20 };
+    static int dyn_every = -1;
+    if (dyn_every < 0) dyn_every = getenv("LARECOMP_TEX_DYN_EVERY") ? atoi(getenv("LARECOMP_TEX_DYN_EVERY")) : 4;
+    extern int vk_ab(const char *what);
+    bool calm = fast && dyn_every > 1 && b->dynamic && b->uploaded && total >= DYN_LARGE && b->same_run >= DYN_CALM &&
+                !restyle && !always_full && vk_ab("texcalm") != 0;
+    if (calm && (frame + ((uintptr_t)b >> 6)) % (uint64_t)dyn_every && tex_hash_sample(mem, total) == b->dyn_sample) {
+        prof_tex_calm_bytes += total;
+        return;
+    }
     if (!full && !restyle) {
         prof_tex_samples++;
         uint64_t sh = fast ? tex_hash_sample(mem, total) : fnv_sample(mem, total);
@@ -874,7 +947,21 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
     // (the sample is only compared while the texture isn't dynamic, and a dynamic one stays so: none for those)
     if (!fast) b->sample_hash = fnv_sample(mem, total);
     else if (!b->dynamic && !(b->uploaded && h != b->data_hash)) b->sample_hash = tex_hash_sample(mem, total);
-    if (b->uploaded && h == b->data_hash && !restyle) return;
+    {   // LARECOMP_LOG_TEX_DYN=1 (diagnosis): the large textures hashed whole every frame, and whether they changed
+        static int on = -1, n;
+        if (on < 0) on = getenv("LARECOMP_LOG_TEX_DYN") != NULL;
+        if (on && b->dynamic && total >= (1u << 20) && n < 400 && !(frame % 30)) {
+            n++;
+            LOG("[texdyn] frame %llu: %ux%ux%u fmt %#x flags %#x target %u levels %u at %llx+%llx %s%s\n", (unsigned long long)frame,
+                t->width, t->height, t->depth, t->format, t->flags, t->target, t->levels, (unsigned long long)t->addr,
+                (unsigned long long)total, h == b->data_hash ? "unchanged" : "CHANGED", b->gpu_owned ? " gpu-owned" : "");
+        }
+    }
+    if (b->dynamic && total >= DYN_LARGE && fast) {
+        b->same_run = b->uploaded && h == b->data_hash ? (b->same_run < 0xFFFF ? b->same_run + 1 : b->same_run) : 0;
+        b->dyn_sample = tex_hash_sample(mem, total);
+    }
+    if (b->uploaded && h == b->data_hash && !restyle) { prof_tex_same_bytes += total; return; }
     if (b->uploaded && h != b->data_hash && !b->dynamic && !always_full) {
         // LARECOMP_LOG_TEX_MISS=1 (diagnosis): a change the sampled check didn't see, found by the periodic full hash -
         // the texture showed its old contents meanwhile (the stretched-terrain curtains after a tower: gone with
@@ -921,11 +1008,12 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
     uint32_t layers = t->layout.layers ? t->layout.layers : 1;
     if (layers > b->layers && b->depth == 1) layers = b->layers;
     uint64_t layer_size = tegra_layer_size(&t->layout);
-    // Linear textures: flag 0x10, rows t->stride apart; flag 0x40 (BOTW's terrain height tiles, 256x256 R16 filled by the
-    // CPU) too, rows packed at their width - their stride field doesn't fit their storage. Read as block-linear, those
-    // tiles gave the terrain's heights in stripes: walls stretched into vertical "curtains", spikes in the shrine.
+    // Linear render targets use the row alignment reported by device property 57, just as CPU writeback does.
+    // Their builder stride is not authoritative. TotK's 260-wide R16 height maps have 520 useful bytes per row
+    // but a 640-byte pitch; treating them as packed rows feeds unrelated heights to the displacement shader.
+    extern uint64_t nvn_linear_rt_pitch(uint64_t row_bytes);
     bool linear = (t->flags & 0x50) != 0;
-#define LIN_STRIDE(row_bytes) ((t->flags & 0x10) ? t->stride : (uint64_t)(row_bytes))
+#define LIN_STRIDE(row_bytes) ((t->flags & 0x10) ? t->stride : nvn_linear_rt_pitch(row_bytes))
     uint32_t levels = t->layout.levels < b->levels ? t->layout.levels : b->levels;
     for (uint32_t layer = 0; layer < layers; layer++) {
         for (uint32_t lv = 0; lv < levels; lv++) {
@@ -1241,18 +1329,19 @@ VkImageView vk_view(NvnTexture *t, const NvnTextureView *v, bool has_view, bool 
     }
     VkComponentMapping sw = IDENTITY;
     if (!(b->aspect & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)) && b->samples == 1) {
+        VkFmt mf = fmt_of(v && (v->setmask & 4) ? v->format : t->format);
         const uint8_t *s = v && (v->setmask & 8) ? v->swizzle : t->swizzle;
         uint8_t c[4];
         for (int i = 0; i < 4; i++) c[i] = s[i] <= 5 ? s[i] : (uint8_t)(2 + i);
-        if (c[0] || c[1] || c[2] || c[3]) {  // never set: identity
-            if (fmt_of(t->format).alpha_one)
-                for (int i = 0; i < 4; i++) if (c[i] == 5) c[i] = 1;
+        if (!(c[0] || c[1] || c[2] || c[3])) { c[0] = 2; c[1] = 3; c[2] = 4; c[3] = 5; }
+        for (int i = 0; i < 4; i++) {
+            if (mf.alpha_one && c[i] == 5) c[i] = 1;
+            else if (mf.chan[0] && c[i] >= 2 && c[i] <= 5) c[i] = mf.chan[c[i] - 2];
+        }
+        if (c[0] != 2 || c[1] != 3 || c[2] != 4 || c[3] != 5)
             // NVN swizzle 0 zero, 1 one, 2..5 r,g,b,a == VkComponentSwizzle - 1
             sw = (VkComponentMapping){(VkComponentSwizzle)(c[0] + 1), (VkComponentSwizzle)(c[1] + 1), (VkComponentSwizzle)(c[2] + 1),
                                       (VkComponentSwizzle)(c[3] + 1)};
-        } else if (fmt_of(t->format).alpha_one) {
-            sw.a = VK_COMPONENT_SWIZZLE_ONE;
-        }
     }
     VkImageViewType want = view_type_for(want_textype);
     VkImageViewType have = b->base_type;

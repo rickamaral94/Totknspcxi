@@ -131,7 +131,12 @@ static void load_nso(Module *m, const char *path, uint64_t base) {
     uint32_t seg[3][3];  // file_off, mem_off, size
     for (int i = 0; i < 3; i++) memcpy(seg[i], raw + 0x10 + i * 0x10, 12);
     uint32_t bss = *(uint32_t *)(raw + 0x3C);
-    uint64_t size = (seg[2][1] + seg[2][2] + bss + 0x3FFF) & ~0x3FFFull;
+    uint64_t size = ((uint64_t)seg[2][1] + seg[2][2] + bss + 0x3FFF) & ~0x3FFFull;
+    // Validate before committing or copying: TOTK 1.0.0 main is 0x4668000 bytes,
+    // larger than the old 64 MiB SDK offset. Loading SDK there overwrote main's GOT.
+    uint64_t limit = base == MAIN_BASE ? SDK_BASE : HLE_BASE;
+    if (base >= limit || size > limit - base)
+        FATAL("%s: module size 0x%llx overlaps the next guest region\n", path, (unsigned long long)size);
     plat_commit(base, size);  // inside the guest window: zero-filled, read/write
     for (int i = 0; i < 3; i++) {
         uint32_t csize = *(uint32_t *)(raw + 0x60 + i * 4);

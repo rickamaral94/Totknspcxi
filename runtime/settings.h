@@ -47,7 +47,7 @@ typedef struct {
     int fps_mode;         // 0: the game's own choice (30 / 60, the frame pacer), 1: 30 fps, 2: 60 fps
     bool shader_int32;    // shader address math in 32-bit words even where the driver offers 64-bit (vulkan/exec.c)
     bool files_in_place;  // Android: a setup reads the picked romfs/ where it is, no copy (services/fs.c); off by default
-    bool native_code;     // Android: the game's own code on the CPU, no build of it (runtime/native.c); off by default
+    bool native_code;     // Android: the game's own code on the CPU, no build of it (runtime/native.c); on by default for 1.4.3
     bool adpf_workers;    // Video > ADPF: the game's threads (experimental): the busiest join the hint session (platform/android.c)
     bool cbuf_inplace;    // Video > Constant buffers read in place (experimental; only with Sync lag off): vulkan/exec.c
     bool sync_lag;        // Android: the game's next frame overlaps the GPU's last (nvn/objects.c nvnSyncWait); on by default

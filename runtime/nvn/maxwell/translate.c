@@ -32,6 +32,8 @@ unsigned maxwell_gmem_miss_stages = ~0u;
 bool maxwell_brx_window;
 bool maxwell_static_stacks;
 bool maxwell_structured;
+bool maxwell_struct_skips = true;  // (structure: forward jumps out of a region as guarded skips; LARECOMP_NO_STRUCT_SKIPS)
+bool maxwell_gfind_cache = true;  // (gfind: the last range found first; LARECOMP_NO_GFIND_CACHE)
 bool maxwell_no_switch;
 bool maxwell_no_local_struct;
 bool maxwell_native_half;
@@ -740,7 +742,15 @@ static void glsl_gather(Ctx *c, char *out, int slot, const char *const *co, cons
     }
     if (layer) snprintf(P, sizeof P, "vec%d(%s, float(%s))", n + 1, xs, layer);
     else snprintf(P, sizeof P, "%s", xs);
-    if (t->shadow) snprintf(out, 2000, "textureGather(t%d, %s, %s)", slot, P, dref ? dref : "0.0f");
+    // (an array's compare rounds its reference to D16 as glsl_sample's does: TOTK's cascades, gathered for their soft
+    // edges - left in full float, lit ground failed its own compare in blocks, black squares on the Great Sky Island's
+    // grass in a grid around Link, 2026-10-31. LARECOMP_NO_GATHER_DREF_ROUND=1: not rounded)
+    static int no_round = -1;
+    if (no_round < 0) no_round = getenv("LARECOMP_NO_GATHER_DREF_ROUND") != NULL;
+    char dr[200];
+    if (t->shadow && layer && dref && !no_round) snprintf(dr, sizeof dr, "round(%s * 65535.0f) / 65535.0f", dref);
+    else snprintf(dr, sizeof dr, "%s", dref ? dref : "0.0f");
+    if (t->shadow) snprintf(out, 2000, "textureGather(t%d, %s, %s)", slot, P, dr);
     else if (comp != 0) snprintf(out, 2000, "textureGather(t%d, %s, %d)", slot, P, comp);
     else snprintf(out, 2000, "textureGather(t%d, %s)", slot, P);
 }
@@ -1184,8 +1194,12 @@ static void emit_tmml(Ctx *c, uint64_t w, bool bindless, uint32_t pc) {
     else if (ncoord == 2) snprintf(coords, sizeof coords, "float2(%s, %s)", cs[0], cs[1]);
     else snprintf(coords, sizeof coords, "float3(%s, %s, %s)", cs[0], cs[1], cs[2]);
     if (c->glsl && c->stage == STAGE_FRAGMENT) {
+        // Both as unsigned 24.8, a negative LOD (a magnified texture) as 0 - yuzu's F2U.32 (2e478a66c, "TOTK flickering
+        // clouds"). Through int() a LOD of -0.5 became 0xffffff80, which the shader turns back into a float as unsigned
+        // (I2F.U32): a LOD of ~16 million, clamped to the cloud particles' 2 - their noise sampled from the wrong mip
+        // wherever the camera is close, the sea of clouds below the Great Sky Island in blocks (2026-10-30).
         sp(&c->body, "    { float2 lod = textureQueryLod(t%d, %s);\n"
-                     "      uint4 q = uint4(uint(int(lod.x * 256.0f)), uint(int(lod.y * 256.0f)), 0u, 0u);\n",
+                     "      uint4 q = uint4(uint(max(lod.x * 256.0f, 0.0f)), uint(max(lod.y * 256.0f, 0.0f)), 0u, 0u);\n",
            slot, coords);
     } else {
         sp(&c->body, "    { uint4 q = uint4(0u, 0u, 0u, 0u);\n");
@@ -2064,6 +2078,10 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
                 }
             } else {
                 c->uses_gmem_store = true;
+                // (and told to the backend, as the compute path and ATOM / RED do: the draw's storage buffers are then
+                // GPU-written memory for the sync lag and the vertex cache - TOTK's 1x1 attachment-less draw, which
+                // stores the cave's interior ambient coefficients, was a storing draw nobody knew of)
+                c->info->uses_gmem_store = true;
                 if (size < 4)
                     sp(&c->body, "      if (ok) { uint wi = uint(ga >> 2); uint sh = uint(ga & %s) * 8u; atomicAnd(gmem_.w[wi], ~(0x%xu << sh)); "
                        "atomicOr(gmem_.w[wi], (%s & 0x%xu) << sh); }\n", size < 2 ? "3ul" : "2ul", size < 2 ? 0xFFu : 0xFFFFu, R(d),
@@ -2819,6 +2837,9 @@ static bool resolve_stacks(const Ctx *c, const uint64_t *code, size_t end, int32
 // branch over code is an if (with an else when the skipped part ends by jumping over what follows), a backward
 // branch closes a loop, and jumps to a loop's header or exit are continue / break. Anything else (a jump out of
 // nested ifs, out of two loops, into the middle of a region) fails, and the shader keeps the state machine.
+static __thread int g_sfail_line;  // (LARECOMP_SAVE_MSL) the first check that kept the state machine: a comment in the source
+#define SFAIL(x) ((x)->fail = true, g_sfail_line = g_sfail_line ? g_sfail_line : __LINE__)
+#define SFAIL_OK(ok) ((ok) = false, g_sfail_line = g_sfail_line ? g_sfail_line : __LINE__)
 typedef struct { uint32_t s, e; int term, tgt, brx; bool code; char cond[40]; } SBlk;  // term: 0 none, 1 jump, 2 exit, 3 BRX
 typedef struct {
     const Ctx *c;
@@ -2832,6 +2853,10 @@ typedef struct {
     uint8_t *consumed;
     Str out;
     bool fail, exit_used;
+    // Skips: a forward jump past the region it sits in (or over code inside it) sets sk<id>; the code after it is
+    // guarded by `if (!sk<id>)` at each level up to the target block, where the flag drops again.
+    int nsk, sk_t[16], sk_id[16], sk_depth[16], nskv;  // pending: target block, flag, depth it was made at; flags made
+    int ngd, gd_id[64];                                  // open guards (innermost last), each a flag
 } SCtx;
 
 static int st_thread(SCtx *x, int b) {  // through blocks that are only an unconditional jump
@@ -2853,8 +2878,8 @@ static const char *st_jump(SCtx *x, int t) {
         int h = x->loops[l][0], e = x->loops[l][1];
         bool cont = t == h, brk = t == e || st_thread(x, t) == st_thread(x, e);
         if (!cont && !brk) continue;
-        if (l != x->nloops - 1) { x->fail = true; return NULL; }  // (out of two loops)
-        if (brk && x->nsw && x->sw_loops[x->nsw - 1] > l) { x->fail = true; return NULL; }  // (break: the switch's)
+        if (l != x->nloops - 1) { SFAIL(x); return NULL; }  // (out of two loops)
+        if (brk && x->nsw && x->sw_loops[x->nsw - 1] > l) { SFAIL(x); return NULL; }  // (break: the switch's)
         return cont ? "continue;" : "break;";
     }
     return NULL;
@@ -2869,12 +2894,50 @@ static int st_switch(SCtx *x, int k, int end, int depth);
 
 static void st_range_alt(SCtx *x, int a, int end, int opened, int depth, int alt);
 static void st_range(SCtx *x, int a, int end, int opened, int depth) { st_range_alt(x, a, end, opened, depth, -1); }
+static void st_range_body(SCtx *x, int a, int end, int opened, int depth, int alt, int g0);
 static void st_range_alt(SCtx *x, int a, int end, int opened, int depth, int alt) {
-    if (depth > 64) { x->fail = true; return; }
+    int g0 = x->ngd;
+    st_range_body(x, a, end, opened, depth, alt, g0);
+    for (; x->ngd > g0; x->ngd--) sp(&x->out, "  }\n");  // (this level's guards end with its region)
+}
+// A construct over blocks (k, e) - a loop, an if / else - can't hold a pending skip's target: a jump into it.
+static bool st_skip_inside(const SCtx *x, int k, int e) {
+    for (int i = 0; i < x->nsk; i++)
+        if (x->sk_t[i] > k && x->sk_t[i] < e) return true;
+    return false;
+}
+// Block k reached: skips that end here drop their flag (after closing this level's guards down to theirs), and the
+// pending ones made at this depth or deeper get a guard here.
+static void st_skip_at(SCtx *x, int k, int depth, int g0) {
+    for (int i = 0; i < x->nsk;) {
+        if (x->sk_t[i] != k) { i++; continue; }
+        int id = x->sk_id[i];
+        for (int g = g0; g < x->ngd; g++)
+            if (x->gd_id[g] == id) {
+                for (; x->ngd > g; x->ngd--) sp(&x->out, "  }\n");
+                break;
+            }
+        sp(&x->out, "  sk%d = false;\n", id);
+        x->nsk--;
+        for (int j = i; j < x->nsk; j++) x->sk_t[j] = x->sk_t[j + 1], x->sk_id[j] = x->sk_id[j + 1], x->sk_depth[j] = x->sk_depth[j + 1];
+    }
+    for (int i = 0; i < x->nsk; i++) {
+        if (x->sk_depth[i] < depth || x->sk_t[i] <= k) continue;
+        bool open = false;
+        for (int g = g0; g < x->ngd && !open; g++) open = x->gd_id[g] == x->sk_id[i];
+        if (open) continue;
+        if (x->ngd == 64) { SFAIL(x); return; }
+        x->gd_id[x->ngd++] = x->sk_id[i];
+        sp(&x->out, "  if (!sk%d) {\n", x->sk_id[i]);
+    }
+}
+static void st_range_body(SCtx *x, int a, int end, int opened, int depth, int alt, int g0) {
+    if (depth > 64) { SFAIL(x); return; }
     for (int k = a; k < end && !x->fail;) {
+        if (x->nsk) { st_skip_at(x, k, depth, g0); if (x->fail) return; }
         if (x->latch[k] >= 0 && k != opened) {  // a loop: [k, its last back edge]
             int le = x->latch[k] + 1;
-            if (le > end || x->nloops == 32) { x->fail = true; return; }
+            if (le > end || x->nloops == 32 || st_skip_inside(x, k, le)) { SFAIL(x); return; }
             sp(&x->out, "  for (;;) {\n");
             x->loops[x->nloops][0] = k, x->loops[x->nloops][1] = le, x->nloops++;
             st_range(x, k, le, k, depth + 1);
@@ -2888,6 +2951,7 @@ static void st_range_alt(SCtx *x, int a, int end, int opened, int depth, int alt
         st_code(x, k);
         if (!b->term || x->consumed[k]) { k++; continue; }
         if (b->term == 3) {
+            if (x->nsk) { SFAIL(x); return; }
             k = st_switch(x, k, end, depth);
             if (k < 0 || x->fail) return;
             continue;
@@ -2904,15 +2968,25 @@ static void st_range_alt(SCtx *x, int a, int end, int opened, int depth, int alt
         int t = b->tgt;
         if (t == end || (alt >= 0 && t == alt)) {  // the rest of the region, when not taken
             if (always) {
-                if (k + 1 < end) x->fail = true;
+                if (k + 1 < end) SFAIL(x);
                 return;
             }
+            if (st_skip_inside(x, k, end)) { SFAIL(x); return; }
             sp(&x->out, "  if (!(%s)) {\n", b->cond);
             st_range(x, k + 1, end, -1, depth + 1);
             sp(&x->out, "  }\n");
             return;
         }
-        if (t <= k || t > end || always) { x->fail = true; return; }
+        if (t > k && (t > end || always) && !x->nsw && x->nsk < 16 && maxwell_struct_skips &&
+            (!x->nloops || t < x->loops[x->nloops - 1][1])) {  // past the region (or over code in it): a skip
+            int id = x->nskv++;
+            if (always) sp(&x->out, "  sk%d = true;\n", id);
+            else sp(&x->out, "  if (%s) sk%d = true;\n", b->cond, id);
+            x->sk_t[x->nsk] = t, x->sk_id[x->nsk] = id, x->sk_depth[x->nsk] = depth, x->nsk++;
+            k++;
+            continue;
+        }
+        if (t <= k || t > end || always) { SFAIL(x); return; }
         SBlk *last = &x->b[t - 1];
         int J = last->tgt;
         bool els = t - 1 > k && last->term == 1 && !strcmp(last->cond, "true") && J > t && J <= end && !x->consumed[t - 1];
@@ -2925,6 +2999,7 @@ static void st_range_alt(SCtx *x, int a, int end, int opened, int depth, int alt
             x->nloops = nl;
         }
         if (!els && alt >= 0 && t - 1 > k && last->term == 1 && !strcmp(last->cond, "true") && J == alt && !x->consumed[t - 1]) {
+            if (st_skip_inside(x, k, end)) { SFAIL(x); return; }
             x->consumed[t - 1] = 1;
             sp(&x->out, "  if (!(%s)) {\n", b->cond);
             st_range_alt(x, k + 1, t, -1, depth + 1, alt);
@@ -2933,6 +3008,7 @@ static void st_range_alt(SCtx *x, int a, int end, int opened, int depth, int alt
             sp(&x->out, "  }\n");
             return;
         }
+        if (st_skip_inside(x, k, els ? J : t)) { SFAIL(x); return; }
         sp(&x->out, "  if (!(%s)) {\n", b->cond);
         if (els) {
             x->consumed[t - 1] = 1;
@@ -2954,7 +3030,7 @@ static void st_range_alt(SCtx *x, int a, int end, int opened, int depth, int alt
 // none of them exits, as the state machine's default does.
 static int st_switch(SCtx *x, int k, int end, int depth) {
     const Ctx *c = x->c;
-    if (maxwell_no_switch) { x->fail = true; return -1; }  // (the whole shader keeps its state machine)
+    if (maxwell_no_switch) { SFAIL(x); return -1; }  // (the whole shader keeps its state machine)
     int bx = x->b[k].brx;
     uint64_t w = x->w[x->c->brx[bx].at];
     int ra = (int)bits(w, 8, 8), n = 0;
@@ -2962,10 +3038,10 @@ static int st_switch(SCtx *x, int k, int end, int depth) {
     for (int q = 0; q < c->brx[bx].n; q++) {  // (blocks; the list is a superset: words of cbuf 1 that land on code)
         int ti = (int)(c->brx[bx].t[q] / 8), b = 0;
         while (b < x->nb && x->b[b].s != (uint32_t)ti) b++;
-        if (b <= k || b >= x->nb) { x->fail = true; return -1; }
+        if (b <= k || b >= x->nb) { SFAIL(x); return -1; }
         tb[n++] = b;
     }
-    if (!n || tb[0] != k + 1 || x->nsw == 16) { x->fail = true; return -1; }  // (code between the BRX and its first case)
+    if (!n || tb[0] != k + 1 || x->nsw == 16) { SFAIL(x); return -1; }  // (code between the BRX and its first case)
     // the join: where most cases that end in a jump go, forward past their own start; the table's words past it are
     // no cases (nor past the region's end)
     int J = -1, best = 0;
@@ -2982,7 +3058,7 @@ static int st_switch(SCtx *x, int k, int end, int depth) {
     if (J > end) J = -1;
     int stop = J >= 0 ? J : end;
     while (n && tb[n - 1] >= stop) n--;
-    if (!n) { x->fail = true; return -1; }
+    if (!n) { SFAIL(x); return -1; }
     char r[8];
     if (ra == RZ) strcpy(r, "0u"); else snprintf(r, sizeof r, "r%d", ra);
     sp(&x->out, "  { uint bt = %uu + %s + 0x%08xu; if (((bt >> 3) & 3u) == 0u) bt += 8u;\n  switch (bt) {\n",
@@ -3047,7 +3123,7 @@ static bool structure(Ctx *c, const uint64_t *code, size_t end, const uint8_t *l
         if (bx >= 0 && !(pr == PT && prn)) {
             x.skip[i] = 1;
             prev_flow = true;
-            if (pr != PT || prn) ok = false;  // (a guarded one: not handled)
+            if (pr != PT || prn) SFAIL_OK(ok);  // (a guarded one: not handled)
             b->term = 3, b->brx = bx, b->tgt = -1;
             strcpy(b->cond, "true");
             continue;
@@ -3072,7 +3148,7 @@ static bool structure(Ctx *c, const uint64_t *code, size_t end, const uint8_t *l
         x.latch[k] = -1;
         if (x.b[k].term != 1) continue;
         int ti = x.b[k].tgt;
-        if (blk[ti] < 0 || x.b[blk[ti]].s != (uint32_t)ti) ok = false;  // (into the middle of a block)
+        if (blk[ti] < 0 || x.b[blk[ti]].s != (uint32_t)ti) SFAIL_OK(ok);  // (into the middle of a block)
         else x.b[k].tgt = blk[ti];
     }
     for (int k = 0; ok && k < nb; k++) {  // (a table's targets: block starts too)
@@ -3080,16 +3156,20 @@ static bool structure(Ctx *c, const uint64_t *code, size_t end, const uint8_t *l
         const uint32_t *t = c->brx[x.b[k].brx].t;
         for (int q = 0; q < c->brx[x.b[k].brx].n && ok; q++) {
             size_t ti = t[q] / 8;
-            if (blk[ti] < 0 || x.b[blk[ti]].s != (uint32_t)ti) ok = false;
+            if (blk[ti] < 0 || x.b[blk[ti]].s != (uint32_t)ti) SFAIL_OK(ok);
         }
     }
     for (int k = 0; ok && k < nb; k++)
         if (x.b[k].term == 1 && x.b[k].tgt <= k && k > x.latch[x.b[k].tgt]) x.latch[x.b[k].tgt] = k;
     if (ok) st_range(&x, 0, nb, -1, 0);
-    ok = ok && !x.fail;
+    ok = ok && !x.fail && !x.nsk;
     if (ok) {
         free(c->body.buf);
-        c->body = x.out;
+        Str body = {0};
+        for (int i = 0; i < x.nskv; i++) sp(&body, "  bool sk%d = false;\n", i);
+        sp(&body, "%s", x.out.buf ? x.out.buf : "");
+        free(x.out.buf);
+        c->body = body;
     } else free(x.out.buf);
     free(x.skip); free(blk); free(x.b); free(x.latch); free(x.consumed);
     return ok;
@@ -3181,9 +3261,15 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
                    "uint lo = 0u, hi = gmap[%d].x; while (lo < hi) { uint m = (lo + hi) >> 1; "
                    "if (gmap[m].x <= g) lo = m + 1u; else hi = m; } if (lo == 0u) return 0xFFFFFFFFu; uvec4 e = gmap[lo - 1u]; "
                    "o = g - e.x; if (o >= e.y) return 0xFFFFFFFFu; gc_ = e.xyz; return e.z + (o >> 2); }\n", GMAP_MAX);
-        } else
+        } else if (!maxwell_gfind_cache)
         sp(&s, "uint gfind(uint g) { uint n = gmap[%d].x; for (uint i = 0u; i < n; i++) { uint o = g - gmap[i].x; "
                "if (g >= gmap[i].x && o < gmap[i].y) return gmap[i].z + (o >> 2); } return 0xFFFFFFFFu; }\n", GMAP_MAX);
+        else  // (the entry last found first, as above: TOTK's single-invocation list clears store through here in a
+              // loop - cs 24298bc00, 1.5 ms of the GPU's frame searching the table for every word; LARECOMP_NO_GFIND_CACHE)
+        sp(&s, "uvec3 gc_ = uvec3(0u, 0u, 0u);\n"
+               "uint gfind(uint g) { uint o = g - gc_.x; if (o < gc_.y) return gc_.z + (o >> 2); "
+               "uint n = gmap[%d].x; for (uint i = 0u; i < n; i++) { uvec4 e = gmap[i]; o = g - e.x; "
+               "if (g >= e.x && o < e.y) { gc_ = e.xyz; return e.z + (o >> 2); } } return 0xFFFFFFFFu; }\n", GMAP_MAX);
         if (GMISS_ON(stage)) {
             sp(&s, "layout(std430, set = %d, binding = %d) buffer GMiss { uint w[]; } gmiss_;\n", set, GMISS_BUFFER_INDEX);
             sp(&s, "uint gmiss(%s ga) { uint k = atomicAdd(gmiss_.w[0], 1u); if (k < 64u) gmiss_.w[1u + k] = uint(ga); "
@@ -3235,7 +3321,15 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
             int kind = key ? key->rt_kind[rt] : 0;
             sp(&s, "layout(location = %d) out %s c%d;\n", rt, kind == 1 ? "ivec4" : kind == 2 ? "uvec4" : "vec4", rt);
         }
-        if (c->omap_depth) info->writes_depth = true;
+        // a written depth is compared EQUAL against other shaders' positions too - TOTK's light classifier writes a
+        // material id as depth, its lighting passes draw quads at that z: precise, as gl_Position, so the driver keeps
+        // the shader's fma chain. Contracted (Turnip: fma(a,-k,a)+k reassociated), it came out an ulp apart from the
+        // vertex shader's; on D16 every class sits at a .5 rounding step, so an ulp flipped it - the water's class
+        // (0x32) never matched its light pass: the lakes black
+        if (c->omap_depth) {
+            info->writes_depth = true;
+            sp(&s, "precise gl_FragDepth;\n");
+        }
         // (Android's copy mode: the miss log's store, even never run, made the depth test late - every hidden pixel
         // shaded, the lit pass ~2x slower; with no discard, depth write or store of its own the shader's depth test
         // is early anyway - and with a discard too when the draw writes no depth / stencil: the alpha-tested lit
@@ -3436,8 +3530,12 @@ ShaderInfo *maxwell_translate_bounded(const uint8_t *blob, size_t max_size, size
         info->num_insts++;
         if (ue) ue[i] = (uint32_t)c->body.len;
     }
+    g_sfail_line = 0;
     if (us && ue && !c->fail && !(maxwell_no_local_struct && c->uses_local))
         c->structured = structure(c, (const uint64_t *)code, end, label, us, ue);
+    if (annotate && any_branch && c->glsl && !c->structured)
+        sp(&c->body, "  // state machine: %s %d\n", !c->static_stacks ? "stacks unresolved" : !us ? "structuring off" :
+           g_sfail_line ? "translate.c line" : "local memory", g_sfail_line);
     free(us);
     free(ue);
     free(label);

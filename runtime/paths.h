@@ -1,4 +1,4 @@
-// Where TOTKRecompAndroid keeps its files (runtime/paths.c).
+// Where TOTKDroid keeps its files (runtime/paths.c).
 //
 // Data root: everything the app writes or the user brings - extracted/ (game files), save/,
 // cache/ (shaders / pipelines), fonts/ (imported), larecomp.ini. rt_paths_init() picks it and makes it the

@@ -6,7 +6,7 @@
 set(GAMELIB_FLAGS -O2 -fno-strict-aliasing -Wno-return-type -Wno-unused-label -fvisibility=hidden -fPIC)
 set(_gamelib_srcs tools/gen.py tools/lifter.py tools/analyze.py tools/nso.py tools/passes.py tools/patches.py
     tools/simd_c.py tools/gamelib_entry.c runtime/hle/hle_symbols.txt
-    runtime/cpu.h runtime/simd.h runtime/simd_fp.h runtime/gamelib.h)
+    runtime/rt.h runtime/gamebuild.c android/build_gamelib.sh runtime/cpu.h runtime/simd.h runtime/simd_fp.h runtime/gamelib.h)
 set(_id_text "")
 foreach(f ${_gamelib_srcs})
     file(READ ${R}/${f} _t)

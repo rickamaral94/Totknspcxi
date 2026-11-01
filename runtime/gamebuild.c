@@ -357,7 +357,7 @@ static void load_hot(const char *path) {
         const char *p = line;
         uint64_t base = 0;
         if (!strncmp(p, "main ", 5)) base = 0x7000000000ull, p += 5;
-        else if (!strncmp(p, "sdk ", 4)) base = 0x7004000000ull, p += 4;
+        else if (!strncmp(p, "sdk ", 4)) base = 0x7008000000ull, p += 4;
         char *end;
         uint64_t a = base + strtoull(p, &end, 16);
         if (end == p) continue;
@@ -557,7 +557,7 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
     if (!registered) registered = true, atexit(end_all);
     Tools t;
     if (!find_tools(&t)) {
-        snprintf(why, why_size, "the game code builder is missing from this copy of TOTKRecompAndroid");
+        snprintf(why, why_size, "the game code builder is missing from this copy of TOTKDroid");
         return false;
     }
     char work[1100], lib[1100], tmp[1100];
@@ -624,7 +624,7 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
 
     // 1. the generator, both modules at once; their finished files are compiled while it goes on
     Gen gens[2] = {{.name = "main"}, {.name = "sdk"}};
-    static const char *const base[2] = {"0x7000000000", "0x7004000000"};
+    static const char *const base[2] = {"0x7000000000", "0x7008000000"};
     bool ok = true;
     for (int i = 0; i < 2 && ok; i++) {
         Gen *g = &gens[i];

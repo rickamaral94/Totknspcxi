@@ -28,6 +28,9 @@ void vk_device_fault_report(void);
 void vk_android_load(void);  // android_driver.c: the Vulkan driver (adrenotools / system) into volk
 const char *vk_driver_rejected(void);  // (the chosen driver package the system's stood in for; "" none)
 void vk_wait_ready(void);    // device.c: until the device exists (the window's thread makes it)
+void vk_vamm_before_map(uint64_t addr, uint64_t size);
+bool vk_vamm_buffer(uint64_t addr, uint64_t size, VkBuffer *buf, VkDeviceSize *off);
+void vk_vamm_reset(void);
 #endif
 #define VK_CHECK(x) do { VkResult r_ = (x); if (r_ != VK_SUCCESS) { if (r_ == VK_ERROR_DEVICE_LOST) vk_device_fault_report(); \
     FATAL("%s failed: %d (%s:%d)\n", #x, r_, __FILE__, __LINE__); } } while (0)
@@ -115,6 +118,8 @@ typedef struct TexBackend {
     bool gpu_owned, uploaded, dynamic;
     uint64_t data_hash, sample_hash, checked_frame, full_frame;
     uint32_t wgen;  // page write tracking generation at the last upload check (textures.c)
+    uint16_t same_run;    // (a large dynamic texture: full hashes in a row that found it unchanged - textures.c)
+    uint64_t dyn_sample;  // (and its sampled hash at the last full one)
     bool scalable, presented;
     uint8_t rs_group;  // RS_*: which output scale its allocation follows (textures.c)
     uint64_t touched_frame, frame_cleared;

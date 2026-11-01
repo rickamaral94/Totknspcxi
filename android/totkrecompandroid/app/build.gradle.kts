@@ -24,8 +24,8 @@ android {
         applicationId = "com.totkrecompandroid"
         minSdk = 30
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.0.1-alpha"
+        versionCode = 5
+        versionName = "0.2.0-beta-amaral.2"
         ndk {
             abiFilters += "arm64-v8a"
         }
@@ -96,11 +96,13 @@ val prepareTotkRecompAndroid by tasks.registering {
     val icon = repo.resolve("assets/artwork/totk-zonai-icon-v1.png")
     val background = repo.resolve("assets/artwork/hyrule-sky-islands-background-v1.png")
     val touchSkin = repo.resolve("assets/artwork/zonai-touch-atlas-v1.png")
+    val logo = repo.resolve("assets/artwork/totkdroid-logo-v1.png")
     val libs = listOf("libSDL3.so", "libshaderc_shared.so", "libavcodec.so", "libavformat.so", "libavutil.so", "libswscale.so",
                       "libswresample.so")  // (libavcodec's Opus decoder needs libswresample)
-    inputs.files(smaa, font, icon, background, touchSkin)
+    inputs.files(smaa, font, icon, background, touchSkin, logo)
     inputs.files(libs.map { depLib(it) }.filter { it.exists() })
     if (deps.resolve("gen").exists()) inputs.dir(deps.resolve("gen"))  // (the game code's builder, below)
+    inputs.property("gameBuilder", project.findProperty("totk.gameBuilder")?.toString() ?: "true")
     inputs.files(listOf("tools/gen.py", "tools/lifter.py", "tools/analyze.py", "tools/nso.py", "tools/passes.py", "tools/patches.py",
                         "tools/simd_c.py", "tools/gamelib_entry.c", "runtime/cpu.h",
                         "runtime/simd.h", "runtime/simd_fp.h", "runtime/gamelib.h", "runtime/hle/hle_symbols.txt").map { repo.resolve(it) })
@@ -122,12 +124,30 @@ val prepareTotkRecompAndroid by tasks.registering {
         icon.copyTo(out.resolve("assets/res/icon.png"), overwrite = true)
         background.copyTo(out.resolve("assets/res/launcher-background.png"), overwrite = true)
         touchSkin.copyTo(out.resolve("assets/res/zonai-touch-atlas.png"), overwrite = true)
+        logo.copyTo(out.resolve("assets/res/launcher-logo.png"), overwrite = true)
         icon.copyTo(out.resolve("res/mipmap-xxxhdpi/ic_launcher.png"), overwrite = true)
         // the game code's builder (docs/las/ANDROID-PORT.md, Fase 6; android/deps/build_gen_deps.sh): its programs and
         // libraries as native libraries (Android runs binaries only from nativeLibraryDir), the rest as assets/gen
-        // (runtime/gamebuild.c; unpacked by TOTKRecompAndroidActivity)
+        // (runtime/gamebuild.c; unpacked by TOTKRecompAndroidActivity). This fork keeps it by default for 1.4.2 /
+        // 1.0.0 and optional recompiled 1.4.3. -Ptotk.gameBuilder=false builds a smaller native-only APK.
         val g = deps.resolve("gen")
-        if (g.resolve("zig/libzig.so").exists()) {
+        val withBuilder = project.findProperty("totk.gameBuilder")?.toString() != "false"
+        if (!withBuilder) {  // (the generated folder outlives builds: what an earlier one packaged goes)
+            out.resolve("assets/gen").deleteRecursively()
+            out.resolve("assets/gen.id").delete()
+            for (n in listOf("libzig.so", "libpymain.so", "libpython3.14.so") + ((g.resolve("lib").listFiles() ?: arrayOf())
+                     .filter { it.name.endsWith(".so") }.map { it.name }))
+                out.resolve("jniLibs/arm64-v8a/$n").delete()
+        }
+        if (withBuilder) {
+            for (name in listOf("zig/libzig.so", "python/libpymain.so", "python/libpython3.14.so",
+                                "lib/libcapstone.so", "lib/libunicorn.so", "lib/liblz4.so")) {
+                check(g.resolve(name).isFile) {
+                    "Missing game-code builder component: $name. Run android/deps/build_gen_deps.sh, " +
+                    "or use -Ptotk.gameBuilder=false for a native-only APK."
+                }
+            }
+
             val jni = out.resolve("jniLibs/arm64-v8a")
             for (f in listOf(g.resolve("zig/libzig.so"), g.resolve("python/libpymain.so"), g.resolve("python/libpython3.14.so")) +
                      (g.resolve("lib").listFiles() ?: arrayOf()).filter { it.name.endsWith(".so") })

@@ -222,6 +222,8 @@ void plat_commit(uint64_t addr, uint64_t size) { (void)addr; (void)size; }
 // window would split it into more of the process's limited mappings; the window is private and anonymous, so the
 // dropped pages read as zero. A range's partial pages at its ends are cleared by hand.)
 void plat_discard(uint64_t addr, uint64_t size) {
+    extern bool vk_vamm_clear(uint64_t addr, uint64_t size);
+    if (vk_vamm_clear(addr, size)) return;
     uint64_t pg = (uint64_t)sysconf(_SC_PAGESIZE), lo = (addr + pg - 1) & ~(pg - 1), hi = (addr + size) & ~(pg - 1);
     if (lo >= hi) {
         memset((void *)(uintptr_t)addr, 0, size);
@@ -424,11 +426,11 @@ static bool driver_error_dialog(const char *text) {
 void plat_fatal_notice(void) {
     fflush(stderr);
     char message[1400];
-    snprintf(message, sizeof message, "TOTKRecompAndroid stopped because of an error.\n\n%s\n\n"
+    snprintf(message, sizeof message, "TOTKDroid stopped because of an error.\n\n%s\n\n"
              "Please include a screenshot of this message and your app/driver version in your bug report.\n"
              "More details: logcat, tag TOTKRecompAndroid.", fatal_message[0] ? fatal_message : "The runtime encountered a fatal error.");
     if (strcasestr(fatal_message, "vulkan") && driver_error_dialog(message)) return;  // (the driver's own errors)
-    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "TOTKRecompAndroid", message, NULL);
+    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "TOTKDroid", message, NULL);
 }
 
 const char *rt_host_fn_name(uint64_t pc, uint64_t *offset);  // runtime/dispatch.c
@@ -718,6 +720,63 @@ void plat_thread_unpin(void) {
     uclamp_min_thread();
 }
 
+// The render thread on the cores whose clock is allowed higher right now (called on its presents; looks once a
+// second). HyperOS throttles the two prime cores hardest when the phone is hot - 1.69 GHz against 2.2-3.5 for the
+// other six (2026-10-31, TOTK in the woods with Game Space) - and the scheduler kept the render thread, the frame's
+// limit, on a prime core. The 8 Elite's cores are one design, only the clocks differ. Only while the prime cores are
+// held below the others; otherwise the thread may run anywhere, as before. LARECOMP_FOLLOW_CLOCK=0: off;
+// LARECOMP_AB=<frames>:followclk alternates it (side 0: anywhere).
+void plat_render_follow_clock(void) {
+    static int on = -1;
+    if (on < 0) on = !getenv("LARECOMP_FOLLOW_CLOCK") || atoi(getenv("LARECOMP_FOLLOW_CLOCK"));
+    if (!on) return;
+    static uint64_t next;
+    static int applied = -1;  // (0: anywhere, 1: the faster cores)
+    static cpu_set_t fast, any;
+    extern int vk_ab(const char *what);
+    int ab = vk_ab("followclk");
+    uint64_t now = plat_now_ns();
+    if (now >= next) {
+        next = now + 1000000000ull;
+        long mx[64] = {0}, best = 0, low = 0;
+        int n = 0;
+        for (int c = 0; c < 64; c++) {
+            char path[96];
+            snprintf(path, sizeof path, "/sys/devices/system/cpu/cpu%d/cpufreq/scaling_max_freq", c);
+            FILE *f = fopen(path, "re");
+            if (!f) continue;
+            if (fscanf(f, "%ld", &mx[c]) != 1) mx[c] = 0;
+            fclose(f);
+            if (mx[c] > best) best = mx[c];
+            if (!low || (mx[c] && mx[c] < low)) low = mx[c];
+            n = c + 1;
+        }
+        CPU_ZERO(&fast);
+        CPU_ZERO(&any);
+        int k = 0;
+        for (int c = 0; c < n; c++) {
+            if (mx[c]) CPU_SET(c, &any);
+            if (mx[c] && mx[c] >= best) { CPU_SET(c, &fast); k++; }
+        }
+        // (the faster ones only when some cores are held at least 10% below them and they are more than two - not the
+        // prime pair alone when cool)
+        bool split = best && low && low < best * 9 / 10 && k > 2;
+        if (!split) fast = any;
+        static long last_best, last_low;
+        if (best != last_best || low != last_low) {
+            static int nlog;
+            if (nlog++ < 40) LOG("[android] cpu clock caps: %ld..%ld MHz; render thread on %d cores\n", low / 1000, best / 1000, split ? k : CPU_COUNT(&any));
+            last_best = best, last_low = low;
+        }
+        applied = -1;  // (re-applied below)
+    }
+    int want = ab == 0 ? 0 : 1;
+    if (applied != want) {
+        applied = want;
+        sched_setaffinity(0, sizeof(cpu_set_t), want ? &fast : &any);
+    }
+}
+
 static void pin_to_fastest_cores(void) {
     if (!getenv("LARECOMP_PIN")) return;
     long best = 0, mhz[CPU_SETSIZE] = {0};
@@ -759,6 +818,21 @@ static float s_target_ms, s_work_ms, s_game_ms, s_render_ms;
 static int s_game_cpu = -1, s_render_cpu = -1;
 
 static pthread_mutex_t adpf_lock = PTHREAD_MUTEX_INITIALIZER;
+// The game's busiest threads (kernel_hot_tids), in the single session beside the presenting and render threads:
+// the frame waits on its job workers. s_extra_dirty: set_threads again at the next report.
+static int32_t s_extra[16];
+static int s_nextra;
+static bool s_extra_dirty;
+void plat_adpf_extra_threads(const int32_t *tids, int n) {
+    pthread_mutex_lock(&adpf_lock);
+    if (n > 16) n = 16;
+    if (n != s_nextra || memcmp(tids, s_extra, (size_t)n * sizeof *tids)) {
+        memcpy(s_extra, tids, (size_t)n * sizeof *tids);
+        s_nextra = n;
+        s_extra_dirty = true;
+    }
+    pthread_mutex_unlock(&adpf_lock);
+}
 
 // Caller holds adpf_lock, including initialization and session replacement.
 static void adpf_work_locked(int slot, uint64_t work_ns, uint64_t target_ns, uint64_t gpu_ns, uint64_t game_ns) {
@@ -855,6 +929,19 @@ static void adpf_work_locked(int slot, uint64_t work_ns, uint64_t target_ns, uin
                     s_last_error = errno;
                 }
             }
+        } else if (s_extra_dirty && set_threads && s_presenting_tid > 0 && s_render_tid > 0) {
+            int32_t tids[18];
+            int nt = 0;
+            tids[nt++] = s_presenting_tid;
+            tids[nt++] = s_render_tid;
+            for (int i = 0; i < s_nextra; i++)
+                if (s_extra[i] != s_presenting_tid && s_extra[i] != s_render_tid) tids[nt++] = s_extra[i];
+            int r = set_threads(session[0], tids, (size_t)nt);
+            if (r == 0) s_session_threads = nt;
+            else { s_errors++; s_last_error = r; }
+            static int nlog;
+            if (nlog++ < 4) LOG("[android] performance hint session: %d threads (the game's busiest too): %s\n", nt, r ? "error" : "ok");
+            s_extra_dirty = false;
         } else if (s_session_threads < 2 && s_presenting_tid > 0 && s_render_tid > 0) {
             // Add the second thread to the active session
             int32_t tids[2] = {s_presenting_tid, s_render_tid};

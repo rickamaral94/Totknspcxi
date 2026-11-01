@@ -942,11 +942,16 @@ static VkPresentModeKHR present_mode(void) {
     // queued behind the one waiting for a window image, so the game's fence waits followed the presentation engine:
     // a throttled / captured / busy compositor slowed the whole game (4-21 fps with the GPU mostly idle; mailbox:
     // 60). No tearing. LARECOMP_VK_PRESENT=fifo|immediate|mailbox to choose.
+    // Android: FIFO. With MAILBOX (the window in async mode) TOTK's switch to 60 fps in its pause menu left SurfaceFlinger
+    // holding every frame for seconds from then on ("SF-BufferCheck: Buffer processing hung ... QTI frame early check",
+    // HyperOS, POCO F7 Ultra): the screen at ~3 fps while the game ran at 30 - 4 runs of 5 opening the menu, sync lag on
+    // or off; FIFO 0 of 4. Same scene, one launch each: FIFO 28.6 fps, MAILBOX 28.1, the acquire and present waits
+    // ~0.05 / ~0.7 ms a frame (LARECOMP_TIMING_TRACE, 2026-10-30). The render thread waits for window images there,
+    // not the game's thread (vulkan/async.c).
     const char *e = getenv("LARECOMP_VK_PRESENT");
-    // (the frame generation with presentation times: FIFO, where queued images wait for their time instead of
-    // replacing each other - vulkan/framegen.c)
-    extern bool fg_wants_fifo(void);
-    if (!e && fg_wants_fifo()) e = "fifo";
+#ifdef __ANDROID__
+    if (!e) e = "fifo";
+#endif
     VkPresentModeKHR want = !e || !strcmp(e, "mailbox") ? VK_PRESENT_MODE_MAILBOX_KHR
                           : !strcmp(e, "immediate") ? VK_PRESENT_MODE_IMMEDIATE_KHR : VK_PRESENT_MODE_FIFO_KHR;
     uint32_t n = 0;
@@ -1443,6 +1448,13 @@ void backend_present(NvnTexture *t) {
         }
         output_scale(dw, dh, widescreen_allowed(), SDL_GetTicksNS() / 1e9, -1, &os);
         diag_real_frame();
+        {
+            static double last_shape = -1;
+            if (os.shape != last_shape && getenv("LARECOMP_LOG_ASPECT"))
+                LOG("[widescreen] frame %llu: output shape %.3f (allowed %d), image %.0fx%.0f at %.0f,%.0f\n",
+                    (unsigned long long)total_frames, os.shape, widescreen_allowed(), os.vw, os.vh, os.vx, os.vy);
+            last_shape = os.shape;
+        }
 #ifdef __ANDROID__
         static int matrix_trace = -1;
         static uint64_t matrix_last;
@@ -1543,7 +1555,8 @@ presented:;
         if (g_debug_frame) vk_pick_report();
     }
     g_debug_frame = debug_at && total_frames >= (uint64_t)debug_at && total_frames < (uint64_t)debug_at + (uint64_t)debug_n;
-    {   // LARECOMP_GPUPROF_AT=<frame>[,<frame>...]: GPU time per pass of those frames ("[gpuprof]" in the log)
+    {   // LARECOMP_GPUPROF_AT=<frame>[,<frame>...] (or : between them, inside a LARECOMP env list): GPU time per pass of
+        // those frames ("[gpuprof]" in the log)
         extern bool g_gpuprof_frame;
         extern void vk_gpuprof_report(void);
         if (g_gpuprof_frame) { g_gpuprof_frame = false; vk_gpuprof_report(); }
@@ -1552,7 +1565,7 @@ presented:;
         for (const char *p = e; p && *p;) {
             long at = strtol(p, (char **)&p, 10);
             if (at == (long)total_frames) { g_gpuprof_frame = true; break; }
-            if (*p == ',') p++; else break;
+            if (*p == ',' || *p == ':') p++; else break;
         }
         // LARECOMP_GPUPROF_SLOW=<ms>: the frame after one that took longer than that (present to present), at most
         // 12 of them, 90 frames apart - the slow moments of a session that come and go (TOTK's 300 ms frames)
@@ -1935,7 +1948,7 @@ void ui_window_init(void) {
                                             getenv("LARECOMP_HOST_INPUT") || getenv("LARECOMP_BIND_TEST"));
         if (scripted) SDL_SetHint(SDL_HINT_WINDOW_ACTIVATE_WHEN_SHOWN, "0");
     }
-    window = SDL_CreateWindow("TOTKRecompAndroid", win_w, win_h, wflags);
+    window = SDL_CreateWindow("TOTKDroid", win_w, win_h, wflags);
 #ifdef __ANDROID__
     // opened with the screen locked / off: no surface to make the window on yet - it comes once the activity shows.
     // SDL_PumpEvents sleeps while the app is paused, so the 5 s count only time in the foreground: a window that fails
@@ -1944,7 +1957,7 @@ void ui_window_init(void) {
         if (tries == 0) LOG("[vk] waiting for the Android window (%s)\n", SDL_GetError());
         SDL_PumpEvents();
         SDL_Delay(50);
-        window = SDL_CreateWindow("TOTKRecompAndroid", win_w, win_h, wflags);
+        window = SDL_CreateWindow("TOTKDroid", win_w, win_h, wflags);
     }
 #endif
     if (!window) FATAL("SDL_CreateWindow: %s\n", SDL_GetError());

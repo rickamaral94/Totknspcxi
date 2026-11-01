@@ -25,7 +25,7 @@ LIBMAIN=$(ls -t "$R"/android/totkrecompandroid/app/build/intermediates/cxx/*/*/o
 [ -n "$LIBMAIN" ] || { echo "build the app first (android/totkrecompandroid: gradlew assembleDebug)"; exit 1; }
 
 if [ ! -f "$GEN/main/main_table.c" ] || [ ! -f "$GEN/sdk/sdk_table.c" ]; then
-    (cd tools && "../$PY" gen.py sdk "$EXEFS/sdk" 0x7004000000 "$GEN/sdk" --hle ../runtime/hle/hle_symbols.txt --simd asm --dyn-base)
+    (cd tools && "../$PY" gen.py sdk "$EXEFS/sdk" 0x7008000000 "$GEN/sdk" --hle ../runtime/hle/hle_symbols.txt --simd asm --dyn-base)
     (cd tools && "../$PY" gen.py main "$EXEFS/main" 0x7000000000 "$GEN/main" --simd asm --dyn-base)
 fi
 

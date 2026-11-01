@@ -12,6 +12,7 @@
 // the game's thread (a texture destroyed, a movie frame, the heap, a reset) first waits for the queue to empty
 // (vk_async_drain): those are rare, and so they run as before, with the render thread idle.
 #ifdef __ANDROID__
+#include <dlfcn.h>
 #include <pthread.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -23,8 +24,9 @@
 #include "../../diag.h"
 #include "../../platform.h"
 #include "../../rt.h"
+#include "../../kernel.h"
 
-enum { REQ_EXEC, REQ_PRESENT, REQ_FENCE };
+enum { REQ_EXEC, REQ_PRESENT, REQ_FENCE, REQ_TEXREG };
 typedef struct { int type; uint64_t a; void *p; uint64_t id; } Req;
 
 #define QN 4096  // requests in flight (a frame has a few dozen)
@@ -93,15 +95,19 @@ static void *render_main(void *arg) {
         pthread_mutex_unlock(&q_lock);
         uint64_t t0 = plat_now_ns(), cpu0 = cpu_timing ? render_cpu_ns() : 0;
         extern void vk_tl(const char *what, uint64_t a, uint64_t b);  // (exec.c: LARECOMP_FRAME_TIMELINE)
-        vk_tl(r.type == REQ_EXEC ? "render: list start" : r.type == REQ_PRESENT ? "render: present start" : "render: fence", r.id, 0);
-        if (r.type == REQ_EXEC) { vk_execute_now(r.a); free(r.p); }  // (r.p: the list copy, vk_async_execute)
-        else if (r.type == REQ_PRESENT) {
-            DIAG_PUSH(DG_RENDER_PRESENT, 0);
-            vk_present_now((NvnTexture *)r.p);
-            DIAG_POP();
+        extern void nvn_texreg_apply(void *batch);  // (objects.c)
+        if (r.type == REQ_TEXREG) nvn_texreg_apply(r.p);
+        else {
+            vk_tl(r.type == REQ_EXEC ? "render: list start" : r.type == REQ_PRESENT ? "render: present start" : "render: fence", r.id, 0);
+            if (r.type == REQ_EXEC) { vk_execute_now(r.a); free(r.p); }  // (r.p: the list copy, vk_async_execute)
+            else if (r.type == REQ_PRESENT) {
+                DIAG_PUSH(DG_RENDER_PRESENT, 0);
+                vk_present_now((NvnTexture *)r.p);
+                DIAG_POP();
+            }
+            if (r.type != REQ_FENCE) vk_tl(r.type == REQ_EXEC ? "render: list end" : "render: present end", r.id, 0);
+            else if (r.type == REQ_FENCE) nvn_sync_set_seq(r.a, renderer_fence_seq());
         }
-        if (r.type != REQ_FENCE) vk_tl(r.type == REQ_EXEC ? "render: list end" : "render: present end", r.id, 0);
-        else if (r.type == REQ_FENCE) nvn_sync_set_seq(r.a, renderer_fence_seq());
         uint64_t elapsed = plat_now_ns() - t0;
         frame_cpu += cpu_timing ? render_cpu_ns() - cpu0 : elapsed;
         frame_work += elapsed;
@@ -110,6 +116,8 @@ static void *render_main(void *arg) {
             extern void plat_render_work(uint64_t work_ns, uint64_t target_ns);
             __atomic_store_n(&last_frame_cpu, frame_cpu, __ATOMIC_RELAXED);
             plat_render_work(frame_cpu, 16666667ull);  // (ADPF: clocks for 60 fps on this thread too)
+            extern void plat_render_follow_clock(void);
+            plat_render_follow_clock();  // (on the cores clocked higher now: platform/android.c)
             frame_work = frame_cpu = 0;
         }
         pthread_mutex_lock(&q_lock);
@@ -139,7 +147,8 @@ static uint64_t push(int type, uint64_t a, void *p) {
     uint64_t id = ++q_tail;  // (ids 1, 2, ...: the request at index id - 1)
     {
         extern void vk_tl(const char *what, uint64_t a, uint64_t b);
-        vk_tl(type == REQ_EXEC ? "game: list sent" : type == REQ_PRESENT ? "game: present sent" : "game: fence sent", id, 0);
+        if (type != REQ_TEXREG)
+            vk_tl(type == REQ_EXEC ? "game: list sent" : type == REQ_PRESENT ? "game: present sent" : "game: fence sent", id, 0);
     }
     q[(id - 1) % QN] = (Req){type, a, p, id};
     if (type == REQ_PRESENT) q_presents++;
@@ -148,21 +157,47 @@ static uint64_t push(int type, uint64_t a, void *p) {
     return id;
 }
 
+// The texture pool slots the game registered since the last request (objects.c register_texture): applied by the
+// render thread in their place in the queue - after the lists sent before them, before the ones sent after - instead of
+// the game waiting for the whole queue to drain at each one (p_lock held).
+static void push_texregs(void) {
+    extern void *nvn_texreg_take(void);
+    void *b = nvn_texreg_take();
+    if (b) push(REQ_TEXREG, 0, b);
+}
+
 // Until the render thread has finished request `id` (0: nothing to wait for).
 void vk_async_wait_id(uint64_t id) {
     if (!id || !started || vk_async_is_render_thread()) return;
     pthread_mutex_lock(&q_lock);
+    bool waits = q_done < id;
+    extern void vk_tl(const char *what, uint64_t a, uint64_t b);
+    if (waits) vk_tl("host: wait for request (id, guest thread)", id, kernel_current_thread() ? kernel_current_thread()->id : 0);
     while (q_done < id) pthread_cond_wait(&q_less, &q_lock);
     pthread_mutex_unlock(&q_lock);
+    if (waits) vk_tl("host: wait for request end", id, 0);
 }
 
 // Until every request queued so far has run (the render thread is idle after it).
 void vk_async_drain(void) {
     if (!started || vk_async_is_render_thread()) return;
+    pthread_mutex_lock(&p_lock);
+    push_texregs();
+    pthread_mutex_unlock(&p_lock);
     pthread_mutex_lock(&q_lock);
     uint64_t id = q_tail;
+    bool waits = q_done < id;
+    extern void vk_tl(const char *what, uint64_t a, uint64_t b);  // (LARECOMP_FRAME_TIMELINE: who waits, from where)
+    if (waits) {
+        Dl_info di = {0};
+        void *ra = __builtin_return_address(0);
+        dladdr(ra, &di);  // (the caller as an offset in libmain.so, for llvm-symbolizer)
+        vk_tl("host: drain wait (caller offset, guest thread)", (uint64_t)((uintptr_t)ra - (uintptr_t)di.dli_fbase),
+              kernel_current_thread() ? kernel_current_thread()->id : 0);
+    }
     while (q_done < id) pthread_cond_wait(&q_less, &q_lock);
     pthread_mutex_unlock(&q_lock);
+    if (waits) vk_tl("host: drain wait end", id, 0);
 }
 
 // The fences a command list signals (CMD_FENCE_SYNC, in it or in the lists it calls) get the list's request: a wait
@@ -188,7 +223,9 @@ static void mark_fences(uint64_t p, uint64_t id, int depth) {
 
 // A copy of a submitted list, the lists it calls inlined: NVN reads the lists (in control memory) when they are
 // submitted, so a game may record over them right after (BOTW does), while the render thread runs them later.
-typedef struct { uint8_t *b; size_t n, cap; } Snap;
+// The list's fences are noted on the way (one walk instead of a second one, mark_fences, on the game's submitting
+// thread: ~0.15 ms a frame of TOTK's).
+typedef struct { uint8_t *b; size_t n, cap; uint64_t *f; size_t nf, capf; } Snap;
 static void snap_add(Snap *s, uint64_t p, int depth) {
     for (int guard = 0; guard < 10000000; guard++) {
         const CmdRec *r = (const CmdRec *)(uintptr_t)p;
@@ -199,6 +236,14 @@ static void snap_add(Snap *s, uint64_t p, int depth) {
             const uint64_t *h = (const uint64_t *)r->extra;
             for (uint64_t i = 0; i < r->x[0]; i++) snap_add(s, h[i], depth + 1);
         } else {
+            if (r->op == CMD_FENCE_SYNC && r->x[1]) {
+                if (s->nf == s->capf) {
+                    s->capf = s->capf ? s->capf * 2 : 16;
+                    s->f = realloc(s->f, s->capf * sizeof *s->f);
+                    if (!s->f) FATAL("vk: out of memory for a command list copy\n");
+                }
+                s->f[s->nf++] = r->x[1];
+            }
             if (s->n + r->size > s->cap) {
                 s->cap = (s->n + r->size) * 2 > 0x10000 ? (s->n + r->size) * 2 : 0x10000;
                 s->b = realloc(s->b, s->cap);
@@ -210,9 +255,10 @@ static void snap_add(Snap *s, uint64_t p, int depth) {
         p += r->size;
     }
 }
-static uint8_t *snap_list(uint64_t handle) {
+static uint8_t *snap_list(uint64_t handle, Snap *fences) {
     Snap s = {0};
     snap_add(&s, handle, 0);
+    fences->f = s.f, fences->nf = s.nf;
     s.b = realloc(s.b, s.n + sizeof(CmdRec));
     if (!s.b) FATAL("vk: out of memory for a command list copy\n");
     memset(s.b + s.n, 0, sizeof(CmdRec));  // CMD_END
@@ -221,25 +267,36 @@ static uint8_t *snap_list(uint64_t handle) {
 }
 
 void vk_async_execute(uint64_t handle) {
-    uint8_t *copy = getenv("LARECOMP_NO_LIST_COPY") ? NULL : snap_list(handle);
+    Snap fences = {0};
+    uint8_t *copy = getenv("LARECOMP_NO_LIST_COPY") ? NULL : snap_list(handle, &fences);
     if (copy) handle = (uint64_t)(uintptr_t)copy;
     pthread_mutex_lock(&p_lock);
+    push_texregs();
     pthread_mutex_lock(&q_lock);
     uint64_t next = q_tail + 1;  // (the id the push gets: the list's fences carry it before the render thread sees them)
     pthread_mutex_unlock(&q_lock);
-    mark_fences(handle, next, 0);
+    if (!copy) mark_fences(handle, next, 0);
+    for (size_t i = 0; i < fences.nf; i++) {  // (as mark_fences)
+        NvnSync *sy = HOST(NvnSync, fences.f[i]);
+        if (!sy) { sy = calloc(1, sizeof *sy); SET_HOST(fences.f[i], sy); }
+        sy->signaled = 1;
+        sy->lseq = next;
+    }
+    free(fences.f);
     push(REQ_EXEC, handle, copy);  // (the render thread frees the copy once run)
     pthread_mutex_unlock(&p_lock);
 }
 
 void vk_async_present(NvnTexture *t) {
     pthread_mutex_lock(&p_lock);
+    push_texregs();
     push(REQ_PRESENT, 0, t);
     pthread_mutex_unlock(&p_lock);
 }
 
 uint64_t vk_async_fence(uint64_t guest_sync) {
     pthread_mutex_lock(&p_lock);
+    push_texregs();
     uint64_t id = push(REQ_FENCE, guest_sync, NULL);
     pthread_mutex_unlock(&p_lock);
     return id;
