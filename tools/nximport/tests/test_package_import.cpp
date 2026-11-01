@@ -26,6 +26,7 @@ static uint8_t g_build[8];
 extern "C" bool rt_version_root(int v, char *out, size_t n) {
     if (v == 143) return (size_t)snprintf(out, n, "%s", g_root.c_str()) < n;  // (GAME_V_MAIN: the data root itself)
     if (v == 142) return (size_t)snprintf(out, n, "%s/v142", g_root.c_str()) < n;  // (beside it: paths.c other_version)
+    if (v == 100) return (size_t)snprintf(out, n, "%s/v100", g_root.c_str()) < n;
     return false;
 }
 static const char *const GAME_FILES[] = {"exefs", "romfs", "romfs.bin", "romfs.link", "totkgame.so", "totkgame.so.id"};
@@ -40,8 +41,17 @@ extern "C" bool rt_remove_game_files_for_setup(const char *dir) {
     for (const char *g : GAME_FILES) rt_remove_game_file(dir, g);
     return true;
 }
-static int g_build_version = 143;  // (what the synthetic main's build id is taken for: 1.4.3, or 1.4.2)
-extern "C" int game_version_of_build(const uint8_t id[8]) { return memcmp(id, g_build, 8) ? 0 : g_build_version; }
+static int g_build_version = 143;  // (what the synthetic main's build id is taken for: 1.4.3, 1.4.2, or 0 unknown)
+static int g_registered;            // (game_version_register's: the build registered as 1.0.0)
+extern "C" int game_version_of_build(const uint8_t id[8]) {
+    if (memcmp(id, g_build, 8)) return 0;
+    return g_build_version ? g_build_version : g_registered;
+}
+extern "C" bool game_version_register(const uint8_t id[8], int v) {
+    if (v != 100 || memcmp(id, g_build, 8)) return false;
+    g_registered = v;
+    return true;
+}
 
 namespace {
 
@@ -279,6 +289,20 @@ TEST(pkg_import_other_version) {
     package_import_recover();
     CHECK(!exists(st));
     CHECK(exists(g_root + "/v142/extracted/romfs.bin"));
+}
+
+// TOTK 1.0.0: the base package alone, its CNMT's version 0, with a build this app doesn't know - registered as 1.0.0
+// and set up in <root>/v100; an unknown build with an update is still refused
+TEST(pkg_import_base_alone_as_100) {
+    PkgFixture fx;
+    g_build_version = 0, g_registered = 0;
+    PackageImportOutcome o = package_import_run(fx.inputs(), hooks(), nullptr);
+    CHECK(o.result == PKG_DONE);
+    CHECK(o.version == 100);
+    CHECK(g_registered == 100);
+    CHECK(o.dest == g_root + "/v100/extracted");
+    CHECK(exists(g_root + "/v100/extracted/romfs.bin"));
+    g_build_version = 143, g_registered = 0;
 }
 
 TEST(pkg_verify_packages) {

@@ -8,8 +8,9 @@ arquivos que a extração do hactool entregaria. O recompilador, o loader e a de
 > **Tears of the Kingdom:** o app roda a **1.4.3** (`GAME_V_143`, a principal) e a **1.4.2** (`GAME_V_142`, numa pasta
 > `v142` ao lado; só recompilada, sem os ajustes da 1.4.3). O cartucho e o NSP base são a 1.0.0, então a importação
 > precisa também do **NSP do update** (`0100F2C0115B6800`: 1.4.3 v720896 ou 1.4.2 v655360). Sem ele, o app recusa com
-> "O jogo base sozinho é a versão 1.0.0: escolha também o update 1.4.3 (v720896) ou 1.4.2 (v655360)." A versão vem do
-> build id do `main` importado, e os arquivos vão para a pasta dela. O romfs de 1.4.3 tem 304243
+> A versão vem do build id do `main` importado, e os arquivos vão para a pasta dela. Sem update, o jogo base é a
+> **1.0.0** (`GAME_V_100`, pasta `v100`, um experimento): o CNMT diz versão 0, e o build id do `main` dele fica registrado
+> em `game_builds.txt` na raiz de dados, para o loader e a configuração por pasta reconhecerem a versão depois. O romfs de 1.4.3 tem 304243
 > arquivos (~16 GB); o `romfs_check_set` confere essa contagem antes de escrever qualquer coisa. O TOTK não tem DLC,
 > então a parte de DLC do BOTWRecompAndroid não foi trazida. O importador veio do BOTWRecompAndroid (mesmo código,
 > mesmos testes), com os title IDs e a versão do TOTK.

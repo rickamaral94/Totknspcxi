@@ -75,13 +75,48 @@ int game_version_of_build(const uint8_t id[8]) {
         // TOTK 1.4.2 (update v655360, SDK 20.5.6): the port's first version (1d40d9f), back beside 1.4.3 for players
         // whose update is that one - without 1.4.3's patches (tools/patches.py, runtime/native.c: other addresses)
         {{0x5c, 0xb4, 0x2b, 0x1c, 0xf2, 0x54, 0x69, 0xfb}, GAME_V_142},
+        // TOTK 1.0.0 (the base game, SDK 15): the build id the community's 1.0.0 patches name - not checked against a
+        // dump here yet; an import of the base alone registers the player's own (game_version_register) either way
+        {{0x08, 0x2c, 0xe0, 0x9b, 0x06, 0xe3, 0x3a, 0x12}, GAME_V_100},
     };
     for (unsigned i = 0; i < sizeof builds / sizeof *builds; i++)
         if (!memcmp(id, builds[i].id, 8)) return builds[i].version;
-    return 0;
+    // (a build an import registered: game_builds.txt in the main data root, "<16 hex digits> <version>" a line)
+    char root[1024], path[1100], line[64];
+    if (!rt_version_root(GAME_V_MAIN, root, sizeof root)) return 0;
+    snprintf(path, sizeof path, "%s/game_builds.txt", root);
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    char want[17];
+    for (int i = 0; i < 8; i++) snprintf(want + 2 * i, 3, "%02x", id[i]);
+    int found = 0;
+    while (!found && fgets(line, sizeof line, f)) {
+        int v = 0;
+        char hex[17] = {0};
+        if (sscanf(line, "%16s %d", hex, &v) == 2 && !strcmp(hex, want) && v == GAME_V_100) found = v;  // (1.0.0 only)
+    }
+    fclose(f);
+    return found;
 }
 
-const char *game_version_name(int v) { return v == GAME_V_143 ? "1.4.3" : v == GAME_V_142 ? "1.4.2" : "?"; }
+bool game_version_register(const uint8_t id[8], int v) {
+    if (v != GAME_V_100) return false;  // (the one version an import names by its metadata rather than a known build)
+    if (game_version_of_build(id) == v) return true;
+    char root[1024], path[1100];
+    if (!rt_version_root(GAME_V_MAIN, root, sizeof root)) return false;
+    snprintf(path, sizeof path, "%s/game_builds.txt", root);
+    FILE *f = fopen(path, "ab");
+    if (!f) return false;
+    for (int i = 0; i < 8; i++) fprintf(f, "%02x", id[i]);
+    fprintf(f, " %d\n", v);
+    bool ok = fclose(f) == 0;
+    LOG("[loader] main build %02x%02x%02x%02x... registered as game version %d\n", id[0], id[1], id[2], id[3], v);
+    return ok;
+}
+
+const char *game_version_name(int v) {
+    return v == GAME_V_143 ? "1.4.3" : v == GAME_V_142 ? "1.4.2" : v == GAME_V_100 ? "1.0.0" : "?";
+}
 
 static void load_nso(Module *m, const char *path, uint64_t base) {
     size_t len;

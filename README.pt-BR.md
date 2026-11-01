@@ -7,6 +7,9 @@ só recompilada) para Android, nos primeiros passos. **Não é emulação**: o c
 gráficos (NVN) são traduzidos para Vulkan.
 
 > [!NOTE]
+> A **1.0.0** (o jogo base sozinho, importado sem update) é um experimento nas mesmas condições da 1.4.2 abaixo, e nunca
+> rodou neste app antes.
+>
 > A **1.4.2** fica ao lado da 1.4.3, com arquivos do jogo, saves e configurações próprios (Arquivos do jogo > Versão do
 > jogo). Ela roda só com o código do jogo recompilado, a no máximo 30 fps, sem os ajustes da 1.4.3 (os endereços deles
 > são da 1.4.3): abaixo de 30 fps o jogo fica mais lento que o tempo real, e a cena pode escurecer por um instante

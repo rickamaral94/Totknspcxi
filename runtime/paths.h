@@ -39,12 +39,16 @@ bool rt_dev_mode(void);           // dev / portable mode (rule 2 above): e.g. a 
 bool rt_resource(const char *name, const char *dev_rel, char *out, size_t n);
 
 // Game versions, from main's build id (its NSO header's bytes 0x40-0x47: runtime/loader.c; 0 = not one this app runs)
+#define GAME_V_100 100          // Tears of the Kingdom 1.0.0 (the base game, no update): beside 1.4.3, in v100, recompiled only
 #define GAME_V_142 142          // Tears of the Kingdom 1.4.2 (the update v655360, SDK 20.5.6): beside 1.4.3, in v142, recompiled only
 #define GAME_V_143 143          // Tears of the Kingdom 1.4.3 (the update v720896, SDK 20.5.22; MacNativeGames' version)
 #define GAME_V_MAIN GAME_V_143  // the one in the data root itself (1.4.2, the port's first, was dropped 2026-10-25; back beside it)
 int game_version_of_build(const uint8_t id[8]);
 const char *game_version_name(int v);                     // "1.4.3", "1.4.2"; "?" for one this app doesn't run
-static inline int game_is_totk(int v) { return v == GAME_V_142 || v == GAME_V_143; }
+static inline int game_is_totk(int v) { return v == GAME_V_100 || v == GAME_V_142 || v == GAME_V_143; }
+// A main build id an import found to be a version (TOTK 1.0.0: the base package's CNMT says version 0), kept in the main
+// data root (game_builds.txt) so the loader and the setup know it from then on
+bool game_version_register(const uint8_t id[8], int v);
 int rt_game_version(void);                                // the one whose folder is the data root
 bool rt_select_game_version(int v);                       // the one the next start runs (the app restarts into it)
 bool rt_version_root(int v, char *out, size_t n);         // its folder (absolute)

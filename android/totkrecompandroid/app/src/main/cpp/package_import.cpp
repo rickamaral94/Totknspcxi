@@ -16,12 +16,13 @@
 extern "C" {
 #include "paths.h"
 #include "romfs_build.h"
-int game_version_of_build(const uint8_t id[8]);  // runtime/loader.c: GAME_V_143; 0 another one
+int game_version_of_build(const uint8_t id[8]);  // runtime/loader.c: GAME_V_143 / 142 / 100; 0 another one
+bool game_version_register(const uint8_t id[8], int v);
 }
 
 static const char *const STAGING = "extracted.importing", *const COMPLETE = "COMPLETE";
 static const char *const MOVED[] = {"exefs", "romfs", "romfs.bin"};  // (in this order; romfs.bin last)
-static const int VERSIONS[] = {GAME_V_143, GAME_V_142};
+static const int VERSIONS[] = {GAME_V_143, GAME_V_142, GAME_V_100};
 
 static bool exists(const std::string &p) {
     struct stat st;
@@ -206,15 +207,21 @@ PackageImportOutcome package_import_run(const PackageImportInputs &in, const Pac
     if (!main || main->data->size() < sizeof head) return out.result = PKG_UNUSABLE, out.detail = "exefs/main", out;
     main->data->read(head, sizeof head, 0);
     out.version = memcmp(head, "NSO0", 4) ? 0 : game_version_of_build(head + 0x40);
+    {   // the main module's build id, for the log (a version this app doesn't know yet is told by it)
+        char id[17] = "";
+        for (int i = 0; i < 8; i++) snprintf(id + 2 * i, 3, "%02x", head[0x40 + i]);
+        fprintf(stderr, "[import] main build %s: game version %d\n", id, out.version);
+    }
+    // TOTK 1.0.0: the base package alone, its CNMT's version 0 - the launch version by definition, whatever its build
+    // id: registered so the loader and the setup know it from then on (runtime/loader.c game_builds.txt)
+    if (!out.version && in.update_fd < 0 && imp->base_version() == 0 && !memcmp(head, "NSO0", 4) &&
+        game_version_register(head + 0x40, GAME_V_100))
+        out.version = GAME_V_100;
     char root[1024];
     if (!out.version || !rt_version_root(out.version, root, sizeof root)) {
-        // (TOTK runs as 1.4.3 or 1.4.2: the cartridge's or the eShop's 1.0.0 needs one of those updates with it)
-        if (in.update_fd < 0)
-            out.detail = h.portuguese ? "O jogo base sozinho é a versão 1.0.0: escolha também o update 1.4.3 (v720896) ou 1.4.2 (v655360)."
-                                      : "The base game alone is version 1.0.0: choose the 1.4.3 (v720896) or 1.4.2 (v655360) update too.";
-        else
-            out.detail = h.portuguese ? "Só as versões 1.4.3 (update v720896) e 1.4.2 (v655360) rodam neste app."
-                                      : "Only versions 1.4.3 (update v720896) and 1.4.2 (v655360) run in this app.";
+        // (TOTK runs as 1.4.3, 1.4.2 or 1.0.0 - the base alone; any other update isn't one of them)
+        out.detail = h.portuguese ? "Só as versões 1.4.3 (update v720896), 1.4.2 (v655360) e 1.0.0 (o jogo base sem update) rodam neste app."
+                                  : "Only versions 1.4.3 (update v720896), 1.4.2 (v655360) and 1.0.0 (the base game, no update) run in this app.";
         return out.result = PKG_VERSION, out;
     }
     mkdir(root, 0755);

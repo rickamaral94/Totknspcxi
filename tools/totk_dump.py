@@ -20,8 +20,9 @@ TITLE_IDS = {'0100F2C0115B6000': 'The Legend of Zelda: Tears of the Kingdom'}
 VERSIONS = {
     '277178b7dba1b6d4': '1.4.3',  # TOTK + the update 0100F2C0115B6800 v720896 (SDK 20.5.22)
     '5cb42b1cf25469fb': '1.4.2',  # TOTK + the update v655360 (SDK 20.5.6): beside 1.4.3, recompiled only, no patches
+    '082ce09b06e33a12': '1.0.0',  # TOTK, no update (SDK 15): the community's 1.0.0 patches' build id - unchecked here
 }
-TARGETS = ('1.4.3', '1.4.2')
+TARGETS = ('1.4.3', '1.4.2', '1.0.0')
 
 # what each module is (its own build paths, the SDK tags in it and the NEEDED list of main), and how it's treated
 MODULES = [
@@ -89,7 +90,7 @@ def main():
                 ok = False
             else:
                 print(f'  game version: v{version}' + (' (recompiled game code only, without 1.4.3\'s patches)'
-                                                        if version == '1.4.2' else ''))
+                                                        if version != '1.4.3' else ''))
     path = os.path.join(exefs, 'main.npdm')
     if not os.path.isfile(path):
         print('  main.npdm MISSING')
@@ -101,7 +102,7 @@ def main():
               f'priority {m["prio"]} on core {m["core"]}, stack {m["stack"]:#x}, system resource {m["sysres"]:#x}')
         ok &= m['program'] in TITLE_IDS
 
-    wanted = ROMFS_FILES + ([RSIZETABLE.format(version.replace('.', ''))] if version else [])
+    wanted = ROMFS_FILES + ([RSIZETABLE.format(version.replace('.', ''))] if version and version != '1.0.0' else [])
     missing = [f for f in wanted if not os.path.isfile(os.path.join(romfs, f))]
     if missing:
         print(f'  romfs: missing {", ".join(missing)}')
