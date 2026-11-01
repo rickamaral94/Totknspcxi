@@ -15,7 +15,7 @@ The sessions name their game version ('# game_version', runtime/fnprof.c): versi
 they can't be mixed, and the list is written to tools/hot_functions_<version>.txt unless -o says otherwise.
 Inputs may also be lists of "<module> <hex offset>" lines (main / sdk; no counts).
 Addresses are written as the generated code names its functions (f_<address>: main at 0x7000000000, sdk at
-0x7004000000), whatever the guest window was in the session (its '# main_base' line). Only addresses: no game code."""
+0x7008000000), whatever the guest window was in the session (its '# main_base' line). Only addresses: no game code."""
 import argparse
 import sys
 from pathlib import Path
@@ -29,7 +29,7 @@ p.add_argument('--version', type=int, help="the game version of inputs that don'
 p.add_argument('--min-count', type=int, default=1, help='entries a function needs, summed over the sessions')
 args = p.parse_args()
 
-MODULES = {'main': NAMED_MAIN, 'sdk': NAMED_MAIN + 0x4000000}
+MODULES = {'main': NAMED_MAIN, 'sdk': NAMED_MAIN + 0x8000000}
 
 counts = {}
 versions = set()

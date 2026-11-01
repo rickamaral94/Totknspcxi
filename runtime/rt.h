@@ -17,6 +17,8 @@ void rt_fatal_message(const char *format, ...) __attribute__((noreturn, format(p
 #endif
 
 // ---- address space layout (guest addresses == host addresses)
+// SDK starts at 128 MiB: TOTK 1.0.0 main occupies 0x4668000 bytes (over 64 MiB).
+// Keep the canonical SDK address in gamebuild.c and build_gamelib.sh in sync.
 // macOS reserves 0x2_0000_0000-0x70_0000_0000, and guest addresses must fit in 39 bits, so the
 // guest lives in a 12.5 GB window at 0x70_0000_0000 claimed at startup (see main.c).
 #ifdef __ANDROID__
@@ -27,7 +29,7 @@ extern uint64_t g_guest_lo;
 #define GUEST_LO     g_guest_lo
 #define GUEST_HI     (GUEST_LO + 0x320000000ull)
 #define MAIN_BASE    (GUEST_LO + 0x0000000000ull)
-#define SDK_BASE     (GUEST_LO + 0x0004000000ull)
+#define SDK_BASE     (GUEST_LO + 0x0008000000ull)
 #define HLE_BASE     (GUEST_LO + 0x0080000000ull)
 #define HLE_SIZE     0x0000100000ull
 #define TLS_BASE     (GUEST_LO + 0x0090000000ull)
@@ -42,7 +44,7 @@ extern uint64_t g_guest_lo;
 #define GUEST_LO     0x7000000000ull
 #define GUEST_HI     0x7320000000ull
 #define MAIN_BASE    0x7000000000ull
-#define SDK_BASE     0x7004000000ull
+#define SDK_BASE     0x7008000000ull
 #define HLE_BASE     0x7080000000ull   // fake addresses for host-implemented functions
 #define HLE_SIZE     0x0000100000ull
 #define TLS_BASE     0x7090000000ull
