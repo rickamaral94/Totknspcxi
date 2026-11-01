@@ -66,6 +66,7 @@ typedef struct NvnDescPool {
     uint64_t addr;
     int count;
     void *entries;  // NvnTexEntry[] or NvnSamplerDesc[]
+    void *latest;   // (texture pools, Android) the slots as last registered: entries lags behind (objects.c texreg)
     struct NvnDescPool *next;  // all descriptor allocations of this boot
 } NvnDescPool;
 
@@ -137,7 +138,7 @@ enum {
     CMD_COPY_TEXTURE_TO_TEXTURE, CMD_DOWNSAMPLE, CMD_UPDATE_UNIFORM_BUFFER, CMD_FENCE_SYNC, CMD_WAIT_SYNC,
     CMD_BARRIER, CMD_SIGNAL_EVENT, CMD_WAIT_EVENT, CMD_REPORT_COUNTER, CMD_DISCARD_COLOR,
     CMD_DISCARD_DEPTH_STENCIL, CMD_SET_COPY_STRIDES, CMD_DRAW_TEXTURE, CMD_RESOLVE_DEPTH, CMD_SET_DEPTH_CLAMP,
-    CMD_BIND_TEXTURES_DEFERRED,
+    CMD_BIND_TEXTURES_DEFERRED, CMD_SET_RENDER_ENABLE_COND,
     CMD_COUNT
 };
 

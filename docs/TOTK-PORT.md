@@ -397,7 +397,14 @@ O menu de taxa de quadros na tela inicial (antes do jogo carregar, versão 0) es
 
 **Modo nativo a 60:** um travamento no carregamento (pc fora do `libmain.so`, talvez no Turnip), uma vez; não repetido.
 
-## As paredes só névoa (2026-10-29) - aberto
+## As paredes só névoa (2026-10-29) - provavelmente certo
+
+**2026-10-30, comparado com o Switch** (capturas de um walkthrough que o usuário mandou): no console, a caverna do
+prólogo também é névoa verde-azulada. As paredes e o templo aparecem lavados de névoa, e só o Link e o que uma luz local
+alcança (o dispositivo Zonai) ficam iluminados. É o que o port mostra. O dump abaixo, com os passes de luz somando zero
+nas paredes, combina com uma caverna sem luz direta. Fica para conferir de perto: a parede iluminada por uma luz
+local (a 3ª captura do Switch) e o tom exato da névoa.
+
 
 O usuário, jogando: "as paredes estão com uma nevoa [...] a agua esta escura", a 30 e a 60. É o sintoma das cutscenes
 (26/10), agora em gameplay e sempre no mesmo lugar: com a cópia do autosave dele (ruínas com um anel de pedra, Link
@@ -430,6 +437,124 @@ verde-azulada e só o Link tem luz.
   (legível: `own_save` faz a cópia do app) em `LARECOMP_SAVE_SEED` - e comparar a máscara e os passes de luz.
 
 ## O que trabalhar - o vídeo do usuário (2026-10-29)
+
+Atualização de 2026-10-30:
+- **Nuvens em blocos: corrigido** (`c193510`, TMML sem sinal).
+- **Paredes sem textura e cenário sumindo nas cutscenes: corrigido** (renderização condicional do NVN,
+  `exec.c` `CMD_SET_RENDER_ENABLE_COND`). A causa e como foi achada:
+  - **A causa:** `nvnCommandBufferSetRenderEnableConditional` era uma operação vazia e `SetRenderEnable` nunca era
+    executado. O TOTK limpa os alvos temporários "no primeiro uso" (main+0x36da0) assim: por slot de textura há dois
+    reports de contador de 16 bytes; a CPU marca o primeiro com 1 e grava `SetRenderEnableConditional(modo 1 =
+    renderiza se diferente, slot)` + `ClearColor` + `SetRenderEnable(true)`, e um `ReportCounter` de timestamp no
+    slot logo depois (o valor volta a 0). Na GPU só o primeiro clear passa; os seguintes, gravados pela CPU antes de
+    a GPU rodar, são pulados. Sem a condição, o array de luz de meia resolução 800x448x2 (`t6` de `71c7ef99`,
+    `@35dd67e00`) era limpo 10 vezes por quadro, antes de cada grupo de luz e antes da leitura, em vez das 3 do
+    começo: a pedra ficava só com a ambiente fraca do cubemap e a névoa, e o fundo das cutscenes ficava preto.
+  - **A correção:** a condição avaliada ao executar a lista, em ordem com os `ReportCounter` (que o runtime grava
+    nesse mesmo momento): o valor de 64 bits de cada report, em +0 e em +16, como o Maxwell (yuzu
+    `ProcessQueryCondition`); modo 0 renderiza se iguais, 1 se diferentes. Enquanto desligado, draws e clears são
+    pulados. `LARECOMP_NO_RENDER_ENABLE=1`: o comportamento antigo; `LARECOMP_LOG_RENDER_ENABLE=1`: as avaliações.
+  - **Resultado** (save do usuário no lugar da 2ª captura, `android/out/cave-eden-before-after.png`, contra o Eden):
+    piso de pedra (38, 54, 51) -> (48, 62, 54), Eden (57, 72, 60); paredes (48, 72, 68) -> (54, 78, 70), Eden
+    (54, 85, 76); o vapor sobre a água e as plantas voltam. Clears de `t6` por quadro: 10 -> 3, como no Eden; clears
+    no quadro: 72 -> 40. 30 fps estáveis. A abertura de um jogo novo (`android/out/newgame-old-vs-fix.png`): sem a
+    correção o fundo dos closes da Zelda é preto; com ela, as paredes iluminadas pela tocha. O mergulho da Ilha do
+    Céu continua igual (`android/out/sky-re-sheet.png`).
+  - **A referência que resolveu:** o Eden no PC com o save do celular, capturado pelo RenderDoc 1.46 portátil
+    (`D:\RenderDoc_1.46_64`). No Vulkan o replay falha (`VK_ERROR_INVALID_OPAQUE_CAPTURE_ADDRESS`: os endereços de
+    buffer do Eden); no **OpenGL GLSL** funciona. Sem instalar a camada Vulkan (pede administrador):
+    `VK_ADD_IMPLICIT_LAYER_PATH` no ambiente e `renderdoccmd capture ... eden.exe -g <nsp>`. Scripts de análise
+    (`qrenderdoc --python`) e capturas em `D:\RenderDoc_captures`. O save do celular sai por uma cópia do app numa
+    pasta interna (`LARECOMP_SAVE_DIR=<files>/dbg/savepull` + `LARECOMP_SAVE_SEED`) e vai para
+    `%APPDATA%\eden\nand\user\save\0000000000000000\<perfil>\0100F2C0115B6000`.
+  - O histórico abaixo tem pistas falsas: o `t6` preto **não** era do jogo (o Eden o lê com luz, (0,131; 0,156;
+    0,088) na pedra), e a conclusão de que era "o esperado também no Switch" estava errada.
+  - Antes: a névoa verde-azulada é a mesma do Switch, mas nas capturas do Switch
+  (`android/out/switch-ref/02.jpg`, `03.jpg`; comparação em `android/out/cave-vs-switch.png`) as paredes mostram os
+  blocos de pedra, o musgo amarelo e a areia; aqui saem lisas, cinza-azuladas. A correção da água não muda isso.
+  - **A cor base está certa:** `LARECOMP_DEBUG_RT=1` (o alvo 1 de cada passe, o sRGB do G-buffer) mostra a pedra
+    e o musgo como no Switch (`android/out/cave-rt1-sheet.png`). A textura se perde na luz.
+  - **A luz:** só o buffer de luz antes da névoa (`android/out/cave-light-only.png`): o Link sai com luz quente e
+    forte, e o terreno ao lado com uma ambiente azul quase preta. Rastreio da parede (`android/out/cavepick.log`,
+    ponto 400,300): o classificador grava a classe 0, e só `71c7ef99` a ilumina, com (0,015; 0,052; 0,047).
+  - **Os dois passes da classe 0** se dividem pelos tiles: `275e821b` desenha onde o registro do tile tem `.w = 1`,
+    `71c7ef99` onde não tem. Quem marca é o fs `24298e300` (hash `7589e5f2c7390f90`): pelo alfa da cor base (bits) e
+    por `t1` = alvo 0 do G-buffer; `.w = 1` quando o bit 4 do alfa está ligado e `t1.g != 0`. Na parede, o G-buffer
+    grava `00000000` no alvo 0: pelos dados do próprio jogo o tile não ganha `.w` (provavelmente "recebe sol"), então
+    `71c7ef99` deve ser o certo também no Switch.
+    - `LARECOMP_FEEDBACK_COPY=1` (esse fs lê o alvo 0 que escreve): nada muda.
+  - **As entradas de `71c7ef99`** (shader de diagnóstico por `LARECOMP_SHADER_SUBST` em `2486b4a00_fs.glsl`,
+    `android/out/cave-ambdbg-dbg/pass_108.png`): cor base (`t4`) certa, `t3`/`t5` com conteúdo, cubemap `t7` com
+    valores, `t8` quase preto e **`t6` preto nas duas camadas**. `t6` é um array 800x448x2 R11G11B10 em
+    `@35dd67e00`.
+    - Quem escreve `t6`: os passes de luz em meia resolução (8 alvos; alvo 2 = camada 0, alvo 3 = camada 1). O alvo 2
+      salvo no fim do passe tem a caverna iluminada (`android/out/cave-rt2-pair.png`).
+    - `LARECOMP_DUMP_SAMPLED=800x448:3f@35dd67e00` (agora grava em `LARECOMP_DEBUG_DIR`): na primeira leitura,
+      as duas camadas estão zeradas.
+    - Copy trace + `LARECOMP_LOG_CLEARS`: o jogo limpa `t6` com zero como alvos 0/1 depois da luz de meia
+      resolução e antes de `05a99cd0` / `275e821b` / `71c7ef99` lerem. O mesmo objeto de textura do jogo é
+      reinicializado ora como esse array, ora como uma 256x256 `0x11` no mesmo endereço.
+    - `LARECOMP_SKIP_CLEAR=800x448:3f:3` (pula esses clears): as paredes continuam escuras.
+    - `LARECOMP_VK_NO_PLACED=1`: as paredes continuam escuras, e o Link também escurece.
+    - Com o clear pulado, `t6` continua zerado na leitura. Os dois grupos de luz de meia resolução escrevem os mesmos
+      alvos, e o jogo limpa `t6` antes do 2º grupo e de novo antes da leitura (os alvos são resolvidos na gravação
+      do comando, `cmdbuf.c`). Pelo jeito, `t6` preto é o esperado também no Switch: pista falsa.
+  - **O draw sem anexo** (`24298c900`, hash `45041f98c918780e`, viewport 1x1, o do totk-pc-recomp `7ceda94`) projeta
+    o cubemap 64x64 e grava coeficientes de ambiente em `cb0[81]` + 320.... Ele roda (passe 16x16), mas não
+    aparecia em `LARECOMP_LOG_STORES`: o tradutor marcava `uses_gmem_store` só no contexto, não no `ShaderInfo`,
+    para STG fora do compute. Corrigido (`translate.c`): agora ele aparece. As paredes continuam escuras.
+  - Os constant buffers de `71c7ef99` (o `[cbdump]` agora mostra o endereço): `cb4` `3b60df300`, `cb9` `3b612c200`,
+    `cb13` `3b612da00`; o draw 1x1 grava no buffer de armazenamento `3b64a3000`, que `71c7ef99` não lê (nem `gmem`
+    nem `cb0`). Na caverna não há `CopyBufferToBuffer` (`LARECOMP_VK_GPU_BUFCOPY=0`: nada muda).
+  - O cubemap `t7` (64x64x6, 5 níveis, `@3b647b000`, alisado no tempo com blend `CONSTANT_ALPHA` 0,2): níveis 0-3
+    coerentes; o nível 4 vermelho com uma faixa preta (`android/out/cave-cube-strip.png`). É de propósito: o jogo
+    o grava de um cubemap 16x16 R16F com swizzle (R, 0, 0, 1), um dado empacotado, não uma cor.
+  - **Luzes locais:** os draws instanciados `9d6bec86951f1e9b` depois dos passes de luz são partículas de poeira
+    (`android/out/cave-locallights.png`); nenhuma luz local é desenhada no quadro. Na 3ª captura do Switch a parede
+    é iluminada por um objeto escuro com luzes (um constructo?) encostado nela, que não existe no nosso G-buffer
+    (`android/out/cave-albedo-vs-switch.png`, com outro enquadramento): a comparação com ela não é justa.
+  - Brilho médio das capturas (vídeo, não exato): Switch (56-61, 77-88, 68-79), aqui (45-47, 61-63, 55-58), uns
+    20% abaixo e com menos contraste.
+  - **No lugar da 2ª captura** (save do usuário, `android/out/spot2-vs-switch.png`): no Switch a cor da pedra
+    (musgo, bordas) atravessa a névoa; aqui tudo sai verde-azulado uniforme.
+  - **Eliminação no `71c7ef99`** (`android/out/abl/`, buffer de luz no chão, 8 bits): original (4,0; 10,2; 8,9);
+    sem `t8` (1,8; 1,6; 1,3); sem o cubemap `t7` (2,1; 8,5; 7,8); sem `t5` igual a sem `t7`. Uns 80% da luz da
+    pedra vêm do `t8`, um termo verde-azulado tipo névoa que segue a distância (alvo 1 dos passes de meia
+    resolução, `android/out/spot2-t8.png`); a luz ambiente do cubemap, a que traz a cor da pedra, é minúscula.
+    `t5` (alvo 0, R e B perto de 1) a multiplica.
+  - O cubemap `t7` vem, com alisamento temporal, de outro cubemap (`@3b5fe6200`, 64x64x6, 4 níveis): uma face
+    por quadro é desenhada como mini-renderização do terreno (fs `246dde500`, hash `478b355ae8e7e8f1`, com o atlas
+    1024x1024 `0x8e` e uma 96x96 `0x6`), depois os mips são filtrados.
+  - A cor final de `71c7ef99`: (difusa do cubemap + especular) · `t3.w` + `t8`, depois uma mistura de saturação
+    com peso 0,2 + `t3.z` · `cb1[1].x`. Na pedra (`android/out/subst-t3/`): `t3.z` ≈ 0,46, `t3.w` ≈ 0,41, `t5` ≈
+    (1; 0,45; 1). Em valores absolutos, a difusa do cubemap fica em ~0,007 e `t8` em ~0,03.
+  - `LARECOMP_SCALE=1` (cena sem a escala 0,8): igual (`android/out/spot2-scale-cmp.png`).
+  - (Resolvido com a referência do Eden: acima.)
+- **Água escura: corrigido** (`precise gl_FragDepth`, abaixo). Antes: No Switch, o lago da ilha e as poças da caverna são verde-azulados; aqui saem quase
+  pretos. O que se sabe (mergulho da Grande Ilha Celestial, `android/out/waterpick2*`):
+  - **Como a água é desenhada:** no G-buffer (fs `d31be35c2ce14b2b`, prog `24887b000`, 8 alvos, profundidade escrita),
+    com bandeira de material `0x33` no alvo 0. O próprio draw lê esse alvo 0 (tex6) enquanto o escreve.
+  - **O que falta:** o classificador (`13fe41b7645b246c`) grava a classe como profundidade, mas nenhum dos 11 passes
+    de luz (EQUAL) toca esses pixels. O pixel fica 0 até a composição das nuvens.
+  - **Testes:**
+    - `LARECOMP_VK_EQUAL_TOL=1` (LEQUAL com viés): os lagos ficam azulados. Mas a luz do Link na caverna fica
+      manchada, então não serve de correção.
+    - D16 em D32F: nada muda.
+    - `LARECOMP_FEEDBACK_COPY=1`: nada muda.
+  - **A conta da classe:** classificador e passes fazem a mesma conta. O classificador parte da bandeira R
+    (`trunc(R·255)`, a máscara `cb3[1].x`, os nibbles reordenados, `/255`); cada passe parte de `cb11[25].x`.
+    - Testado: o classificador com arredondamento no lugar do `trunc` (`LARECOMP_SHADER_SUBST` com
+      `242900e00_fs.glsl`). Os lagos continuam escuros, então não é a conversão do UNORM8.
+  - **A causa:** a água tem passe próprio (`2178807956b82cf1`, id 35 = classe 0x32; a máscara do classificador é
+    `0xaf`, e 0x33 & 0xaf = 0x23 vira 0x32). Pintado de magenta por `LARECOMP_SHADER_SUBST`, ele não aparece em lugar
+    nenhum: o EQUAL nunca passa. Em D16, 65535·(0,5 + classe/510) = 32767,5 + 128,5·classe: toda classe par (todas
+    as daqui) cai num degrau de arredondamento ,5, e um ulp de diferença troca o valor. O VS tem `precise
+    gl_Position`; o `gl_FragDepth` do classificador não, então o driver reassocia `fma(a,-k,a)+k` e a profundidade
+    sai um ulp longe da do quad. Cada classe erra para um lado; a da água, para o errado. (Por isso D32F não
+    ajudava: lá o EQUAL pede igualdade exata.)
+  - **A correção:** o tradutor declara `precise gl_FragDepth;` em todo fragment shader que escreve profundidade.
+    Os lagos saem verde-azulados, com reflexo (`android/out/water-fix/051.png`).
+
 
 Gravação do usuário, 164 s (`Screenrecorder-2026-10-29-09-13-39-739.mp4`, cópia em `android/out/uservid/`, um
 quadro por segundo em `f*.jpg` e folhas em `sheet*.jpg`): o despertar, a caverna até a saída, o salto das ilhas, o
@@ -672,6 +797,55 @@ Falta:
 
 - `totkgame.so` com o NDK (`android/build_gamelib.sh Dump/0100F2C0115B6000/exefs`); `romfs.bin` feito direto da pasta
   escolhida; a compilação no celular (`runtime/gamebuild.c`) com 228 mil funções.
+- **`romfs.bin` pronto na pasta de dados (2026-10-29, trazido do BOTWRecompAndroid `47270e8` / `66ca80e`):** se a pasta
+  escolhida pelo usuário tiver `exefs/` e um `romfs.bin` já pronto ao lado (em vez dos 304 mil arquivos soltos de
+  `romfs/`), o app valida o cabeçalho, as tabelas, a contagem mínima de arquivos e o `System/Version.txt` (`1.4.3`)
+  direto pelo descritor (`romfs_check_image`), permite tanto copiar (`romfs.bin` em `extracted/`) quanto usar no lugar
+  (`romfs.link` apontando para o arquivo `romfs.bin` original, aberto direto em `services/fs.c`), e extrai apenas os
+  vídeos soltos (`Movie/*.mp4` / `.webm`) da imagem para `extracted/romfs/` (`romfs_image_extract`).
+
+### Trazido e catalogado de `valentderah/totk-pc-recomp` (2026-10-29)
+
+Análise do repositório [valentderah/totk-pc-recomp](https://github.com/valentderah/totk-pc-recomp) (porte Windows/Vulkan
+do TOTK 1.4.3 derivado da mesma árvore LAS Recomp + MacNativeGames):
+
+- **Aplicado no runtime (sem alterar `GAMELIB_ID`):**
+  1. **Passes sem anexos (attachment-less render passes) — `runtime/nvn/vulkan/exec.c` (crédito: `totk-pc-recomp`
+     `7ceda94`):** o TOTK desenha um fragment shader que só escreve num storage buffer usando um viewport 1x1 com
+     deslocamento (`x, y`). Aqui `begin_pass()` fixava `16x16` quando não havia alvos de cor/profundidade, `scissor_rect()`
+     ignorava `st.scissor[0]` e `draw_()` não reabria o passe quando o canto (`x + w`, `y + h`) do viewport passava de
+     `pass_w x pass_h` — deixando o viewport deslocado fora da área do passe e fazendo a pedra da caverna perder a luz
+     ambiente do interior (candidato direto para "As paredes só névoa").
+  2. **Formatos NVN empacotados de 16 bits (`0x39`..`0x3C`) e correção do off-by-one em `0x95`..`0x9C` —
+     `runtime/nvn/formats.c` e `runtime/nvn/vulkan/textures.c` (crédito: `totk-pc-recomp` `c4108c4`):** o NVN enumera
+     componentes empacotados de 16 bits do LSB para o MSB (`RGBA4` = `0x39`, `RGB5` = `0x3A`, `RGB5A1` = `0x3B`,
+     `RGB565` = `0x3C`), ao contrário dos formatos `PACK16` do Vulkan (MSB para LSB). O TOTK usa `RGB5A1` e `RGB565`
+     nos mapas de normais e mistura do terreno (R e B trocados esticavam as texturas do chão num eixo). Além disso,
+     `0x95`..`0x98` são todos de 2 bytes (`BGR565`, `BGR5`, `BGR5A1`, `A1BGR5`) e `0x99`..`0x9C` são de 4 bytes
+     (`BGRX8`, `BGRA8`, `BGRX8_SRGB`, `BGRA8_SRGB`); `formats.c` e `textures.c` tinham `0x98`..`0x9B` deslocados em 1.
+  3. **`SVC 0x2C` (`MapPhysicalMemory`) preservando páginas já mapeadas — `runtime/kernel.c` (crédito: `totk-pc-recomp`
+     `runtime/memory.c`):** o kernel Horizon mapeia apenas as páginas ainda não mapeadas do intervalo e preserva o
+     conteúdo das que já estavam mapeadas; os heaps do TOTK crescem remapeando faixas que já possuem em parte. Antes, o
+     `case 0x2C` chamava `plat_discard(x[0], x[1])` na faixa inteira (zerando páginas já mapeadas), sendo que o
+     `SVC 0x2D` (`UnmapPhysicalMemory`) já descarta as páginas ao desmapear.
+- **Catalogado para próximas rodadas (quando `totkgame.so` for regerado ou no backend Vulkan):**
+  - **Patch de quique da física a 60 fps (`totk-pc-recomp` `tools/totk_patches.py` / `59eb6be`):** em `0x7000562a64`
+    (`ldr s0, [x9, #0x28]`, palavra `0xbd402920`), clampar o dt do solver de contato a `<= 1/60 s` quando o passo real
+    passa de `1/60 s`, evitando que corpos rígidos quiquem ao pousar em quadros mais longos no modo 60 fps.
+  - **Zstd nativo nos call-sites seguros (`totk-pc-recomp` `1f4c6fc`):** substituir apenas os 4 call-sites de
+    `ZSTD_decompressStream` (`0x02be2a34`, `0x02dc33dc`) e `ZSTD_decompressDCtx` (`0x028eb388`, `0x02dc3444`) que usam o
+    `ZSTD_DCtx` padrão pela `libzstd` nativa, mantendo o `0x02c896d8` (dicionário pré-digerido customizado da Nintendo
+    para `zs.dic`) no código recompilado.
+  - **Barreiras de compilador e `rt_spin_gate` em laços de spin (`totk-pc-recomp` `c294397`):** `atomic_signal_fence`
+    em back-edges de mesmo bloco no gerador (evita que `clang -O1` promova leituras de memória compartilhada para fora do
+    spin-loop) e `rt_spin_gate` nos 6 pontos de spin-wait do agendador de tarefas do TOTK (`0x02c279cc`, `0x02c27bb8`,
+    `0x02b361dc`, `0x02dcde8c`, `0x02bd64a4`, `0x025db384`).
+  - **Write-back de alvos pequenos (`<= 64 KB`) ao passar a cerca (`totk-pc-recomp` `runtime/vk_texture.c`):** o sistema
+    de grama do TOTK renderiza um mapa RGBA8 128x128 (64 KB) num pool CPU-cached a cada quadro e lê os bytes na CPU sem
+    chamar `nvnMemoryPoolInvalidateMappedRange` (reações de corte de grama e insetos).
+  - **Otimizações de replay Vulkan (`totk-pc-recomp` `runtime/vk_exec_draw.c`, `166e5a7`):** máscara de canais usados
+    por shader para só checar/vincular os slots lidos (`RsList`), `VK_KHR_descriptor_update_template` e evicção
+    incremental de texturas fora do passe crítico.
 
 ### Fase 7: desempenho
 

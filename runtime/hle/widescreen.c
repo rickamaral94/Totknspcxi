@@ -23,6 +23,7 @@
 #include "../hle.h"
 #include "../rt.h"
 #include "../settings.h"
+#include "../paths.h"
 
 static float g_wide = 1.0f;   // the output's shape the renderers use: its aspect divided by 16:9 (1 = normal)
 static float g_shape = 1.0f;  // the window's, whether widened or not (widescreen_set_shape: the cameras from the start)
@@ -40,7 +41,7 @@ bool widescreen_allowed(void) {
     // built on the stack, never rebuilt), so a change applies when the game starts again (a reboot: widescreen_reset)
     int boot_aspect = g_boot_aspect;
     if (boot_aspect < 0 && g_hooked) g_boot_aspect = boot_aspect = g_settings.aspect;
-    bool game = g_game_version == 182 && g_hooked && boot_aspect == ASPECT_UNLOCKED;
+    bool game = (g_game_version == 182 || g_game_version == GAME_V_143) && g_hooked && boot_aspect == ASPECT_UNLOCKED;
     bool test = (g_allowed || ENV("LARECOMP_WIDESCREEN")) && g_settings.aspect == ASPECT_UNLOCKED;
     return (game || test) && !ENV("LARECOMP_NO_WIDESCREEN");
 }
@@ -97,6 +98,21 @@ void rt_persp_update(uint64_t proj) {
     if (ENV("LARECOMP_LOG_ASPECT") && n++ < 20) LOG("[widescreen] projection %llx: aspect %.4f\n", (unsigned long long)proj, *aspect);
 }
 
+// TOTK 1.4.3 (runtime/native.c: the four places it hands a camera its aspect): a ratio near 16:9 - the game's own, or
+// a viewport's 1600 / 896 - times the window's shape, so the view widens instead of stretching.
+float rt_widen_aspect(float a) {
+    g_hooked = true;
+    static int nlog;
+    if (ENV("LARECOMP_LOG_ASPECT") && nlog++ < 20)
+        LOG("[widescreen] a camera's aspect %.4f (allowed %d, shape %.3f, setting %d)\n", a, widescreen_allowed(), g_shape,
+            g_settings.aspect);
+    if (!widescreen_allowed() || g_shape <= 1.001f || !(a > 1.74f && a < 1.81f)) return a;
+    g_widened = true;
+    static int n;
+    if (ENV("LARECOMP_LOG_ASPECT") && n++ < 40) LOG("[widescreen] camera aspect %.4f -> %.4f\n", a, a * g_shape);
+    return a * g_shape;
+}
+
 // sead::PerspectiveProjection::getAspect (1.8.2: 0x7000da13d8, tools/patches.py): the widened aspect for a 16:9 one,
 // also between the game setting 16:9 again and the next rebuild (rt_persp_update), so what asks the projection for its
 // aspect agrees with its matrix. The float's bits.
@@ -118,7 +134,21 @@ bool widescreen_ui_centred(void) { return widescreen_allowed() && g_wide != 1.0f
 // screen edge, the middle ones (dialogs, prompts) stay, a blend in between. Only in the world, not in its menus
 // (pause, map), whose panes make up grids across the middle. Panes placed over things in the world (an enemy's health
 // bar) move the same way.
+// A menu open, or until 30 frames after: turning from one of its pages to another the game says it isn't for some
+// frames - the hearts and rupees moved out to the screen's edges and the pages past its sides showed (2026-10-28;
+// 8 frames weren't enough)
+bool widescreen_in_menu(void) {
+    extern uint64_t renderer_present_count(void);
+    static uint64_t last;
+    uint64_t now = renderer_present_count();
+    if (framepace_in_menu()) last = now + 1;
+    return last && now < last + 30;
+}
+
 float widescreen_hud_shift(float x) {
+    // (TOTK: its menus aren't told apart from the world yet - framepace_in_menu is 1.8.2's - so the HUD stays in the
+    // middle 16:9 part there, where the inventory's grids keep together; LARECOMP_TOTK_HUD_EDGES=1 tries the edges)
+    if (g_game_version == GAME_V_143 && !ENV("LARECOMP_TOTK_HUD_EDGES")) return 0;
     if (!widescreen_ui_centred() || framepace_in_menu() || !in_world()) return 0;
     float ax = x < 0 ? -x : x, t = (ax - 180.0f) / (260.0f - 180.0f);
     if (t <= 0) return 0;
@@ -144,6 +174,9 @@ void widescreen_present_crop(uint64_t frame, double shape, float crop[4], double
     (void)frame, (void)vy, (void)vh;
     crop[0] = crop[1] = 0, crop[2] = crop[3] = 1;
     if (shape <= 1.001 || !widescreen_allowed() || in_world()) return;
+    // (TOTK: the whole image - its layouts are kept in their proportions as they're drawn, vulkan/exec.c cbuf_info;
+    // squeezed back here, the save list, the loading screens and the menus had bars)
+    if (g_game_version == GAME_V_143) return;
     if (framepace_on_title()) crop[2] = (float)(1.0 / shape), crop[0] = (1.0f - crop[2]) * 0.5f;
     double w = *vw / shape;
     *vx += (*vw - w) * 0.5, *vw = w;

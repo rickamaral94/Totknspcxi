@@ -29,6 +29,10 @@ static void *vsync_thread(void *arg) {
             next = now;  // don't burst-signal to catch up
         }
         __atomic_add_fetch(&g_vsync_count, 1, __ATOMIC_RELAXED);
+#ifdef __ANDROID__
+        extern void vk_tl(const char *what, uint64_t a, uint64_t b);  // (LARECOMP_FRAME_TIMELINE)
+        vk_tl("vi: vsync event (count)", g_vsync_count, 0);
+#endif
         pthread_mutex_lock(&g_klock);
         kernel_signal(vsync_event);
         pthread_mutex_unlock(&g_klock);

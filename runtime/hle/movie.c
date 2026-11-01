@@ -750,6 +750,10 @@ static void dec_acquire_output(Cpu *c) {
     int remaining = d->nready;
     pthread_mutex_unlock(&d->lock);
     MILESTONE(d, MS_ACQ_OUT, "first output to the game\n", d->video ? "video" : "audio");
+    if (d->video) {  // (a pre-rendered movie plays at 30 fps like a cutscene: at 60 TOTK's opening movie ran ahead of its sound)
+        extern void rt_movie_frame(void);  // nvn/objects.c
+        rt_movie_frame();
+    }
     *(int32_t *)(uintptr_t)c->x[1] = r.idx;
     if (c->x[2]) *(int64_t *)(uintptr_t)c->x[2] = r.time;
     if (c->x[3]) *(uint32_t *)(uintptr_t)c->x[3] = r.flags;

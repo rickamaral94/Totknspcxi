@@ -1,4 +1,4 @@
-// TOTKRecompAndroid on Android: SDL's activity runs the runtime (libmain.so, runtime/main.c). Before the native code starts
+// TOTKDroid on Android: SDL's activity runs the runtime (libmain.so, runtime/main.c). Before the native code starts
 // this sets up what the desktop finds next to its executable (runtime/platform/android.c, runtime/paths.c):
 // - the shipped resources (assets/res: the start screen's font, the icon) copied to <internal files>/res;
 // - the Vulkan driver: the first driver in <external files>/drivers (a .so, or an adrenotools .zip: Turnip), copied to
@@ -75,6 +75,8 @@ public class TOTKRecompAndroidActivity extends SDLActivity {
     private static native void nativeImportDetail(String what);  // (a failure's cause, shown under it)
     private native String nativeBuildRomfs(String[] paths, long[] sizes);
     private static native boolean nativeCheckRomfs(int version, String[] paths, String versionTxt);
+    private static native boolean nativeCheckRomfsImage(int version, int fd);  // (fd: closed by the native side)
+    private static native String nativeImageLoose(int fd);
     private static native void nativeDriverPicked(String name);
     private static native void nativeModImportDone(String message);
     private static native void nativeLogFolderPicked(String name);
@@ -198,7 +200,10 @@ public class TOTKRecompAndroidActivity extends SDLActivity {
     // ---- the game code's builder: assets/gen, unpacked only when its bundled content changes (runtime/gamebuild.c)
     private void unpackGen(File dir) throws IOException {
         String[] top = getAssets().list("gen");
-        if (top == null || top.length == 0) return;  // (an APK without it: android/deps/build_gen_deps.sh not run)
+        if (top == null || top.length == 0) {  // (an APK without it - the usual one since the game runs natively,
+            if (dir.exists()) deleteTree(dir);  // runtime/native.c: an earlier app's unpacked copy, ~250 MB, goes)
+            return;
+        }
         String stamp;
         try (InputStream in = getAssets().open("gen.id")) {
             stamp = "sha256:" + new String(readAll(in), java.nio.charset.StandardCharsets.US_ASCII).trim();
@@ -276,7 +281,7 @@ public class TOTKRecompAndroidActivity extends SDLActivity {
                     self.startActivity(new Intent(android.provider.Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION));
                 }
             });
-            nativeImportDetail("Allow TOTKRecompAndroid to access all files (the page Android just opened), then choose the folder again");
+            nativeImportDetail("Allow TOTKDroid to access all files (the page Android just opened), then choose the folder again");
             nativeImportDone(5);
             return;
         }
@@ -767,13 +772,16 @@ public class TOTKRecompAndroidActivity extends SDLActivity {
     // exefs: the folder with main and main.npdm; romfs: the folder with Pack/ and Mals/ - in the picked folder or a few
     // levels below it (as runtime/ui/launcher.mm find_game)
     private Doc exefs, romfs;
+    // or a romfs.bin made already (on a PC: hactool's --romfs, from the game's own files) - one file to copy or use in
+    // place instead of ~304,000 (a phone's file provider choked on them), and the folder that holds it
+    private Doc romfsImage, romfsImageDir;
     private boolean packages;
     // A game code built already (totkgame.so with its .id, and .game: the game version it's for - a package made on a
     // PC from the same files), used instead of building it on the phone when it's for this version and this app
     private Doc preLib, preId, preGame;
 
     private void find(Uri tree, Doc dir, int depth) {
-        if (depth > 4 || (exefs != null && romfs != null)) return;
+        if (depth > 4 || (exefs != null && (romfs != null || romfsImage != null))) return;
         List<Doc> kids = children(tree, dir.id);
         if (preLib == null && named(kids, "totkgame.so") != null && named(kids, "totkgame.so.id") != null &&
             named(kids, "totkgame.so.game") != null) {
@@ -784,6 +792,11 @@ public class TOTKRecompAndroidActivity extends SDLActivity {
         if (exefs == null && named(kids, "main") != null && named(kids, "main.npdm") != null) exefs = dir;
         Doc pack = named(kids, "Pack"), mals = named(kids, "Mals");
         if (romfs == null && pack != null && pack.dir && mals != null && mals.dir) romfs = dir;
+        Doc ri = named(kids, "romfs.bin");
+        if (romfsImage == null && ri != null && !ri.dir) {
+            romfsImage = ri;
+            romfsImageDir = dir;
+        }
         // (romfs/'s own folders hold no exefs: through the file provider, listing their ~40000 files took long enough
         // for the setup to look stuck - BOTWRecompAndroid issue #17; TOTK's romfs has 300000)
         if (dir == romfs || dir == exefs) return;
@@ -900,7 +913,7 @@ public class TOTKRecompAndroidActivity extends SDLActivity {
         int result;
         nativeImportLooking();
         try {
-            exefs = romfs = null;
+            exefs = romfs = romfsImage = romfsImageDir = null;
             preLib = preId = preGame = null;
             listedTwice = 0;
             packages = false;
@@ -908,7 +921,7 @@ public class TOTKRecompAndroidActivity extends SDLActivity {
             root.id = DocumentsContract.getTreeDocumentId(tree);
             root.dir = true;
             find(tree, root, 0);
-            if (exefs == null || romfs == null) {
+            if (exefs == null || (romfs == null && romfsImage == null)) {
                 nativeImportDone(packages ? 3 : 2);
                 return;
             }
@@ -921,6 +934,10 @@ public class TOTKRecompAndroidActivity extends SDLActivity {
             int version = nativeGameVersion(head);  // (1.4.2; another version would be set up in its own folder)
             if (version == 0) {
                 nativeImportDone(4);
+                return;
+            }
+            if (romfsImage != null) {  // (a romfs.bin beside exefs/: taken over a romfs/ folder, one file instead of thousands)
+                importImage(tree, version);
                 return;
             }
             // (listed before nativeImportBegin removes an earlier setup: a folder that can't be used leaves it alone)
@@ -991,6 +1008,81 @@ public class TOTKRecompAndroidActivity extends SDLActivity {
             result = 5;
         }
         nativeImportDone(result);
+    }
+
+    // A document's data as a descriptor the native side reads and closes
+    private int docFd(Uri tree, Doc d) throws IOException {
+        android.os.ParcelFileDescriptor pfd =
+                getContentResolver().openFileDescriptor(DocumentsContract.buildDocumentUriUsingTree(tree, d.id), "r");
+        if (pfd == null) throw new IOException("Could not open " + d.name);
+        return pfd.detachFd();
+    }
+
+    // The game files from exefs/ and a romfs.bin made already (importGame found them): the image checked from its own
+    // tables (its version against exefs/'s, its file count), then copied whole - or, used in place, its path noted in
+    // romfs.link (runtime/services/fs.c opens it) - and the movies taken out of it (opened by path: hle/movie.c).
+    // Called from importGame's try: its exceptions end the setup there. (nativeImportDone here on every other end.)
+    private void importImage(Uri tree, int version) throws IOException {
+        if (!nativeCheckRomfsImage(version, docFd(tree, romfsImage))) {
+            nativeImportDone(6);
+            return;
+        }
+        String at = null;
+        if (importInPlace) {  // (checked before nativeImportBegin removes an earlier setup)
+            String dir = documentPath(romfsImageDir.id);
+            at = dir == null ? null : new File(dir, romfsImage.name).getPath();
+            if (at == null || !new File(at).canRead()) {
+                nativeImportDetail("this romfs.bin can't be used in place (" + (at == null ? romfsImage.id : at) +
+                        "): choose Copy them, or a folder on the phone's storage");
+                nativeImportDone(5);
+                return;
+            }
+        }
+        String name = DocumentsContract.getTreeDocumentId(tree);
+        File games = new File(nativeImportBegin(name.substring(name.lastIndexOf(':') + 1), version));
+        copied = reported = 0;
+        total = Math.addExact(at == null ? Math.max(romfsImage.size, 0) : 0, treeBytes(tree, exefs));
+        copyTree(tree, exefs, new File(games, "exefs"));
+        if (preLib != null && Integer.toString(version).equals(readText(tree, preGame).trim())) {
+            copyDoc(tree, preId, new File(games, "totkgame.so.id"));
+            copyDoc(tree, preLib, new File(games, "totkgame.so"));
+            Log.i(TAG, "game code from the picked folder: " + preLib.size + " bytes");
+        }
+        nativeImportProgress(copied, total);
+        int movies;
+        if (at != null) {
+            try (OutputStream o = new FileOutputStream(new File(games, "romfs.link"))) {
+                o.write((at + "\n").getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            }
+            Log.i(TAG, "game data used in place: " + at);
+            movies = docFd(tree, romfsImage);
+        } else {
+            File img = new File(games, "romfs.bin");
+            try (InputStream in = getContentResolver().openInputStream(DocumentsContract.buildDocumentUriUsingTree(tree, romfsImage.id));
+                 OutputStream o = new FileOutputStream(img)) {
+                if (in == null) throw new IOException("Could not open " + romfsImage.name);
+                byte[] buf = new byte[1 << 20];
+                for (int r; (r = in.read(buf)) > 0; ) {
+                    o.write(buf, 0, r);
+                    copied += r;
+                    if (copied - reported > (16 << 20)) {
+                        reported = copied;
+                        nativeImportProgress(copied, total);
+                    }
+                }
+            }
+            if (romfsImage.size >= 0 && img.length() != romfsImage.size)
+                throw new IOException("romfs.bin copied " + img.length() + " of its " + romfsImage.size + " bytes: check free storage");
+            Log.i(TAG, "game data copied: " + img.length() + " bytes");
+            movies = android.os.ParcelFileDescriptor.open(img, android.os.ParcelFileDescriptor.MODE_READ_ONLY).detachFd();
+        }
+        nativeImportProgress(total, total);
+        String failed = nativeImageLoose(movies);
+        if (failed != null) {
+            nativeImportDone(5);
+            return;
+        }
+        nativeImportDone(0);
     }
 
     private void importDriver(Uri f) {
@@ -1229,7 +1321,7 @@ public class TOTKRecompAndroidActivity extends SDLActivity {
         if (android.os.Build.VERSION.SDK_INT >= 30 && !android.os.Environment.isExternalStorageManager()) {
             self.runOnUiThread(() -> self.startActivity(new Intent(android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
                     Uri.parse("package:" + self.getPackageName()))));
-            nativeModImportDone("0|Allow TOTKRecompAndroid to access all files (the page Android just opened), then import the mod again.");
+            nativeModImportDone("0|Allow TOTKDroid to access all files (the page Android just opened), then import the mod again.");
             return;
         }
         importMod(dir);

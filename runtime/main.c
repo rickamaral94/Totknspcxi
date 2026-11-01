@@ -1,4 +1,4 @@
-// TOTKRecompAndroid entry: load modules, set up the kernel, run nn::init::Start on the main thread.
+// TOTKDroid entry: load modules, set up the kernel, run nn::init::Start on the main thread.
 #include <SDL3/SDL.h>
 #ifdef __ANDROID__
 #include <SDL3/SDL_main.h>  // (main() becomes SDL_main, which SDLActivity runs)
@@ -6,6 +6,7 @@
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #include "gamelib.h"
 #include "paths.h"
@@ -175,7 +176,8 @@ static void boot(const char *root) {
     snprintf(exefs, sizeof exefs, "%s/exefs", root);
     snprintf(romfs, sizeof romfs, "%s/romfs", root);
     snprintf(npdm_path, sizeof npdm_path, "%s/main.npdm", exefs);
-    {   // the game files used in place: romfs.link names the player's own romfs/ (no romfs.bin; the movies from there too)
+    {   // the game files used in place: romfs.link names the player's own romfs/ (no romfs.bin; the movies from there
+        // too) - or their own romfs.bin, read as ours would be (the movies taken out of it into romfs/ at setup)
         char link[1024], target[1024] = "";
         snprintf(link, sizeof link, "%s/romfs.link", root);
         FILE *f = fopen(link, "rb");
@@ -184,16 +186,20 @@ static void boot(const char *root) {
             fclose(f);
             target[n] = 0;
             while (n && (target[n - 1] == '\n' || target[n - 1] == '\r')) target[--n] = 0;
-            if (n) g_romfs_link = strdup(target), g_romfs_dir = g_romfs_link;
+            struct stat st;
+            if (n) g_romfs_link = strdup(target);
+            if (n && !(stat(target, &st) == 0 && S_ISREG(st.st_mode))) g_romfs_dir = g_romfs_link;
         }
     }
     if (!g_romfs_dir) g_romfs_dir = strdup(romfs);
 
     char why[512];
+    // (the settings first: Native game code is one of them. Booting straight in - no start screen, which loads them
+    // before this - chose before they were read: the setting on, the game recompiled anyway)
+    { extern void settings_load(void); settings_load(); }
     native_begin_boot();  // (Native game code: the game's own code runs, no totkgame.so - runtime/native.c)
     if (!native_on() && !gamelib_load(root, why, sizeof why)) FATAL("%s\n", why);
     loader_load(exefs);
-    { extern void settings_load(void); settings_load(); }
     kernel_init();
     if (!native_on()) dispatch_init();
     native_prepare();

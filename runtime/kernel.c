@@ -1,4 +1,5 @@
 // A small Horizon kernel: handles, threads, synchronization, memory, and the SVC dispatcher.
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -67,7 +68,10 @@ static void handle_close(uint32_t h) {
 // Threads blocked in WaitSynchronization; object signals wake only these (caller holds g_klock).
 static KThread *g_syncwaiters;
 
-static void wake(KThread *t) { pthread_cond_signal(&t->cond); }
+static void wake(KThread *t) {
+    __atomic_add_fetch(&t->wake_gen, 1, __ATOMIC_RELEASE);
+    pthread_cond_signal(&t->cond);
+}
 
 void kernel_signal(KObject *o) {
     // caller holds g_klock
@@ -100,10 +104,52 @@ static pthread_cond_t g_nothread_cond = PTHREAD_COND_INITIALIZER;
 // takes the presenting thread's: a frame's busy time is its period minus this.
 __thread uint64_t g_blocked_ns;
 
+// A wait first spins a few microseconds (g_klock released, as the condition wait does) for a wake: the game's job
+// workers hand work to each other hundreds of times a frame, and each wake through the futex waited for the host's
+// scheduler (TOTK at 60 fps: the presenting thread waits 13-28 ms a frame on its workers, whose own work is ~8 ms a
+// core). In-run A/B at Frame rate 60 in the user's cave save (2026-10-31): 20 us +1.1%, 150 us +3.6%, 400 us +4.3%.
+// LARECOMP_KSPIN_US=<us> (default 200 on Android; 0: none); LARECOMP_AB=<n>:kspin (1: the spin, 0: none).
+static int kspin_ns(void) {
+    static int ns = -1;
+#ifdef __ANDROID__
+    enum { KSPIN_DEFAULT_US = 200 };
+#else
+    enum { KSPIN_DEFAULT_US = 0 };  // (measured on the phone only)
+#endif
+    if (ns < 0) ns = (getenv("LARECOMP_KSPIN_US") ? atoi(getenv("LARECOMP_KSPIN_US")) : KSPIN_DEFAULT_US) * 1000;
+#ifdef __ANDROID__
+    static int ab = -1;
+    if (ab < 0) ab = getenv("LARECOMP_AB") != NULL;
+    if (ab) {
+        extern int vk_ab(const char *what);
+        int v = vk_ab("kspin");
+        if (v >= 0) return v == 1 ? ns : 0;
+    }
+#endif
+    return ns;
+}
 static bool kwait(int64_t timeout_ns, const struct timespec *ts) {
     pthread_cond_t *cv = t_cur ? &t_cur->cond : &g_nothread_cond;
     uint64_t t0 = plat_now_ns();
     bool r = true;
+    int spin = t_cur ? kspin_ns() : 0;
+    if (spin && (timeout_ns < 0 || timeout_ns > spin)) {
+        uint32_t gen = __atomic_load_n(&t_cur->wake_gen, __ATOMIC_ACQUIRE);
+        pthread_mutex_unlock(&g_klock);
+        bool woke = false;
+        while (!woke && plat_now_ns() - t0 < (uint64_t)spin)
+            for (int i = 0; i < 32 && !woke; i++) {
+                woke = __atomic_load_n(&t_cur->wake_gen, __ATOMIC_ACQUIRE) != gen;
+#if defined(__aarch64__)
+                __asm__ volatile("yield");
+#endif
+            }
+        pthread_mutex_lock(&g_klock);
+        if (woke || __atomic_load_n(&t_cur->wake_gen, __ATOMIC_ACQUIRE) != gen) {
+            g_blocked_ns += plat_now_ns() - t0;
+            return true;
+        }
+    }
     if (timeout_ns < 0) pthread_cond_wait(cv, &g_klock);
     else r = pthread_cond_timedwait(cv, &g_klock, ts) == 0;
     g_blocked_ns += plat_now_ns() - t0;
@@ -117,6 +163,16 @@ typedef struct { uint64_t addr, size; uint32_t type, perm; } Region;
 static Region *regions;
 static int nregions, regions_cap;
 static pthread_mutex_t g_rlock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t g_alias_map_lock = PTHREAD_MUTEX_INITIALIZER;
+bool kernel_range_unmapped(uint64_t addr, uint64_t size) {
+    if (!size || addr > UINT64_MAX - size) return false;
+    bool free_range = true;
+    pthread_mutex_lock(&g_rlock);
+    for (int i = 0; i < nregions; i++)
+        if (addr < regions[i].addr + regions[i].size && regions[i].addr < addr + size) { free_range = false; break; }
+    pthread_mutex_unlock(&g_rlock);
+    return free_range;
+}
 #define PHYSICAL 0x7  // MapPhysicalMemory's regions' type: merged with their neighbours, unmapped by range
 static uint64_t heap_size;
 #ifdef __ANDROID__
@@ -433,6 +489,50 @@ void kernel_blocking_end(void) {
 }
 #endif
 
+#ifdef __ANDROID__
+// The game's busiest threads since the last call (user + system time from /proc), at most `max`, for the performance
+// hint session (platform/android.c): the frame waits on the game's job workers, whose clocks no hint raised.
+int kernel_hot_tids(int32_t *out, int max) {
+    typedef struct { int32_t tid; uint64_t d; } Hot;
+    Hot hot[16];
+    int n = 0;
+    if (max > 16) max = 16;
+    static KThread *list[512];  // (taken under g_klock, read without it: a KThread is never freed)
+    int nl = 0;
+    pthread_mutex_lock(&g_klock);
+    for (KThread *t = g_threads; t && nl < 512; t = t->anext)
+        if (t->started && !t->finished && t->tid > 0) list[nl++] = t;
+    pthread_mutex_unlock(&g_klock);
+    for (int li = 0; li < nl; li++) {
+        KThread *t = list[li];
+        char path[64], buf[512];
+        snprintf(path, sizeof path, "/proc/self/task/%d/stat", (int)t->tid);
+        FILE *f = fopen(path, "r");
+        if (!f) continue;
+        size_t len = fread(buf, 1, sizeof buf - 1, f);
+        fclose(f);
+        buf[len] = 0;
+        const char *q = strrchr(buf, ')');  // (fields after the name: state is 3rd, utime 14th, stime 15th)
+        unsigned long long ut = 0, st = 0;
+        if (!q || sscanf(q + 2, "%*c %*d %*d %*d %*d %*d %*u %*u %*u %*u %*u %llu %llu", &ut, &st) != 2) continue;
+        uint64_t ticks = ut + st, d = t->cpu_ticks ? ticks - t->cpu_ticks : 0;
+        t->cpu_ticks = ticks;
+        int k = n < max ? n++ : max;  // (insertion by d, the smallest dropped)
+        while (k > 0 && hot[k - 1].d < d) { if (k < max) hot[k] = hot[k - 1]; k--; }
+        if (k < max) hot[k] = (Hot){t->tid, d};
+        static int log = -1;  // (LARECOMP_LOG_HOT_THREADS=1: each look's busy threads, with their virtual core)
+        if (log < 0) log = getenv("LARECOMP_LOG_HOT_THREADS") != NULL;
+        if (log && d > 20)
+            LOG("[kernel] busy thread t%llu (tid %d): core %d prio %d, %llu ticks\n", (unsigned long long)t->id, (int)t->tid,
+                __atomic_load_n(&t->core, __ATOMIC_ACQUIRE), t->prio, (unsigned long long)d);
+    }
+    int m = 0;
+    for (int i = 0; i < n; i++)
+        if (hot[i].d) out[m++] = hot[i].tid;
+    return m;
+}
+#endif
+
 static void *thread_main(void *arg) {
     KThread *t = arg;
     t_cur = t;
@@ -502,7 +602,14 @@ static uint32_t thread_set_core_mask(KThread *t, int ideal, uint64_t mask) {
 #endif
         __atomic_store_n(&t->core, core, __ATOMIC_RELEASE);
 #ifdef __ANDROID__
-        if (core != old_core && t->started && c0_on && !t->core0_evicted) {
+        // (a safe-point handover only for a thread holding core 0, or one moved onto it - which may be running on
+        // another core right now. One moved off core 0 while not holding it - waiting, woken below, or blocked
+        // elsewhere - sees its new core at its next acquire. Marking those too kept g_fnprof's bit 2 set while they
+        // stayed blocked: every function entry of the game went through fnprof_hit and kernel_preempt_point, ~8% of
+        // the game threads' time with their TLS lookups, TOTK walking 2026-10-30. LARECOMP_C0_EVICT_ALL=1: as before)
+        static int evict_all = -1;
+        if (evict_all < 0) evict_all = getenv("LARECOMP_C0_EVICT_ALL") != NULL;
+        if (core != old_core && t->started && c0_on && !t->core0_evicted && (t->core0_held || core == 0 || evict_all)) {
             __atomic_store_n(&t->core0_evicted, true, __ATOMIC_RELEASE);
             if (c0_nevicted++ == 0) __atomic_fetch_or(&g_fnprof, 2, __ATOMIC_SEQ_CST);
         }
@@ -940,6 +1047,8 @@ static void test_crash(void) {
     *(volatile uint32_t *)(uintptr_t)0 = 0;
 }
 
+uint64_t g_present_tid;  // (nvn/objects.c: the guest thread that presents)
+uint64_t g_sync_tid;     // (nvn/objects.c: the guest thread that last waited on a fence)
 void rt_svc(Cpu *c, uint32_t imm, uint64_t pc) {
     rt_unwind_point();
     test_crash();
@@ -953,12 +1062,26 @@ void rt_svc(Cpu *c, uint32_t imm, uint64_t pc) {
 #ifdef __ANDROID__
     kernel_preempt_point();
     bool blocks = svc_blocks(imm);
+    bool traced = blocks && me && me->id == g_present_tid;  // (LARECOMP_FRAME_TIMELINE: the presenting thread's waits)
+    extern void vk_tl(const char *what, uint64_t a, uint64_t b);
+    bool traced_sync = blocks && me && !traced && me->id == g_sync_tid;  // (and the fence-waiting thread's)
+    if (traced_sync) {  // (its yields: the first of a run only - it spins on them)
+        static bool yielding;
+        bool y = imm == 0xb;
+        if (y && !yielding) vk_tl("sync thread: yielding (lr, core)", c->x[30], (uint64_t)__atomic_load_n(&me->core, __ATOMIC_ACQUIRE));
+        if (y) traced_sync = false;
+        yielding = y;
+    }
+    if (traced) vk_tl("game: blocking svc (number, lr)", imm, c->x[30]);
+    if (traced_sync) vk_tl("sync thread: blocking svc (number, lr)", imm, c->x[30]);
     if (blocks) core0_release(t_cur);
     // (SleepThread 0 / -1 / -2: a yield; diag.h)
     DIAG_PUSH(imm == 0x0B && (int64_t)c->x[0] <= 0 ? DG_SPIN : blocks ? DG_SVC_BLOCK : DG_SVC, (int)imm);
     svc_entry(c, imm, pc);
     DIAG_POP();
     if (blocks) core0_acquire(t_cur);
+    if (traced) vk_tl("game: blocking svc end (number)", imm, 0);
+    if (traced_sync) vk_tl("sync thread: blocking svc end (number)", imm, 0);
     kernel_preempt_point();
 #else
     svc_entry(c, imm, pc);
@@ -1058,8 +1181,10 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
             x[0] = R_INVALID_ADDRESS;
             break;
         }
+        pthread_mutex_lock(&g_alias_map_lock);
         memcpy((void *)x[0], (void *)x[1], x[2]);
         region_add(x[0], x[2], 0xB, 3);
+        pthread_mutex_unlock(&g_alias_map_lock);
         x[0] = R_OK;
         break;
     case 0x05:  // UnmapMemory(dst, src, size): copy back
@@ -1104,7 +1229,22 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
     case 0x0A: longjmp(t_cur->unwind, 1);  // ExitThread: back to thread_main, which signals the thread object
     case 0x0B: {  // SleepThread (in slices of at most 50 ms: a reboot doesn't wait out a long sleep)
         int64_t ns = (int64_t)x[0];
-        if (ns <= 0) { sched_yield(); break; }
+        if (ns <= 0) {
+            // A yield returns at once, without the host's: TOTK's job workers spin on yields, ~13000 every 2 s each, and a
+            // host sched_yield took ~30 us on average - each look at the job queue came that much later (A/B: +6.2% fps
+            // in the Great Sky Island's woods, 2026-10-31). On core 0 the yield still hands the core on (its queue,
+            // svc_blocks). LARECOMP_HOST_YIELD=1: the host's yield as before; =2: off core 0 only skipped.
+#ifdef __ANDROID__
+            static int host_yield = -1;
+            if (host_yield < 0) host_yield = getenv("LARECOMP_HOST_YIELD") ? atoi(getenv("LARECOMP_HOST_YIELD")) : 0;
+            extern int vk_ab(const char *what);
+            int ab = vk_ab("yieldall");
+            bool c0 = t_cur && __atomic_load_n(&t_cur->core, __ATOMIC_ACQUIRE) == 0;
+            if (host_yield != 1 && (!c0 || (ab < 0 ? host_yield == 0 : ab == 1))) break;
+#endif
+            sched_yield();
+            break;
+        }
         for (uint64_t end = plat_now_ns() + (uint64_t)ns, now; !g_rt_unwind && (now = plat_now_ns()) < end;) {
             uint64_t d = end - now < 50000000 ? end - now : 50000000;
             struct timespec ts = {(time_t)(d / 1000000000), (long)(d % 1000000000)};
@@ -1177,9 +1317,11 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
         KObject *o = handle_get((uint32_t)x[0]);
         if (!o || o->type != KOBJ_SHMEM) { x[0] = R_INVALID_HANDLE; break; }
         KSharedMem *s = (KSharedMem *)o;
+        pthread_mutex_lock(&g_alias_map_lock);
         memset((void *)x[1], 0, x[2]);
         s->guest_addr = x[1];  // HLE services write straight into the guest's mapping
         region_add(x[1], x[2], 6, 3);
+        pthread_mutex_unlock(&g_alias_map_lock);
         if (s->on_map) s->on_map(s);
         x[0] = R_OK;
         break;
@@ -1313,14 +1455,22 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
         x[1] = v;
         break;
     }
-    case 0x2C:  // MapPhysicalMemory(addr, size): zero pages, backed when first touched
-        plat_discard(x[0], x[1]);
+    case 0x2C:  // MapPhysicalMemory(addr, size): Horizon maps only the unmapped pages and preserves already-mapped pages
+                // (credit: valentderah/totk-pc-recomp runtime/memory.c - TotK's heaps grow by re-mapping ranges they partly
+                // own; UnmapPhysicalMemory already discards unmapped pages).
+        pthread_mutex_lock(&g_alias_map_lock);
+#ifdef __ANDROID__
+        { extern void vk_vamm_before_map(uint64_t addr, uint64_t size); vk_vamm_before_map(x[0], x[1]); }
+#endif
         region_add(x[0], x[1], PHYSICAL, 3);
+        pthread_mutex_unlock(&g_alias_map_lock);
         x[0] = R_OK;
         break;
     case 0x2D:  // UnmapPhysicalMemory(addr, size): any range of what was mapped, its memory given back
+        pthread_mutex_lock(&g_alias_map_lock);
         region_remove_physical(x[0], x[1]);
         plat_discard(x[0], x[1]);
+        pthread_mutex_unlock(&g_alias_map_lock);
         x[0] = R_OK;
         break;
     case 0x34: x[0] = svc_wait_for_address(x[0], (uint32_t)x[1], (int32_t)x[2], (int64_t)x[3]); break;

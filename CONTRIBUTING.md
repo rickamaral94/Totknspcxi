@@ -1,4 +1,4 @@
-# Contributing to TOTKRecompAndroid
+# Contributing to TOTKDroid
 
 Thanks for wanting to help! Bug reports, testing on different hardware and code contributions are all welcome.
 

@@ -76,11 +76,11 @@ static bool keep(const char *rel) {
 }
 // romfs_check_set / romfs_check_dir: the setup's check of a romfs/ against its exefs/'s version (n files: the key
 // files first, the rest filler; dropped: a key file left out)
-static const char *keys[] = {"Actor/ActorInfo.product.sbyml", "Pack/Bootup.pack", "Pack/TitleBG.pack", "System/Version.txt"};
+static const char *keys[] = {"Pack/Bootup.Nin_NX_NVN.pack.zs", "System/AddressTable/Product.143.Nin_NX_NVN.atbl.byml.zs", "System/RegionLangMask.txt"};
 static int set_check(int version, int n, int dropped, const char *txt, int want, const char *want_why) {
     const char **p = malloc(sizeof *p * (size_t)n);
     int k = 0;
-    for (int i = 0; i < 4 && k < n; i++) if (i != dropped) p[k++] = keys[i];
+    for (int i = 0; i < 3 && k < n; i++) if (i != dropped) p[k++] = keys[i];
     while (k < n) p[k++] = "Model/filler.sbfres";
     char why[256] = "";
     int r = romfs_check_set(version, p, n, txt, why, sizeof why);
@@ -93,20 +93,21 @@ static int set_check(int version, int n, int dropped, const char *txt, int want,
 }
 static int set_checks(const char *game) {
     int bad = 0;
-    bad += set_check(182, 41056, -1, "1.8.2", ROMFS_SET_OK, NULL);
-    bad += set_check(182, 41056, -1, "1.0.0", ROMFS_SET_OTHER_VERSION, "Version.txt says 1.0.0, exefs/main is 1.8.2");
-    bad += set_check(100, 39678, -1, "\xEF\xBB\xBF 1.0.0\r\n", ROMFS_SET_OK, NULL);  // (a byte order mark, a line end)
-    bad += set_check(100, 39677, 0, "1.0.0", ROMFS_SET_MISSING, "39677 files, a whole 1.0.0 has 39678: 1 missing, among them Actor/ActorInfo.product.sbyml");
-    bad += set_check(100, 43573, -1, "1.0.0", ROMFS_SET_OK, NULL);  // (more files: mods)
-    bad += set_check(160, 41051, 3, "", ROMFS_SET_MISSING, "among them System/Version.txt");  // (no Version.txt)
-    bad += set_check(0, 5, -1, "1.2.3", ROMFS_SET_OK, NULL);  // (a version without counts)
+    bad += set_check(143, 304243, -1, "", ROMFS_SET_OK, NULL);  // TOTK has no System/Version.txt
+    bad += set_check(143, 304243, -1, "1.4.2", ROMFS_SET_OTHER_VERSION, "Version.txt says 1.4.2, exefs/main is 1.4.3");
+    bad += set_check(143, 304243, -1, "\xEF\xBB\xBF 1.4.3\r\n", ROMFS_SET_OK, NULL);
+    bad += set_check(143, 304242, 0, "", ROMFS_SET_MISSING, "304242 files, a whole 1.4.3 has 304243: 1 missing, among them Pack/Bootup.Nin_NX_NVN.pack.zs");
+    bad += set_check(143, 304300, -1, "", ROMFS_SET_OK, NULL);  // mods may add files
+    bad += set_check(142, 5, -1, "", ROMFS_SET_OK, NULL);  // no verified count yet
+    bad += set_check(100, 5, -1, "", ROMFS_SET_OK, NULL);
+    bad += set_check(0, 5, -1, "1.2.3", ROMFS_SET_OK, NULL);
     char why[256] = "", dir[1024];
-    if (romfs_check_dir(100, game, why, sizeof why) != ROMFS_SET_MISSING || !strstr(why, "romfs/ has 9 files")) {
+    if (romfs_check_dir(143, game, why, sizeof why) != ROMFS_SET_MISSING || !strstr(why, "romfs/ has 9 files")) {
         printf("check_dir: %s\n", why);  // (the image's files: hidden ones left out)
         bad++;
     }
     snprintf(dir, sizeof dir, "%s_v", game);
-    if (romfs_check_dir(182, dir, why, sizeof why) != ROMFS_SET_OTHER_VERSION || !strstr(why, "says 1.6.0")) {
+    if (romfs_check_dir(143, dir, why, sizeof why) != ROMFS_SET_OTHER_VERSION || !strstr(why, "says 1.6.0")) {
         printf("check_dir version: %s\n", why);
         bad++;
     }

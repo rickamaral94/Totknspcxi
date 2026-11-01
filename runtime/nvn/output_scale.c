@@ -23,6 +23,8 @@
 #define MAX_TEX 16384.0
 #define SCENE_LINES 900.0  // (BOTW's docked 3D scene: 1600x900)
 
+int g_present_vsyncs;  // (nvn/objects.c: the vsyncs the last present waited for, 0 before the first)
+
 // Dynamic resolution: a factor on the Match display scale, 0.5 .. 1 in 0.05 steps.
 static double g_dyn = 1.0;
 static double g_dyn_gpu_sum, g_dyn_dt_sum, g_last_t;
@@ -52,18 +54,15 @@ static void dyn_update(double now, double gpu_ms) {
     double dt = (now - g_last_t) * 1000.0;
     g_last_t = now;
     if (dt > 250) { dyn_window_start(); return; }  // (loading, menus, a stall: not the GPU's steady state)
-    double want = framepace_on() && framepace_target() > 0 ? 1000.0 / framepace_target() : 1000.0 / 30;  // (ms a frame)
+    // (ms a frame: BOTW's pacer's target, else the present's interval - TOTK at 60 presents every vsync; with 30 ms
+    // assumed there, frames of 19-22 ms looked like room and its dynamic resolution rose to the top, 2026-10-31)
+    double want = framepace_on() && framepace_target() > 0 ? 1000.0 / framepace_target()
+                : g_present_vsyncs > 0 ? 1000.0 / 60 * g_present_vsyncs : 1000.0 / 30;
 #ifdef __ANDROID__
-    // The frame rate it keeps: 60 with Frame rate at 60 fps (TOTK: rt_fps60, the frame controller allowed interval 1)
-    // outside a cutscene (held at 30: nvn/objects.c), else 30 - Auto's 60 comes by itself where the GPU has room
-    // (aiming at Auto's tries for 60 took BOTW's scale to its floor while the game stayed at 30: POCO F7 Ultra, 2026-10-25)
-    {
-        extern bool rt_fps60(void), rt_cutscene_now(void);
-        want = g_settings.fps_mode == 2 && rt_fps60() && !rt_cutscene_now() ? 1000.0 / 60 : 1000.0 / 30;
-        extern int fg_base_fps(void);  // (Frame generation: the game held at its multiplier's base, 30 or 40)
-        int base = fg_base_fps();
-        if (base > 0) want = 1000.0 / base;
-    }
+    // Frame generation holds the real game at its own base rate, independently of the NVN interval.
+    extern int fg_base_fps(void);
+    int base = fg_base_fps();
+    if (base > 0) want = 1000.0 / base;
 #endif
     g_dyn_dt_sum += dt;
     g_dyn_n++;

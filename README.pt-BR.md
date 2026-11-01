@@ -1,10 +1,10 @@
-# TOTKRecompAndroid
+# TOTKDroid
 
 [English](README.md) | **Português**
 
-Uma recompilação estática de *The Legend of Zelda: Tears of the Kingdom* (Nintendo Switch, versão **1.4.3**, e a **1.4.2**
-só recompilada) para Android, nos primeiros passos. **Não é emulação**: o código ARM64 do jogo vira C compilado para o seu celular, e os
-gráficos (NVN) são traduzidos para Vulkan.
+Um porte nativo para Android de *The Legend of Zelda: Tears of the Kingdom* **1.4.3**, com recompilação estática opcional.
+O código ARM64 do jogo roda no celular e os gráficos (NVN) são traduzidos para Vulkan. Este fork também mantém
+a **1.4.2** e a **1.0.0** experimental, que rodam apenas recompiladas.
 
 > [!NOTE]
 > A **1.0.0** (o jogo base sozinho, importado sem update) é um experimento nas mesmas condições da 1.4.2 abaixo, e nunca
@@ -19,10 +19,15 @@ Feito sobre o motor do **[LAS Recomp](https://github.com/peiikai/LASRecomp)**, d
 *Link's Awakening*), do seu porte para Android **[LASRecompAndroid](https://github.com/mamcjr/LASRecompAndroid)** e do
 **[BOTWRecompAndroid](https://github.com/mamcjr/BOTWRecompAndroid)**, de onde este repositório saiu.
 
+Baseado no upstream **TOTKDroid** (antes TOTKRecompAndroid), sincronizado até `6b785c2`.
+Este fork mantém importação NSP/XCI, diagnósticos, geração de quadros e o recompilador no celular.
+O id Android continua `com.totkrecompandroid`; atualizar uma instalação também exige a mesma chave de assinatura.
+
 > [!WARNING]
-> **No começo.** No celular (com o driver Turnip) o jogo carrega um save na caverna do prólogo e dá para mover o Link, a
-> cerca de 30 fps; pouco além disso foi jogado. O plano e o estado de cada fase estão em
-> [docs/TOTK-PORT.md](docs/TOTK-PORT.md).
+> **Resultados da beta upstream; esta integração ainda precisa de teste no aparelho.** No celular (com o driver Turnip) um jogo novo ou um save vão do prólogo à caverna e à Grande Ilha Celestial;
+> a maior parte do mapa ainda não foi jogada. Com Vídeo > Taxa de quadros 60, um POCO F7 Ultra frio segura 60 fps no
+> prólogo e 54-57 no bosque da ilha; em sessões longas o calor do celular baixa isso para ~45. O plano e o estado de
+> cada fase estão em [docs/TOTK-PORT.md](docs/TOTK-PORT.md). Versões: [Releases](https://github.com/mamcjr/TOTKDroid/releases).
 
 ## Plataforma
 
@@ -37,13 +42,18 @@ Android.
   com o BOTW 1.8.2 vale. Os patches do jogo e muito do que se sabe dele vêm do
   [MacNativeGames](https://github.com/ly05010419/MacNativeGames), que roda exatamente esta versão nativa em Macs e
   iPhones.
-- O código do jogo é gerado e compila: 228.238 funções do `main` e 40.516 do SDK, num `totkgame.so` de 224 MB.
-- No celular (POCO F7 Ultra, driver Turnip): a tela título e depois um save carregado na caverna do prólogo, com o
-  Link controlável e o HUD e as dicas em português, a cerca de 30 fps andando (Turnip). A cena fica em 1600x896 (a resolução dinâmica
-  do jogo dava quadros pretos a cada troca) e o mundo anda pelo tempo real. As vozes dos personagens, a música e o
-  ambiente chegam à mixagem (o decodificador Opus e os splitters do renderizador de áudio; conferido gravando a saída
-  na 1.4.2, a versão anterior do porte). Com o driver da própria Qualcomm também roda, a cerca de 15 fps.
-- Falta: os vídeos (não conferidos), o widescreen, os 60 fps, o desempenho além da caverna.
+- A 1.4.3 usa execução nativa por padrão; o modo recompilado continua selecionável. A 1.4.2 e a 1.0.0 usam
+  recompilação, salvo override explícito de desenvolvimento. O compilador continua incluído por padrão
+  (`-Ptotk.gameBuilder=false` gera um APK menor, apenas nativo).
+- No celular (POCO F7 Ultra, driver Turnip): a tela título, jogo novo e saves; o prólogo, a caverna (as paredes e o
+  fundo das cutscenes iluminados, como no Switch) e a Grande Ilha Celestial, com o HUD, as legendas e as vozes. A
+  água, o mar de nuvens, a grama e a iluminação (sem os quadrados pretos) ficam como no Switch. O mundo anda pelo
+  tempo real, então quadros acima de 16,7 ms não deixam o jogo em câmera lenta. As vozes, a música e o ambiente chegam
+  à mixagem. Com o driver da própria Qualcomm também roda, mais devagar.
+- Taxa de quadros: Vídeo > Taxa de quadros tem 30, Auto (prefere 60, cutscenes em 30) e 60. A resolução dinâmica do
+  jogo fica desligada; a cena é 1600x896, escalada para a saída (FSR 1, GSR, SMAA / FXAA).
+- Vídeo > Proporção > Desbloqueado: o mundo e os menus ocupam a tela larga (o HUD fica nos 16:9 do meio).
+- Falta: a maior parte do mapa, 60 fps sustentados com o celular quente, o HUD nas bordas da tela no modo largo.
 
 > [!IMPORTANT]
 > Como o LAS Recomp, este projeto é feito quase inteiramente com IA (Claude, da Anthropic, pelo Claude Code), dirigido,
@@ -60,8 +70,7 @@ Android.
 
 O app (e a ferramenta `nximport` no PC) monta o jogo direto do NSP ou XCI do jogo base e do NSP do update
 (`0100F2C0115B6800`: a 1.4.3 é a v720896, a 1.4.2 a v655360), usando as `prod.keys` (e, quando um pacote não tem ticket, as `title.keys`) do **seu
-próprio console**. Nenhuma chave vem com este projeto nem é baixada. O jogo base sozinho é a 1.0.0, que este app não
-roda: o update é obrigatório.
+próprio console**. Nenhuma chave vem com este projeto nem é baixada. O jogo base sozinho é importado como 1.0.0 experimental; o update é opcional.
 
 - **No app:** **Arquivos do jogo > Importar NSP/XCI > Pacote do jogo** e **Update**, depois **prod.keys** /
   **title.keys** e **Importar**. O setup anterior continua jogável até o novo estar completo e conferido. **Lembrar as
@@ -85,10 +94,20 @@ Com o SDK / NDK do Android e o seu dump em `Dump/0100F2C0115B6000/` (`exefs/` e 
 ```bash
 cd tools && python totk_dump.py                              # confere o dump (módulos, versão, romfs)
 cd android/totkrecompandroid && ./gradlew assembleDebug      # o app
-android/build_gamelib.sh Dump/0100F2C0115B6000/exefs         # o código do jogo (~20 min num PC)
-ROMFS_HOST=1 android/push_game.sh Dump/0100F2C0115B6000      # arquivos e código do jogo para o celular
+ROMFS_HOST=1 android/push_game.sh Dump/0100F2C0115B6000      # os arquivos do jogo para o celular
+# opcional, só para desenvolvimento - o código recompilado (rode com LARECOMP_NATIVE=0):
+# android/build_gamelib.sh Dump/0100F2C0115B6000/exefs       # ~20 min num PC, depois push_game.sh de novo
 android/run_boot.sh 120                                      # inicia o jogo, log em android/out/boot.log
 ```
+
+## Apoie o projeto
+
+O TOTKDroid é um projeto gratuito e independente. Se você gosta dele e quer apoiar seu desenvolvimento, pode me
+patrocinar pelo GitHub. Esse apoio me ajuda a dedicar tempo à correção de bugs, à melhoria do desempenho e da
+compatibilidade e às próximas versões. O patrocínio é totalmente opcional: não libera recursos exclusivos nem garante
+correções específicas. Relatos de bugs, testes em outros aparelhos e contribuições também ajudam muito.
+
+[![Patrocine no GitHub](https://img.shields.io/badge/Patrocine-no%20GitHub-EA4AAA?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/mamcjr)
 
 ## Créditos
 
@@ -98,6 +117,11 @@ android/run_boot.sh 120                                      # inicia o jogo, lo
   Macs e iPhones: os sítios de patch da 1.4.3 verificados por ele (a resolução fixa, o passo de quadro em tempo real, o
   relógio de pano e cabelo, o tamanho de renderização) e o que ele descobriu (o flag de early-Z e o arredondamento da
   altura de bloco do NVN, as leituras de profundidade e a comparação de sombra D16, o contador de visibilidade).
+- [valentderah/totk-pc-recomp](https://github.com/valentderah/totk-pc-recomp) (MIT), uma recompilação estática do Tears
+  of the Kingdom 1.4.3 para Windows/Vulkan: o dimensionamento e o scissor de render passes sem anexos (luz ambiente do
+  interior nas rochas da caverna), a ordem de canais dos formatos NVN empacotados de 16 bits (`RGBA4`/`RGB5`/`RGB5A1`/`RGB565`
+  e `BGR565`/`BGR5`/`BGR5A1`/`A1BGR5`/`BGRX8`/`BGRA8` nos mapas de normais e mistura do terreno), a preservação de
+  páginas já mapeadas em `MapPhysicalMemory` e os achados documentados da 1.4.3.
 - [LASRecompAndroid](https://github.com/mamcjr/LASRecompAndroid), o seu porte para Android, e
   [BOTWRecompAndroid](https://github.com/mamcjr/BOTWRecompAndroid) (o README dele em [docs/botw/](docs/botw/)): o app,
   a compilação do código do jogo no celular, os controles de toque, os mods, a compatibilidade de drivers, os menus em

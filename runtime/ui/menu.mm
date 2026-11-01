@@ -671,7 +671,7 @@ static void tab_display(void) {
                "Adds the game's busiest threads (up to 3) to Android's performance hint session, beside the presenting and "
                "render threads, so a late frame raises their clocks too. Gained nothing in BOTW; measure it with Settings > "
                "Files > Compare: ADPF threads. Applies at once.");
-    opt_toggle("Native game code (experimental)", &g_settings.native_code, false,
+    opt_toggle("Native game code (experimental)", &g_settings.native_code, true,
                "Runs the game's own code directly on the phone's CPU instead of the game code built at setup: no build "
                "needed. An experiment - report what goes wrong. Applies the next time the game starts.");
     opt_toggle("32-bit shader math", &g_settings.shader_int32, false,
@@ -687,7 +687,7 @@ static void tab_display(void) {
         if (opt_action("Lossless.dll", value.c_str(),
                        "Your own Lossless.dll from Lossless Scaling (bought on Steam): its frame generation shaders are "
                        "translated and kept in the app's private storage; the DLL itself is not kept. A Lossless.dll that "
-                       "doesn't fit this version of TOTKRecompAndroid is refused: use a compatible version of Lossless "
+                       "doesn't fit this version of TOTKDroid is refused: use a compatible version of Lossless "
                        "Scaling.",
                        false) && st != 2) {
             launcher_pick_lossless_dll();
@@ -697,10 +697,10 @@ static void tab_display(void) {
             int fs = fg_status(why, sizeof why);
             std::string desc = tr("Shows frames made by Lossless Scaling's frame generation between the game's own (the multiplier "
                                   "below). Input feels about one frame later; the menus, "
-                                  "events and movies show the real frames. Turning it on takes effect when TOTKRecompAndroid "
+                                  "events and movies show the real frames. Turning it on takes effect when TOTKDroid "
                                   "starts again; off, at once.");
             desc += "\n\n";
-            desc += fs == 1 ? tr("On.") : fs == 2 ? tr("On when TOTKRecompAndroid starts again.") : fs == 3 ? tr("Unavailable: ") : tr("Off.");
+            desc += fs == 1 ? tr("On.") : fs == 2 ? tr("On when TOTKDroid starts again.") : fs == 3 ? tr("Unavailable: ") : tr("Off.");
             if (fs == 3 || (fs == 1 && why[0])) desc += std::string(fs == 1 ? "\n" : "") + why;
             opt_toggle("Frame generation", &g_settings.framegen, false, desc.c_str());
             static const char *mults[] = {"2x (30 -> 60)", "3x (40 -> 120)", "4x (30 -> 120)"};
@@ -749,8 +749,8 @@ static void tab_quit(float scale, bool in_game) {
         ask = 0;
     const char *lost = in_game ? tr("\n\nProgress since your last save is lost.") : "";
     char d1[320], d2[320];
-    snprintf(d1, sizeof d1, tr("Leaves the game and goes back to the TOTKRecompAndroid start screen.%s"), lost);
-    snprintf(d2, sizeof d2, tr("Closes TOTKRecompAndroid.%s"), lost);
+    snprintf(d1, sizeof d1, tr("Leaves the game and goes back to the TOTKDroid start screen.%s"), lost);
+    snprintf(d2, sizeof d2, tr("Closes TOTKDroid.%s"), lost);
 #ifdef __ANDROID__
     const char *quit_app = "Close app", *quit_app_yes = "Close app";
     const char *quit_start = "Return to start", *quit_start_yes = "Return to start";

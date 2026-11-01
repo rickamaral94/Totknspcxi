@@ -21,7 +21,7 @@ try {
     New-Item -ItemType Directory -Force 'android/out' | Out-Null
     & $adbPath @deviceArgs shell mkdir -p $deviceDir
     if ($LASTEXITCODE -ne 0) { throw 'Could not create the device test directory.' }
-    foreach ($testName in @('test_kernel_affinity', 'test_nvn_lifetime')) {
+    foreach ($testName in @('test_kernel_affinity', 'test_nvn_lifetime', 'test_writeback_policy')) {
         & $compilerPath --target=aarch64-linux-android30 -O1 -g -ffunction-sections -fdata-sections '-Wl,--gc-sections' -Wno-format -Iruntime "tools/$testName.c" -o "android/out/$testName"
         if ($LASTEXITCODE -ne 0) { throw "Compilation failed: $testName" }
         & $adbPath @deviceArgs push "android/out/$testName" "$deviceDir/$testName"

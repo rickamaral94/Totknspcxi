@@ -49,8 +49,8 @@ static const FormatInfo formats[] = {
     [0x8B] = B(16, 6, 6), [0x8C] = B(16, 8, 5), [0x8D] = B(16, 8, 6), [0x8E] = B(16, 8, 8),
     [0x8F] = B(16, 10, 5), [0x90] = B(16, 10, 6), [0x91] = B(16, 10, 8), [0x92] = B(16, 10, 10),
     [0x93] = B(16, 12, 10), [0x94] = B(16, 12, 12),
-    [0x95] = C(2), [0x96] = C(2), [0x97] = C(2),                                 // BGR5, BGR5A1, A1BGR5
-    [0x98] = C(4), [0x99] = C(4), [0x9A] = C(4), [0x9B] = C(4),                  // BGRX8, BGRA8 (+sRGB)
+    [0x95] = C(2), [0x96] = C(2), [0x97] = C(2), [0x98] = C(2),                 // BGR565, BGR5, BGR5A1, A1BGR5
+    [0x99] = C(4), [0x9A] = C(4), [0x9B] = C(4), [0x9C] = C(4),                 // BGRX8, BGRA8 (+sRGB)
 };
 
 const FormatInfo *nvn_format_info(uint32_t f) {

@@ -39,6 +39,7 @@ struct KThread {
     KThread *wnext;
     KThread *snext;        // in WaitSynchronization (g_syncwaiters)
     pthread_cond_t cond;   // each thread sleeps on its own condition; wakers signal it directly
+    uint32_t wake_gen;     // bumped by every wake (kwait's spin before it sleeps; atomic)
     // in-place reboot (kernel_stop_threads): thread_main's setjmp point, where the thread unwinds to and ends
     jmp_buf unwind;
     bool started, finished;
@@ -53,6 +54,7 @@ struct KThread {
     KThread *core0_next;   // core-0 runnable queue (c0_m)
     int32_t tid;           // its host thread's id (kernel_busiest_threads: the ADPF session)
     uint64_t cpu_seen;     // kernel_busiest_threads: its CPU time at the last look
+    uint64_t cpu_ticks;    // kernel_hot_tids: user + system ticks at the last sample
 #endif
 };
 
@@ -79,3 +81,4 @@ void kernel_signal(KObject *o);  // caller holds g_klock
 KEvent *kernel_create_event_pair(uint32_t *writable, uint32_t *readable);
 KThread *kernel_current_thread(void);
 uint64_t kernel_heap_size(void);  // bytes from HEAP_BASE set by SetHeapSize
+bool kernel_range_unmapped(uint64_t addr, uint64_t size);

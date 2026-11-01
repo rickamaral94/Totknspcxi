@@ -9,6 +9,7 @@
 #include "../settings.h"
 #include "../framepace.h"
 #include "nvn.h"
+#include "vulkan/writeback_policy.h"
 
 volatile bool g_sync_lag_now;  // (nvnSyncWait: the last wait was one frame back, the CPU may run a frame ahead of the GPU)
 
@@ -290,6 +291,11 @@ NVN(nvnSyncWait) {  // NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED
     uint64_t t0 = plat_now_ns();
     extern void vk_tl(const char *what, uint64_t a, uint64_t b);  // (vulkan/exec.c: LARECOMP_FRAME_TIMELINE)
     vk_tl("game: SyncWait begin (fence id, submission)", sync_of(A(0))->lseq, sync_of(A(0))->seq);
+    {   // (that thread's blocking SVCs into the timeline too, kernel.c)
+        extern uint64_t g_sync_tid;
+        KThread *kt = kernel_current_thread();
+        if (kt) g_sync_tid = kt->id;
+    }
     kernel_blocking_begin();  // (a long wait: core 0 to the game's other threads, kernel.c)
     if (vk_async_on()) {  // the render thread's translation of the fence first (vulkan/async.c)
         if (flush || whole) vk_async_drain();
@@ -379,6 +385,33 @@ NVN(nvnSyncWait) {  // NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED
                 "a store (at %llu%%)\n", (unsigned long long)wb_n, (unsigned long long)(wb_n ? wb_pos / wb_n : 0),
                 (unsigned long long)st_n, (unsigned long long)(st_n ? st_pos / st_n : 0));
             wb_n = wb_pos = st_n = st_pos = 0;
+        }
+        // TotK reads small CPU-visible targets without an explicit invalidate.
+        // Their current results must land even when frame sync lag is enabled.
+        extern uint64_t vk_last_small_writeback_seq(void);
+        static uint64_t raised_wb, raised_vamm;  // (LARECOMP_LOG_SYNC_LAG: how often each guard moved the wait)
+        uint64_t t0w = target;
+        // The two guards below (the newest frame's small write-backs, its alias reads) are off by default: one or the
+        // other moved the wait to the newest frame's end every frame - the small write-backs land in its last few
+        // submissions - so there was no lag left and the GPU and the render thread ran in series again. In-run A/B at
+        // Frame rate 60 in the user's cave save (2026-10-31): 52.5 -> 57.1 fps without them; walking and swimming
+        // looked the same (the water's wakes, the geometry). LARECOMP_SYNCLAG_GUARDS=1: both on.
+        static int guards = -1;
+        if (guards < 0) guards = getenv("LARECOMP_SYNCLAG_GUARDS") && atoi(getenv("LARECOMP_SYNCLAG_GUARDS")) != 0;
+        int ab_none = vk_ab("lagnone");
+        bool no_guards = ab_none >= 0 ? ab_none == 1 : !guards;
+        if (vk_ab("lagwb") != 1 && !no_guards) target = wb_small_wait_target(target, vk_last_small_writeback_seq(), seq);
+        raised_wb += target > t0w;
+        // A copied vertex stream is a snapshot; a placed alias stream is read
+        // directly. Complete those reads before sync lag lets the CPU rewrite it.
+        extern uint64_t vk_vamm_last_read_seq(void);
+        uint64_t t1w = target;
+        if (vk_ab("lagvamm") != 1 && !no_guards) target = wb_small_wait_target(target, vk_vamm_last_read_seq(), seq);
+        raised_vamm += target > t1w;
+        if (log && n % 120 == 0) {
+            LOG("[synclag] of 120 frames: the small write-backs moved the wait %llu times, the alias reads %llu\n",
+                (unsigned long long)raised_wb, (unsigned long long)raised_vamm);
+            raised_wb = raised_vamm = 0;
         }
         renderer_wait_seq(target);
     } else
@@ -774,15 +807,25 @@ enum { RETIRE_FRAMES = 4 };
 typedef struct { NvnTexture *t; uint64_t frame; } RetiredTexture;
 static RetiredTexture *g_retired;
 static int g_nretired, g_cap_retired;
+static void texreg_dead(NvnTexture *t);
 static void texture_release(NvnTexture *t) {  // g_live_lock; render work drained by the backend
     if (--t->refs) return;
+#ifdef __ANDROID__
+    static int queued = -1;  // (its backend destroyed by the render thread in queue order: texreg_dead)
+    if (queued < 0) queued = vk_async_on() && (!getenv("LARECOMP_TEXREG_QUEUE") || atoi(getenv("LARECOMP_TEXREG_QUEUE")));
+    if (!queued) backend_texture_destroyed(t);
+#else
     backend_texture_destroyed(t);
+#endif
     if (t->prev) t->prev->next = t->next;
     else g_all_tex = t->next;
     if (t->next) t->next->prev = t->prev;
     if (t->addr)
         for (NvnTexture **p = &g_desc_hash[desc_hash(t->addr)]; *p; p = &(*p)->hnext)
             if (*p == t) { *p = t->hnext; break; }
+#ifdef __ANDROID__
+    if (queued) { texreg_dead(t); return; }
+#endif
     free(t);
 }
 static void texture_retire(NvnTexture *t) {
@@ -1254,16 +1297,167 @@ NVN(nvnTexturePoolSetDebugLabel) { (void)c; }
 NVN(nvnTexturePoolGetMemoryPool) { RET(G(uint64_t, A(0), 8)); }
 NVN(nvnTexturePoolGetMemoryOffset) { RET(G(uint64_t, A(0), 16)); }
 NVN(nvnTexturePoolGetSize) { RET(G(uint32_t, A(0), 24)); }
+// Texture pool slots registered while the render thread runs (vulkan/async.c): queued, as the GPU would see them - a
+// list sent before the registration reads the slot as it was, one sent after reads the new texture. The game side
+// compares against the slot as last registered (d->latest), the render thread reads d->entries.
+typedef struct { NvnTexEntry *slot; NvnTexEntry v; } TexRegOp;
+typedef struct { size_t n, ndead; NvnTexture **dead; TexRegOp op[]; } TexRegBatch;
+static pthread_mutex_t g_texreg_lock = PTHREAD_MUTEX_INITIALIZER;
+static TexRegBatch *g_texreg;
+static size_t g_texreg_cap;
+static NvnTexture **g_texreg_out;  // (g_texreg_lock) the textures the render thread took out of their slots
+static size_t g_texreg_nout, g_texreg_capout;
+// Textures released for good (texture_release): their backends are destroyed and the objects freed by the render
+// thread, after the lists sent before - destroyed on the game's thread, each waited for the render thread's whole queue
+// (a drain) and its Vulkan objects went while the render thread used the same caches.
+static NvnTexture **g_texreg_dead;  // (g_texreg_lock)
+static size_t g_texreg_ndead, g_texreg_capdead;
+static void texreg_dead(NvnTexture *t) {
+    pthread_mutex_lock(&g_texreg_lock);
+    if (g_texreg_ndead == g_texreg_capdead) {
+        g_texreg_capdead = g_texreg_capdead ? g_texreg_capdead * 2 : 64;
+        g_texreg_dead = realloc(g_texreg_dead, g_texreg_capdead * sizeof *g_texreg_dead);
+        if (!g_texreg_dead) FATAL("nvn: out of memory releasing textures\n");
+    }
+    g_texreg_dead[g_texreg_ndead++] = t;
+    pthread_mutex_unlock(&g_texreg_lock);
+}
+void *nvn_texreg_take(void) {
+    pthread_mutex_lock(&g_texreg_lock);
+    TexRegBatch *b = g_texreg;
+    if (!b && g_texreg_ndead) b = calloc(1, sizeof *b);
+    if (b) {
+        b->dead = g_texreg_dead, b->ndead = g_texreg_ndead;
+        g_texreg_dead = NULL, g_texreg_ndead = g_texreg_capdead = 0;
+    }
+    g_texreg = NULL, g_texreg_cap = 0;
+    pthread_mutex_unlock(&g_texreg_lock);
+    return b;
+}
+void nvn_texreg_apply(void *batch) {
+    TexRegBatch *b = batch;
+    pthread_mutex_lock(&g_texreg_lock);
+    for (size_t i = 0; i < b->n; i++) {
+        NvnTexture *prev = b->op[i].slot->tex;
+        *b->op[i].slot = b->op[i].v;
+        // (each slot's texture holds one reference, taken at its registration: dropped by texreg_retire_out on a game
+        // thread - texture_retire may destroy a texture, which waits for this thread under g_live_lock)
+        if (!prev) continue;
+        if (g_texreg_nout == g_texreg_capout) {
+            g_texreg_capout = g_texreg_capout ? g_texreg_capout * 2 : 256;
+            g_texreg_out = realloc(g_texreg_out, g_texreg_capout * sizeof *g_texreg_out);
+            if (!g_texreg_out) FATAL("nvn: out of memory retiring texture registrations\n");
+        }
+        g_texreg_out[g_texreg_nout++] = prev;
+    }
+    pthread_mutex_unlock(&g_texreg_lock);
+    for (size_t i = 0; i < b->ndead; i++) {
+        backend_texture_destroyed(b->dead[i]);
+        free(b->dead[i]);
+    }
+    free(b->dead);
+    free(b);
+}
+static void texreg_retire_out(void) {
+    if (!__atomic_load_n(&g_texreg_nout, __ATOMIC_RELAXED)) return;
+    NvnTexture *buf[256];
+    for (;;) {
+        pthread_mutex_lock(&g_texreg_lock);
+        size_t k = g_texreg_nout < 256 ? g_texreg_nout : 256;
+        g_texreg_nout -= k;
+        memcpy(buf, g_texreg_out + g_texreg_nout, k * sizeof *buf);
+        pthread_mutex_unlock(&g_texreg_lock);
+        if (!k) return;
+        for (size_t i = 0; i < k; i++) texture_retire(buf[i]);
+    }
+}
+static void texreg_queue(NvnTexEntry *slot, const NvnTexEntry *v) {
+    pthread_mutex_lock(&g_texreg_lock);
+    if (!g_texreg || g_texreg->n == g_texreg_cap) {
+        g_texreg_cap = g_texreg_cap ? g_texreg_cap * 2 : 64;
+        g_texreg = realloc(g_texreg, sizeof *g_texreg + g_texreg_cap * sizeof(TexRegOp));
+        if (!g_texreg) FATAL("nvn: out of memory queueing texture registrations\n");
+        if (g_texreg_cap == 64) g_texreg->n = 0;
+    }
+    g_texreg->op[g_texreg->n++] = (TexRegOp){slot, *v};
+    pthread_mutex_unlock(&g_texreg_lock);
+}
+
 static void register_texture(Cpu *c) {
     NvnDescPool *d = HOST(NvnDescPool, A(0));
     int id = (int)A(1);
     if (id < 0 || id >= d->count) return;
     g_tex_stat_reg++;
-    NvnTexEntry *e = &((NvnTexEntry *)d->entries)[id];
-    NvnTexture *old = e->tex, *t = HOST(NvnTexture, A(2));
 #ifdef __ANDROID__
-    // An asynchronous draw must finish reading the previous descriptor before its slot is replaced.
-    if (old) vk_async_drain();
+    static int queued = -1;  // (LARECOMP_TEXREG_QUEUE=0: registrations applied at once, after a drain, as before)
+    if (queued < 0) queued = vk_async_on() && (!getenv("LARECOMP_TEXREG_QUEUE") || atoi(getenv("LARECOMP_TEXREG_QUEUE")));
+    if (queued && !d->latest) {
+        pthread_mutex_lock(&g_texreg_lock);
+        if (!d->latest) {
+            NvnTexEntry *l = calloc(d->count, sizeof *l);
+            if (!l) FATAL("nvn: out of memory for a texture pool's slots\n");
+            memcpy(l, d->entries, d->count * sizeof *l);
+            d->latest = l;
+        }
+        pthread_mutex_unlock(&g_texreg_lock);
+    }
+    if (queued) texreg_retire_out();
+    NvnTexEntry *e = queued ? &((NvnTexEntry *)d->latest)[id] : &((NvnTexEntry *)d->entries)[id];
+#else
+    NvnTexEntry *e = &((NvnTexEntry *)d->entries)[id];
+#endif
+    NvnTexture *old = e->tex, *t = HOST(NvnTexture, A(2));
+    NvnTexEntry n = {t, e->view, A(3) != 0};  // (the slot as this registration leaves it)
+    if (n.has_view) memcpy(&n.view, AP(3), sizeof n.view);
+    {   // the object's own swizzle, where it shares its texture with an object of another (texture_same_storage)
+        const uint8_t *sw = t ? obj_swizzle(A(2)) : NULL;
+        if (sw && memcmp(sw, t->swizzle, 4) && !(n.has_view && (n.view.setmask & 8))) {
+            if (!n.has_view) memset(&n.view, 0, sizeof n.view);
+            n.has_view = true;
+            n.view.setmask |= 8;
+            memcpy(n.view.swizzle, sw, 4);
+        }
+    }
+#ifdef __ANDROID__
+    // An asynchronous draw must read the descriptor the slot had when its list was sent. Draining the render thread's
+    // queue before replacing one did that, but TOTK replaces ~2500 a second (~50 a frame: its main thread and its job
+    // workers), and its main thread waited for the whole queue, present included - ~13 ms a frame of the Great Sky
+    // Island's woods, on the frame's critical path (2026-10-31). Queued (texreg_queue), the render thread applies them
+    // in order; a registration that leaves the slot as it was is dropped. Without the queue (LARECOMP_TEXREG_QUEUE=0):
+    // the drain, skipped for those (LARECOMP_TEXREG_DRAIN_ALWAYS=1: not even).
+    static int always = -1;
+    if (always < 0) always = getenv("LARECOMP_TEXREG_DRAIN_ALWAYS") != NULL;
+    bool same = old == t && n.has_view == e->has_view && (!n.has_view || !memcmp(&n.view, &e->view, sizeof n.view));
+    {   // LARECOMP_LOG_TEXREG=1 (diagnosis): every 2 s, registrations over a slot by kind, and a few changed ones
+        static int log = -1;
+        static uint64_t n_same, n_tex, n_view, n_empty, last;
+        if (log < 0) log = getenv("LARECOMP_LOG_TEXREG") != NULL;
+        if (log) {
+            if (!old) n_empty++; else if (same) n_same++; else if (old != t) n_tex++; else n_view++;
+            static int shown;
+            if (old && !same && shown < 40) {
+                shown++;
+                LOG("[texreg] slot %d: %p %ux%u f%#x view %d %02x -> %p %ux%u f%#x view %d %02x (lr %llx)\n", id, (void *)old,
+                    old->width, old->height, old->format, e->has_view, e->view.setmask, (void *)t, t ? t->width : 0,
+                    t ? t->height : 0, t ? t->format : 0, n.has_view, n.view.setmask, (unsigned long long)c->x[30]);
+            }
+            uint64_t now = plat_now_ns();
+            if (now - last > 2000000000ull) {
+                last = now;
+                LOG("[texreg] 2 s: %llu into empty slots, %llu same, %llu another texture, %llu another view\n",
+                    (unsigned long long)n_empty, (unsigned long long)n_same, (unsigned long long)n_tex, (unsigned long long)n_view);
+                n_empty = n_same = n_tex = n_view = 0;
+            }
+        }
+    }
+    if (queued) {
+        if (same) return;
+        if (t) { pthread_mutex_lock(&g_live_lock); t->refs++; pthread_mutex_unlock(&g_live_lock); }
+        *e = n;
+        texreg_queue(&((NvnTexEntry *)d->entries)[id], &n);
+        return;
+    }
+    if (old && (always || !same)) vk_async_drain();
 #endif
     if (old != t) {
         pthread_mutex_lock(&g_live_lock);
@@ -1272,17 +1466,8 @@ static void register_texture(Cpu *c) {
         pthread_mutex_unlock(&g_live_lock);
         if (old) texture_retire(old);
     }
-    e->has_view = A(3) != 0;
-    if (e->has_view) memcpy(&e->view, AP(3), sizeof e->view);
-    {   // the object's own swizzle, where it shares its texture with an object of another (texture_same_storage)
-        const uint8_t *sw = t ? obj_swizzle(A(2)) : NULL;
-        if (sw && memcmp(sw, t->swizzle, 4) && !(e->has_view && (e->view.setmask & 8))) {
-            if (!e->has_view) memset(&e->view, 0, sizeof e->view);
-            e->has_view = true;
-            e->view.setmask |= 8;
-            memcpy(e->view.swizzle, sw, 4);
-        }
-    }
+    e->has_view = n.has_view;
+    e->view = n.view;
     static int watch_id = -2;  // LARECOMP_WATCH_TEXID=<hex id>: its registrations (texture, view)
     if (watch_id == -2) watch_id = getenv("LARECOMP_WATCH_TEXID") ? (int)strtol(getenv("LARECOMP_WATCH_TEXID"), NULL, 16) : -1;
     if (id == watch_id || (watch_id == 0x7fffffff && t && t->width == 320 && t->height == 180 && t->levels == 5))  // (7fffffff: the bloom chain)
@@ -1453,12 +1638,37 @@ bool rt_fps60(void) {
 
 // TOTK cutscenes: some of their timing counts frames, so above 30 fps they played fast. tools/patches.py marks the
 // entries of four functions that run once a frame while one plays; the presents wait for 30 fps while one ran in the
-// last 200 ms. LARECOMP_CUTSCENE_FPS30=0: off (cutscenes at the chosen rate).
+// last 200 ms. Only a mark called once or twice between two presents counts: mark 2 also runs ~12 times a frame in
+// plain play (the user's cave save, 2026-10-31), which had held a Frame rate 60 game at 30 there for good.
+// LARECOMP_CUTSCENE_FPS30=0: off (cutscenes at the chosen rate). LARECOMP_LOG_CUTSCENE=1: each mark's calls every 2 s.
 static _Atomic uint64_t cutscene_ns;
+static _Atomic uint32_t cutscene_hits[4], cutscene_frame_hits[4];
 void rt_cutscene_tick(int which) {
     static _Atomic uint8_t seen[4];
-    if (which >= 0 && which < 4 && !atomic_exchange(&seen[which], 1)) LOG("[totk] cutscene mark %d first seen\n", which);
-    atomic_store_explicit(&cutscene_ns, plat_now_ns(), memory_order_relaxed);
+    if (which < 0 || which >= 4) return;
+    if (!atomic_exchange(&seen[which], 1)) LOG("[totk] cutscene mark %d first seen\n", which);
+    atomic_fetch_add_explicit(&cutscene_hits[which], 1, memory_order_relaxed);
+    atomic_fetch_add_explicit(&cutscene_frame_hits[which], 1, memory_order_relaxed);
+}
+// A movie's video frame handed to the game (hle/movie.c): pre-rendered scenes (TOTK's DmT_OP_GanonWakeUp_PreRender)
+// call none of the marks, and at 60 fps the picture ran ahead of the sound.
+void rt_movie_frame(void) { atomic_store_explicit(&cutscene_ns, plat_now_ns(), memory_order_relaxed); }
+static void rt_cutscene_present(void) {  // (each present: the marks of the frame it ends)
+    for (int i = 0; i < 4; i++) {
+        uint32_t n = atomic_exchange_explicit(&cutscene_frame_hits[i], 0, memory_order_relaxed);
+        if (n >= 1 && n <= 2) atomic_store_explicit(&cutscene_ns, plat_now_ns(), memory_order_relaxed);
+    }
+    static int log = -1;
+    if (log < 0) log = getenv("LARECOMP_LOG_CUTSCENE") != NULL;
+    if (log) {
+        static uint64_t last_log;
+        uint64_t now = plat_now_ns();
+        if (now - last_log > 2000000000ull) {
+            last_log = now;
+            LOG("[totk] cutscene marks in 2 s: %u %u %u %u\n", atomic_exchange(&cutscene_hits[0], 0), atomic_exchange(&cutscene_hits[1], 0),
+                atomic_exchange(&cutscene_hits[2], 0), atomic_exchange(&cutscene_hits[3], 0));
+        }
+    }
 }
 static bool rt_cutscene(void) {
     static int on = -1;
@@ -1485,6 +1695,55 @@ bool diag_in_gameplay(void) {
 // steps by the interval the game believes in, not by the measured time - held at 30 while it believed 1 (a light
 // cutscene frame fits 60) they played in slow motion, and at 60 while it believed 2, fast (2026-10-29).
 uint32_t rt_interval_pick(uint32_t game) { return game < 2 && rt_cutscene() ? 2 : game; }
+
+// TOTK at Frame rate Auto: 60 while the phone holds it, 30 when it doesn't - decided here, not by the game. Its own
+// controller judges by the GPU's time per frame, and at 30 fps the GPU idles half the time and its clock drops: the
+// same cave frame took 21.8 ms of GPU at 30 and 12.3 ms at 60 (2026-10-31), so it kept 30 where 60 ran at 55-60 fps.
+// Here: 60 from the start; the mean period of 3 s windows (cutscenes and loads left out) over 25 ms twice in a row
+// (under 40 fps, where steady 30 looks better) brings 30, and 60 is tried again after 20 s (doubling to 160 s each
+// failed trial). A trial's first 4 s don't count (the clocks rise); a 3 s window at 22 ms or less after them holds it.
+// The world steps by the measured time either way (tools/patches.py). LARECOMP_AUTO60=0: the game's own choice.
+static bool totk_auto60 = true;
+bool rt_totk_auto(void) {
+    static int on = -1;
+    if (on < 0) on = !getenv("LARECOMP_AUTO60") || atoi(getenv("LARECOMP_AUTO60")) != 0;
+    return on && g_game_version == GAME_V_143 && !g_settings.fps_mode && rt_fps60();
+}
+bool rt_totk_auto60(void) { return rt_totk_auto() && totk_auto60; }
+static void totk_auto_present(uint64_t now) {
+    static uint64_t last, win_start, retry_at, trial_at, backoff = 20000000000ull;
+    static uint64_t sum;
+    static int n, bad;
+    uint64_t p = last ? now - last : 0;
+    last = now;
+    if (!rt_totk_auto() || !p || p > 100000000ull || rt_cutscene()) return;
+    if (!totk_auto60 && now >= retry_at) {
+        totk_auto60 = true, trial_at = now, bad = 0;
+        sum = n = 0, win_start = now;
+        LOG("[pace] Auto: trying 60 fps again\n");
+        return;
+    }
+    if (!win_start) win_start = now;
+    sum += p, n++;
+    if (now - win_start < 3000000000ull) return;
+    double avg = (double)sum / n / 1e6;
+    sum = n = 0, win_start = now;
+    if (!totk_auto60) return;
+    bool trial = trial_at && now - trial_at < 10000000000ull;
+    if (trial && now - trial_at < 4000000000ull) return;
+    if (avg > 25.0 && (++bad >= 2 || trial)) {
+        totk_auto60 = false, retry_at = now + backoff, bad = 0, trial_at = 0;
+        LOG("[pace] Auto: 30 fps (frames at %.1f ms on average at 60); 60 again in %llu s\n", avg,
+            (unsigned long long)(backoff / 1000000000ull));
+        if (backoff < 160000000000ull) backoff *= 2;
+    } else if (avg <= 25.0) {
+        bad = 0;
+        if (trial && avg <= 22.0) {
+            trial_at = 0, backoff = 20000000000ull;
+            LOG("[pace] Auto: 60 fps holds (%.1f ms on average)\n", avg);
+        }
+    }
+}
 
 int64_t rt_frame_ticks(int64_t ticks) {
     if (!g_settings.fps_mode) return ticks;
@@ -1622,7 +1881,9 @@ NVN(nvnWindowSetPresentInterval) {
     // TOTK at Frame rate 60: always 1. Its controller (rt_fps60) went back to 2 within a second each time it tried 1
     // in the cave (2026-10-29: 6 tries in 200 s, 30.8 fps on average); held at 1 the same walk ran 35 fps there (GPU
     // and the ~18 ms render thread: 42 at a 960x540 scene) - Auto leaves the choice to the game.
-    if (g_game_version == GAME_V_143 && g_settings.fps_mode == 2 && rt_fps60() && force <= 0 && !rt_cutscene()) c->x[1] = 1;
+    if (g_game_version == GAME_V_143 && (g_settings.fps_mode == 2 || rt_totk_auto60()) && rt_fps60() && force <= 0 &&
+        !rt_cutscene())
+        c->x[1] = 1;
     if ((int)A(1) != g_present_interval)
         LOG("[pace] the game sets its present interval to %d (lr %llx, x19 %llx [+0x240] %lld)\n", (int)A(1),
             (unsigned long long)c->x[30], (unsigned long long)c->x[19],
@@ -1647,6 +1908,7 @@ NVN(nvnQueueAcquireTexture) {
     w->next = (w->next + 1) % (w->active ? w->active : 1);
     RET(0);
 }
+uint64_t g_present_vsync_wait_ns;  // (the last present's wait for the vsync grid: the ADPF report, vulkan/exec.c)
 NVN(nvnQueuePresentTexture) {
     NvnWindow *w = HOST(NvnWindow, A(1));
     int i = (int)A(2);
@@ -1657,6 +1919,8 @@ NVN(nvnQueuePresentTexture) {
             LOG("[pace] presenting thread t%llu\n", (unsigned long long)(last_id = kt->id));
             diag_note_presenting(kt->id);
         }
+        extern uint64_t g_present_tid;  // (kernel.c: that thread's blocking SVCs go into LARECOMP_FRAME_TIMELINE)
+        if (kt) g_present_tid = kt->id;
     }
     {   // Frame limiter: a present waits until N vsyncs have gone by since the previous one, as NVN does on the Switch -
         // N is the larger of the window's interval (BOTW asks for 2: its world steps 1/30 s a frame) and the Video
@@ -1673,7 +1937,15 @@ NVN(nvnQueuePresentTexture) {
         // (TOTK at Frame rate 60: 1 whatever the window kept - the controller calls it only on a change, and a
         // cutscene's 2 stayed there after it; a cutscene at 30, as on the Switch)
         if (g_game_version == GAME_V_143 && g_settings.fps_mode == 2 && rt_fps60()) n = 1;
+        if (rt_totk_auto()) {  // (Auto: rt_totk_auto60's pick)
+            totk_auto_present(plat_now_ns());
+            n = totk_auto60 ? 1 : 2;
+        }
+        if (g_game_version == GAME_V_143) rt_cutscene_present();
         if (n < 2 && rt_cutscene()) n = 2;
+        {   extern int g_present_vsyncs;  // (output_scale.c: dynamic resolution's frame time target)
+            g_present_vsyncs = n;
+        }
 #ifdef __ANDROID__
         extern int fg_base_fps(void);
         int fg_base = fg_base_fps();  // (Video > Frame generation: the game at its multiplier's base, 30 or 40 a second)
@@ -1702,7 +1974,15 @@ NVN(nvnQueuePresentTexture) {
             framepace_presented(last, last == target);
         } else if (on) {
             uint64_t want = last_vs + (uint64_t)n, t0 = plat_now_ns();
+#ifdef __ANDROID__
+            extern void vk_tl(const char *what, uint64_t a, uint64_t b);
+            vk_tl("game: vsync wait (count, want)", g_vsync_count, want);
+#endif
             while (__atomic_load_n(&g_vsync_count, __ATOMIC_RELAXED) < want) usleep(500);
+#ifdef __ANDROID__
+            vk_tl("game: vsync wait end", g_vsync_count, 0);
+#endif
+            g_present_vsync_wait_ns = plat_now_ns() - t0;
             g_blocked_ns += plat_now_ns() - t0;
             last_vs = __atomic_load_n(&g_vsync_count, __ATOMIC_RELAXED);
         }

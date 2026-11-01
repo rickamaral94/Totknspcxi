@@ -94,6 +94,8 @@ void plat_frame_work(uint64_t work_ns, uint64_t target_ns);
 // (the presenting thread: cpu_ns is the frame's critical path - the longer of its own and the render thread's work -,
 // game_ns its own part, for the overlay; the GPU's time too, API 35+)
 void plat_frame_work_gpu(uint64_t cpu_ns, uint64_t gpu_ns, uint64_t target_ns, uint64_t game_ns);
+// ADPF: the game's busiest threads, in the session too (kernel.c kernel_hot_tids)
+void plat_adpf_extra_threads(const int32_t *tids, int n);
 // ADPF state for the performance overlay (platform/android.c)
 typedef struct {
     int state;                 // -2 disabled via env, -1 not available, 0 not yet, 1 on
@@ -111,6 +113,7 @@ void plat_adpf_stats(PlatAdpfStats *out);
 // A new thread back on every core: threads inherit the creating thread's affinity, and the presenting thread is
 // pinned to the fastest cores (platform/android.c)
 void plat_thread_unpin(void);
+void plat_render_follow_clock(void);  // (Android: the render thread on the cores clocked higher now)
 #endif
 #endif
 
