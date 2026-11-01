@@ -18,6 +18,7 @@
 #include "shaders.h"
 #include "vk.h"
 #include "timing_trace.h"
+#include "driver_diag.h"
 #include "../renderer.h"
 #include "../../settings.h"
 #include "../../paths.h"
@@ -3205,7 +3206,9 @@ static void build_pipeline(void *arg) {
         if (logp) LOG("[pipe] compiling vs %llx fs %llx\n", (unsigned long long)k->prog->code[0], (unsigned long long)k->prog->code[1]);
     }
 #endif
+    unsigned long long dd = driver_diag_begin("graphics", k->prog->code[0], k->prog->code[1]);
     VkResult r = vkCreateGraphicsPipelines(g_vk.dev, g_vk.pcache, 1, &pi, NULL, &pp->pipe);
+    driver_diag_end(dd, r);
     if (r != VK_SUCCESS) {
         static int n;
         if (n++ < 10) LOG("[vk] pipeline creation failed: %d\n", r);
@@ -5873,7 +5876,9 @@ static void build_compute(void *arg) {
                                                 .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = m, .pName = "main",
                                                 .pSpecializationInfo = &spec},
                                       .layout = cp->p.layout};
+    unsigned long long dd = driver_diag_begin("compute", cp->code_addr, n);
     VkResult r = vkCreateComputePipelines(g_vk.dev, g_vk.pcache, 1, &ci, NULL, &cp->pipe);
+    driver_diag_end(dd, r);
     atomic_fetch_add(&stat_compiles, 1);
     atomic_store(&cp->p.state, r == VK_SUCCESS ? 1 : 2);
     if (r != VK_SUCCESS || getenv("LARECOMP_LOG_CS_PIPELINES"))

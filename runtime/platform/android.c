@@ -159,6 +159,45 @@ static void *log_pump(void *arg) {
     return NULL;
 }
 
+// Bounded snapshots of this app's other Android log tags (libc, Mesa, Adreno...).
+// Exclude our own relay tag to avoid a feedback loop. -d exits after each snapshot,
+// so this diagnostic collector cannot leave a persistent logcat child behind.
+static void *driver_log_pump(void *unused) {
+    (void)unused;
+    uint64_t seen[512] = {0};
+    unsigned next = 0;
+    bool warned = false;
+    char cmd[256], line[4096], tagged[4160];
+    snprintf(cmd, sizeof cmd, "/system/bin/logcat -d -t 128 --pid=%d -v threadtime '*:V' 'TOTKRecompAndroid:S' 2>/dev/null", getpid());
+    log_file_line("[driver-diag] Android driver/libc log capture started (this PID only; availability depends on Android)");
+    for (;;) {
+        FILE *f = popen(cmd, "r");
+        if (f) {
+            while (fgets(line, sizeof line, f)) {
+                if (line[0] == '-') continue;
+                uint64_t h = 1469598103934665603ull;
+                for (const unsigned char *p = (unsigned char *)line; *p; ++p) h = (h ^ *p) * 1099511628211ull;
+                bool duplicate = false;
+                for (unsigned i = 0; i < 512; ++i) if (seen[i] == h) { duplicate = true; break; }
+                if (duplicate) continue;
+                seen[next++ % 512] = h;
+                line[strcspn(line, "\r\n")] = 0;
+                snprintf(tagged, sizeof tagged, "[driver-logcat] %s", line);
+                log_file_line(tagged);  // file only: never send a captured message back to logcat
+            }
+            int status = pclose(f);
+            if (status && !warned) {
+                snprintf(tagged, sizeof tagged, "[driver-diag] logcat snapshot unavailable (status=%d); pipeline diagnostics remain active", status);
+                log_file_line(tagged);
+                warned = true;
+            }
+        }
+        struct timespec delay = {1, 0};
+        nanosleep(&delay, NULL);
+    }
+    return NULL;
+}
+
 static void log_to_logcat(void) {
     static bool done;
     if (done) return;
@@ -172,6 +211,7 @@ static void log_to_logcat(void) {
     close(p[1]);
     pthread_t t;
     if (pthread_create(&t, NULL, log_pump, (void *)(intptr_t)p[0]) == 0) pthread_detach(t);
+    if (pthread_create(&t, NULL, driver_log_pump, NULL) == 0) pthread_detach(t);
 }
 
 // ---- guest address space

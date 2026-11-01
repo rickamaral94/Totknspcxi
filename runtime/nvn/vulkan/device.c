@@ -1907,6 +1907,9 @@ void ui_window_init(void) {
     SDL_SetHint(SDL_HINT_ANDROID_TRAP_BACK_BUTTON, "1");  // (the back button opens the menu: ui/touch_controls.mm)
 #endif
     settings_load();
+    LOG("[driver-diag] amaral.3 diagnostic build: shader_int32=%d sync_lag=%d framegen=%d cbuf_inplace=%d gpu_heap=%d inplace_reads=%d turnip_lrz=%d\n",
+        g_settings.shader_int32, g_settings.sync_lag, g_settings.framegen, g_settings.cbuf_inplace,
+        g_settings.gpu_heap, g_settings.inplace_reads, g_settings.turnip_lrz);
 #ifdef __ANDROID__
     {   // Driver compatibility (the start screen's Settings > Prelaunch): applied before the driver loads
         extern void android_log_file(bool on);
