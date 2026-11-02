@@ -2,6 +2,7 @@
 #include <SDL3/SDL_cpuinfo.h>
 #include "writeback_policy.h"
 #include "writeback_merge.h"
+#include "effect_trace.h"
 #include <SDL3/SDL_timer.h>
 #include <float.h>
 #include <math.h>
@@ -36,6 +37,7 @@ static uint64_t stat_feedback_depth_copies, stat_feedback_color_copies, stat_fee
 static uint64_t stat_feedback_reads;  // (attachments sampled as they are: only read, resolve_feedback)
 static uint64_t stat_inplace_breaks;  // (passes ended so a draw reads a target the pass wrote: resolve_feedback)
 static uint64_t stat_upload_bytes;
+static _Atomic uint64_t stat_wb_bytes, stat_wb_unchanged;
 static uint64_t stat_cb_bytes[2], stat_cb_n[2], stat_cb_copied, stat_cbwin;  // (LARECOMP_LOG_CBUF_BYTES: game constant buffers bound,
                                                                  // fixed [0] / dynamically indexed [1], and bytes copied)
 static uint64_t stat_pipe_binds, stat_set_binds;  // (graphics draws: pipelines / descriptor sets bound)
@@ -1489,6 +1491,8 @@ const char *renderer_stats(void) {
     LOG("[graphics-diag] feedback copies: depth=%llu color=%llu reused=%llu; counts cover the same interval as renderer stats\n",
         (unsigned long long)stat_feedback_depth_copies, (unsigned long long)stat_feedback_color_copies,
         (unsigned long long)stat_feedback_reused);
+    LOG("[graphics-diag] writeback checked=%.2fMB bulk_unchanged=%.2fMB (CPU conflict policy remains 256 bytes)\n",
+        atomic_exchange(&stat_wb_bytes, 0) / 1048576.0, atomic_exchange(&stat_wb_unchanged, 0) / 1048576.0);
     stat_feedback_depth_copies = stat_feedback_color_copies = stat_feedback_reused = 0;
     stat_feedback_copies = stat_feedback_reads = stat_inplace_breaks = stat_upload_bytes = stat_build_wait_ns = stat_pipe_binds = stat_set_binds = 0;
     if (getenv("LARECOMP_LOG_CBUF_BYTES")) {
@@ -3462,6 +3466,79 @@ static void ct_draw(Prog *pr, const char *what) {
     LOG("\n");
 }
 
+// Short, bounded effect captures tied to the existing performance measurement.
+// Hashes identify candidates, not proof that a shader belongs to a particular visual effect.
+static EffectTrace effect_trace;
+static void effect_trace_draw(Prog *pr) {
+#ifdef __ANDROID__
+    uint64_t frame = renderer_present_count();
+    bool changed_frame = !effect_trace.valid || effect_trace.frame != frame;
+    if (!effect_trace_frame(&effect_trace, frame, g_gpuprof_frame)) return;
+    if (changed_frame) LOG("[effect-trace] frame=%llu burst=%u max_rows=64 adjacent_frames=3 (capture can perturb timing)\n",
+        (unsigned long long)frame, effect_trace.bursts);
+    // Capture blended effects and depth-read-only passes. No depth/color writes are changed.
+    if (!st.color_state[0] && !(st.ds[0] && !st.ds[1])) return;
+    uint64_t key = hash_words(g_cur_fs_hash, &st.rt, sizeof st.rt);
+    key = hash_words(key, st.blend, sizeof st.blend);
+    key = hash_words(key, st.ds, sizeof st.ds);
+    ShaderInfo *infos[2] = {pr->vi, pr->fi};
+    for (int stage=0; stage<2; stage++)
+        for (int slot=0; slot<infos[stage]->ntex; slot++) {
+            uint64_t handle = shader_texture_handle(stage, &infos[stage]->tex[slot]);
+            key = hash_words(key, &handle, sizeof handle);
+        }
+    bool was_full = effect_trace.full;
+    if (!effect_trace_keep(&effect_trace, key)) {
+        if (!was_full && effect_trace.full) LOG("[effect-trace] frame=%llu row cap reached; further bindings omitted\n", (unsigned long long)frame);
+        return;
+    }
+    NvnTexture *rt = st.rt.ncolor ? st.rt.color[0] : NULL;
+    LOG("[effect-trace] draw frame=%llu row=%u fs=%016llx vs=%llx fs_addr=%llx rt=%llu/%ux%u depth=%llu blend_mask=%02x depth_test=%u depth_write=%u depth_func=%u discard=%u writes_depth=%u cbuf=%x tex=%d/%d\n",
+        (unsigned long long)frame, effect_trace.rows, (unsigned long long)g_cur_fs_hash,
+        (unsigned long long)pr->code[0], (unsigned long long)pr->code[1],
+        (unsigned long long)(rt ? rt->debug_id : 0), rt ? rt->width : 0, rt ? rt->height : 0,
+        (unsigned long long)(st.rt.depth ? st.rt.depth->debug_id : 0), st.color_state[0],
+        st.ds[0], st.ds[1], st.ds[2], pr->fi->uses_discard, pr->fi->writes_depth, pr->fi->cbuf_mask, pr->vi->ntex, pr->fi->ntex);
+    LOG("[effect-trace] blend frame=%llu row=%u srcC=%u dstC=%u srcA=%u dstA=%u eqC=%u eqA=%u\n",
+        (unsigned long long)frame, effect_trace.rows, st.blend[0][1], st.blend[0][2], st.blend[0][3],
+        st.blend[0][4], st.blend[0][5], st.blend[0][6]);
+    unsigned kept = 0;
+    for (int stage=0; stage<2; stage++)
+        for (int slot=0; slot<infos[stage]->ntex && kept<8; slot++,kept++) {
+            ShaderTexture *desc = &infos[stage]->tex[slot];
+            NvnTexEntry *entry = shader_texture_entry(stage, desc);
+            NvnTexture *t = entry ? entry->tex : NULL;
+            TexBackend *b = t ? t->backend : NULL;
+            VkImage sampled = b ? b->image : VK_NULL_HANDLE;
+            bool snapshot = false;
+            for (int j=0; j<nfeedback; j++) if (feedback_tex[j] == t && feedback_snap[j]) {
+                sampled = feedback_snap[j]->image;
+                snapshot = true;
+            }
+            LOG("[effect-trace] tex frame=%llu row=%u stage=%d slot=%d handle=%llx bindless=%u bank=%u off=%u type=%u shadow=%u id=%llu addr=%llx size=%ux%ux%u fmt=%x samples=%u vkimage=%llx sampled=%llx snapshot=%u gpu_owned=%u finalized=%u view=%u level=%u layer=%u\n",
+                (unsigned long long)frame, effect_trace.rows, stage, slot,
+                (unsigned long long)shader_texture_handle(stage, desc), desc->bindless, desc->bindless_cbuf,
+                desc->bindless_offset, desc->type, desc->shadow, (unsigned long long)(t ? t->debug_id : 0),
+                (unsigned long long)(t ? t->addr : 0), t ? t->width : 0, t ? t->height : 0, t ? t->depth : 0,
+                t ? t->format : 0, t ? t->samples : 0, (unsigned long long)(uintptr_t)(b ? b->image : VK_NULL_HANDLE),
+                (unsigned long long)(uintptr_t)sampled, snapshot, b ? b->gpu_owned : 0, t ? t->finalized : 0, entry ? entry->has_view : 0,
+                entry && entry->has_view ? entry->view.base_level : 0, entry && entry->has_view ? entry->view.min_layer : 0);
+        }
+    // A few generated texture expressions, bounded; no binary game assets or GPU readback.
+    const char *patterns[] = {"textureGather(", "texture(", "textureLod(", "texelFetch("};
+    for (unsigned n=0; pr->fi->msl && n<4; n++) {
+        const char *source = strstr(pr->fi->msl, patterns[n]);
+        if (!source) continue;
+        size_t len = strcspn(source, ";\n");
+        if (len > 384) len = 384;
+        LOG("[effect-trace] expr frame=%llu row=%u %.*s\n", (unsigned long long)frame, effect_trace.rows, (int)len, source);
+    }
+
+#else
+    (void)pr;
+#endif
+}
+
 // ================================================================== copy elision (depth copies)
 // The game copies its main depth buffer whole, every frame, into textures that are then only sampled while the
 // source keeps its depth (the water / transparency depth input), or that get their depth cleared right away
@@ -3783,15 +3860,8 @@ static void resolve_feedback(Prog *pr, uint32_t draw_written) {
             bool have = false;
             for (int k = 0; k < nfeedback; k++) have |= feedback_tex[k] == t;
             if (have || nfeedback == 4) continue;
-            static int nosnap = -1, snap_version = -1;
-            if (nosnap < 0 || snap_version != g_game_version) {
-                snap_version = g_game_version;
-                extern bool vk_driver_is_turnip(void);
-                bool odin_test = g_game_version == 142 && vk_driver_is_turnip() && strstr(g_vk.props.deviceName, "740");
-                nosnap = getenv("LARECOMP_NO_SNAPSHOT_REUSE") != NULL || odin_test;
-                LOG("[graphics-diag] snapshot reuse %s; amaral.6 A740/v142 conservative-copy experiment=%d\n",
-                    nosnap ? "off" : "on", odin_test);
-            }
+            static int nosnap = -1;
+            if (nosnap < 0) nosnap = getenv("LARECOMP_NO_SNAPSHOT_REUSE") != NULL;
             int si = -1;
             for (int k = 0; k < 8; k++) if (snap_tex[k] == t) si = k;
             TexBackend *src = vk_tex(t, true);
@@ -4837,7 +4907,9 @@ static void gcopy_retire(uint64_t done) {
             // back undid the CPU's writes made since, for good - wrong shadows while moving)
             uint8_t *g = (uint8_t *)(uintptr_t)gc_back[i].addr, *sh = gc_back[i].shadow;
             const uint8_t *src = gc_back[i].src;
-            gc_merge_writeback(g, sh, src, gc_back[i].len, gc_back[i].bseq, gc_back[i].seq);
+            uint64_t unchanged = gc_merge_writeback(g, sh, src, gc_back[i].len, gc_back[i].bseq, gc_back[i].seq);
+            atomic_fetch_add_explicit(&stat_wb_bytes, gc_back[i].len, memory_order_relaxed);
+            atomic_fetch_add_explicit(&stat_wb_unchanged, unchanged, memory_order_relaxed);
         } else gc_back[k++] = gc_back[i];
     }
     gc_nback = k;
@@ -5564,6 +5636,7 @@ static int g_cs_n;  // (compute program table below)
 // address (the old Prog / Pipe objects are leaked, so pipeline keys holding their pointers can't collide), compute
 // programs, shared copies - and the heap import: its pages are replaced (re-imported on first use).
 void vk_exec_reset(void) {
+    memset(&effect_trace, 0, sizeof effect_trace);
 #ifdef __ANDROID__
     vk_vamm_reset();
 #endif
@@ -6525,6 +6598,7 @@ static void draw_(CmdRec *r, bool indexed) {
     // computations of it were ~8% of the render thread on the POCO F7 Ultra)
     const uint32_t draw_w = draw_writes(pr);
     resolve_feedback(pr, draw_w);
+    effect_trace_draw(pr);
     scene_upscale(pr, r);
     snap_reason = "draw-depthwrite";
     if (st.rt.depth && st.ds[0] && st.ds[1]) {

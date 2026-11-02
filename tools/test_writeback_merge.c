@@ -29,5 +29,10 @@ int main(void) {
         legacy(g,s,p,len,q,3);gc_merge_writeback(g2,s2,p,len,q,3);
         assert(!memcmp(g,g2,len));assert(!memcmp(s,s2,len));
     }
+    memset(g,0,sizeof g);memset(s,0,sizeof s);memset(p,0,sizeof p);
+    for(unsigned i=0;i<36;i++)q[i]=3;
+    assert(gc_merge_writeback(g,s,p,9000,q,3)==9000);
+    q[0]=4;
+    assert(gc_merge_writeback(g,s,p,9000,q,3)==4904);
     puts("5000 cases: identical to legacy writeback, including tails and newer CPU uploads");
 }
