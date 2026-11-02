@@ -1340,7 +1340,7 @@ static void run_job(void (*fn)(void *), void *arg) {
         const char *workers = getenv("LARECOMP_SHADER_WORKERS");
         if (workers) n = atoi(workers);
         if (n < 1) n = 1;
-        if (n > 16) n = 16;
+        n = 1;  // amaral.4 diagnostic: serialize driver compilation, including environment overrides
         for (int i = 0; i < n; i++) { pthread_t t; pthread_create(&t, NULL, worker, NULL); }
     }
     Job *j = malloc(sizeof *j);
