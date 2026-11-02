@@ -513,7 +513,10 @@ static void create_device(void) {
     // Mali-G2-Ultra (Xring O3, driver r56p0): with the import and the global-memory arena (exec.c gres_init) the game's
     // text went missing from every menu; with both off it is all there (BOTWRecompAndroid issue #44). The arena off
     // there unless LARECOMP_VK_NO_GRES says otherwise (the import is off on every phone, below).
-    if (strstr(g_vk.props.deviceName, "Mali-G2-Ultra")) setenv("LARECOMP_VK_NO_GRES", "1", 0);
+    // Every Mali whose driver offers the import (r54p1 and later) the same: the text missing and grey blocks on a
+    // Mali-G1-Ultra r54p1 (BOTWRecompAndroid #121) with the arena on; the drivers without it (r49p1 and older) keep it.
+    if (strstr(g_vk.props.deviceName, "Mali-G2-Ultra") || (g_vk.props.vendorID == 0x13B5 && g_vk.host_import))
+        setenv("LARECOMP_VK_NO_GRES", "1", 0);
     // Phones: the import pins all of the guest heap. Samsung's Xclipse driver took it and then failed the first
     // submission (VK_ERROR_UNKNOWN, Galaxy S26, in LASRecomp-Android-Plus), and Mali drivers offer the extension too;
     // Adreno's own driver doesn't. The CPU copies (exec.c gcopy) run everywhere. LARECOMP_VK_HOST_IMPORT=1: the import
@@ -1302,6 +1305,7 @@ void vk_frame_end(const char *shot_path) {
     if (shot_path) {
         vk_wait_seq(seq);
         uint32_t w = g_vk.sc_extent.width, h = g_vk.sc_extent.height;
+        vk_readback_ready((uint64_t)w * h * 4);
         uint8_t *px = shot.ptr;
         bool bgr = g_vk.sc_format == VK_FORMAT_B8G8R8A8_UNORM || g_vk.sc_format == VK_FORMAT_B8G8R8A8_SRGB;
         for (uint64_t i = 0; bgr && i < (uint64_t)w * h; i++) { uint8_t t = px[i * 4]; px[i * 4] = px[i * 4 + 2]; px[i * 4 + 2] = t; }
@@ -1907,7 +1911,7 @@ void ui_window_init(void) {
     SDL_SetHint(SDL_HINT_ANDROID_TRAP_BACK_BUTTON, "1");  // (the back button opens the menu: ui/touch_controls.mm)
 #endif
     settings_load();
-    LOG("[driver-diag] amaral.7 diagnostic build: shader_int32=%d sync_lag=%d framegen=%d cbuf_inplace=%d gpu_heap=%d inplace_reads=%d turnip_lrz=%d\n",
+    LOG("[driver-diag] amaral.8 upstream 0.2.1 build: shader_int32=%d sync_lag=%d framegen=%d cbuf_inplace=%d gpu_heap=%d inplace_reads=%d turnip_lrz=%d\n",
         g_settings.shader_int32, g_settings.sync_lag, g_settings.framegen, g_settings.cbuf_inplace,
         g_settings.gpu_heap, g_settings.inplace_reads, g_settings.turnip_lrz);
 #ifdef __ANDROID__

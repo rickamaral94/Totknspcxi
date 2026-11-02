@@ -29,3 +29,11 @@ static inline bool effect_trace_keep(EffectTrace *s, uint64_t key) {
     s->keys[s->rows++] = key;
     return true;
 }
+
+// Ignore blend bits belonging to unused targets and tiny auxiliary cube maps.
+static inline bool effect_trace_candidate(unsigned blend_mask, unsigned colors, unsigned width, unsigned height,
+                                           bool depth_test, bool depth_write) {
+    if (!colors || width < 160 || height < 90) return false;
+    unsigned active = colors >= 8 ? 255u : (1u << colors) - 1u;
+    return (blend_mask & active) || (depth_test && !depth_write);
+}

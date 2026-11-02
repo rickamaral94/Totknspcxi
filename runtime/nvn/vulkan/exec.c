@@ -37,6 +37,7 @@ static uint64_t stat_feedback_depth_copies, stat_feedback_color_copies, stat_fee
 static uint64_t stat_feedback_reads;  // (attachments sampled as they are: only read, resolve_feedback)
 static uint64_t stat_inplace_breaks;  // (passes ended so a draw reads a target the pass wrote: resolve_feedback)
 static uint64_t stat_upload_bytes;
+static uint64_t stat_cond_draws, stat_cond_clears;
 static _Atomic uint64_t stat_wb_bytes, stat_wb_unchanged;
 static uint64_t stat_cb_bytes[2], stat_cb_n[2], stat_cb_copied, stat_cbwin;  // (LARECOMP_LOG_CBUF_BYTES: game constant buffers bound,
                                                                  // fixed [0] / dynamically indexed [1], and bytes copied)
@@ -132,6 +133,9 @@ static uint64_t gmem_bda;  // the placed heap's device address when shaders reac
 static VkSpan gc_span;    // this draw's / dispatch's copy, gc_size bytes (0: none)
 static uint64_t gc_size;
 static void gcopy_retire(uint64_t done);
+static void ga_flush_dirty(void);
+static void arena_diag_stats(void);
+static void ga_invalidate(const void *p, uint64_t len);
 #endif
 
 void vk_wait_seq(uint64_t seq) {
@@ -937,6 +941,9 @@ void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra
     VkCommandBufferSubmitInfo cbs[2];
     int n = 0;
     vc_flush();
+#ifdef __ANDROID__
+    ga_flush_dirty();  // (the arena's CPU writes, before the GPU reads them)
+#endif
     if (s->upload_begun) {
         vk_full_barrier(s->upload);  // uploads complete before anything in the main buffer reads them
         VK_CHECK(vkEndCommandBuffer(s->upload));
@@ -1072,9 +1079,10 @@ VkDescriptorSet vk_alloc_set(VkDescriptorSetLayout layout) {
 
 // ================================================================== transient memory ring
 // 64 MB host-visible chunks (device-local when the GPU exposes resizable BAR); a chunk is reused once every
-// submission that allocated from it has completed.
+// submission that allocated from it has completed, and given back after 10 s unused (down to RING_KEEP of them).
 #define CHUNK_SIZE (64ull << 20)
-typedef struct { VkBuffer buf; VmaAllocation mem; uint8_t *ptr; uint64_t size, used, seq; } Chunk;
+#define RING_KEEP 4
+typedef struct { VkBuffer buf; VmaAllocation mem; uint8_t *ptr; uint64_t size, used, seq, frame; } Chunk;  // frame: last picked
 static Chunk *chunks;
 static int nchunks, active = -1;
 
@@ -1121,6 +1129,16 @@ VkSpan vk_transient(uint64_t size, uint64_t align) {
 #ifdef __ANDROID__
     gcopy_retire(done);  // (copies back out of chunks about to be reused)
 #endif
+    // Chunks idle for 10 s go back to the driver: a burst of copies (hundreds of MB a frame after a load on a Mali,
+    // BOTWRecompAndroid #89) grew the ring for good, and the app's memory with it - 256 MB steps up to the crash in
+    // #131. The first free one is always picked, so after a burst the extra chunks stay unpicked.
+    uint64_t now = renderer_present_count();
+    for (int i = nchunks - 1; i >= 0 && nchunks > RING_KEEP; i--) {
+        if (i == active || chunks[i].seq > done || now - chunks[i].frame < 300) continue;
+        vmaDestroyBuffer(g_vk.vma, chunks[i].buf, chunks[i].mem);
+        chunks[i] = chunks[--nchunks];
+        if (active == nchunks) active = i;
+    }
     int pick = -1;
     for (int i = 0; i < nchunks; i++)
         if (i != active && chunks[i].seq <= done && chunks[i].size >= size) { pick = i; break; }
@@ -1128,6 +1146,7 @@ VkSpan vk_transient(uint64_t size, uint64_t align) {
     active = pick;
     chunks[pick].used = size;
     chunks[pick].seq = pending;
+    chunks[pick].frame = now;
     stat_upload_bytes += size;
     return (VkSpan){chunks[pick].buf, 0, chunks[pick].ptr};
 }
@@ -1135,24 +1154,29 @@ VkSpan vk_transient(uint64_t size, uint64_t align) {
 // GPU -> CPU copies: the ring is write-combined (often device-local over the BAR), where CPU reads crawl (a
 // 1280x720 screenshot took 7 s). Readbacks use one host-cached buffer instead. Every user waits for the GPU and
 // reads the data before the next readback (render thread), so a single grow-only buffer suffices.
+// Cached, and on Mali not coherent (types 0x7 and 0xb: none both): the GPU's data is read after vk_readback_ready.
+// (0.2.3 asked for coherent memory instead - on Mali the uncached type, where the CPU's reads crawled.)
+static VmaAllocation rb_mem;
 VkSpan vk_readback(uint64_t size) {
     static VkBuffer buf;
-    static VmaAllocation mem;
     static uint8_t *ptr;
     static uint64_t cap;
     if (size > cap) {
-        if (buf) { vk_wait_seq(submit_seq); vmaDestroyBuffer(g_vk.vma, buf, mem); }
+        if (buf) { vk_wait_seq(submit_seq); vmaDestroyBuffer(g_vk.vma, buf, rb_mem); }
         cap = (size + (16 << 20) - 1) & ~((16ull << 20) - 1);
         VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = cap, .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT};
-        // (coherent: read with no invalidate - on Mali the cached type isn't: the global memory arena, gres_init)
         VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
-                                      .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT,
-                                      .requiredFlags = VK_MEMORY_PROPERTY_HOST_COHERENT_BIT};
+                                      .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT};
         VmaAllocationInfo info;
-        VK_CHECK(vmaCreateBuffer(g_vk.vma, &bi, &ai, &buf, &mem, &info));
+        VK_CHECK(vmaCreateBuffer(g_vk.vma, &bi, &ai, &buf, &rb_mem, &info));
         ptr = info.pMappedData;
     }
     return (VkSpan){buf, 0, ptr};
+}
+
+// The readback's first size bytes as the GPU wrote them, once its submission is done (no-op on coherent memory)
+void vk_readback_ready(uint64_t size) {
+    if (rb_mem) vmaInvalidateAllocation(g_vk.vma, rb_mem, 0, size);
 }
 
 VkSpan vk_transient_copy(const void *data, uint64_t size, uint64_t align) {
@@ -1491,6 +1515,12 @@ const char *renderer_stats(void) {
     LOG("[graphics-diag] feedback copies: depth=%llu color=%llu reused=%llu; counts cover the same interval as renderer stats\n",
         (unsigned long long)stat_feedback_depth_copies, (unsigned long long)stat_feedback_color_copies,
         (unsigned long long)stat_feedback_reused);
+#ifdef __ANDROID__
+    arena_diag_stats();
+#endif
+    LOG("[graphics-diag] conditional render suppressed draws=%llu clears=%llu (separate from shader/pipeline skips)\n",
+        (unsigned long long)stat_cond_draws, (unsigned long long)stat_cond_clears);
+    stat_cond_draws = stat_cond_clears = 0;
     LOG("[graphics-diag] writeback checked=%.2fMB bulk_unchanged=%.2fMB (CPU conflict policy remains 256 bytes)\n",
         atomic_exchange(&stat_wb_bytes, 0) / 1048576.0, atomic_exchange(&stat_wb_unchanged, 0) / 1048576.0);
     stat_feedback_depth_copies = stat_feedback_color_copies = stat_feedback_reused = 0;
@@ -1945,6 +1975,7 @@ static void dump_layers_raw(TexBackend *b) {  // every layer, level 0, as stored
         vkCmdCopyImageToBuffer(cb, b->image, VK_IMAGE_LAYOUT_GENERAL, out.buf, 1, &c);
     }
     renderer_flush();
+    vk_readback_ready(one * nl);
     const char *dir = getenv("LARECOMP_DEBUG_DIR") ? getenv("LARECOMP_DEBUG_DIR") : "build";  // (as the pass dumps: run-as reads there)
     for (uint32_t l = 0; l < nl; l++) {
         char p[1100];
@@ -1987,6 +2018,7 @@ void vk_dump_watch_frame(void) {
             vkCmdCopyImageToBuffer(vk_cmd(), b->image, VK_IMAGE_LAYOUT_GENERAL, out.buf, 1, &c);
         }
         renderer_flush();
+        vk_readback_ready(one * nl);
         for (uint32_t l = 0; l < nl; l++) {
             char p[128];
             snprintf(p, sizeof p, "build/watch_L%u_lv%u.raw", l, lv);
@@ -3422,6 +3454,7 @@ static void debug_save_depth(TexBackend *b, const char *path) {
                            .imageExtent = {b->width, b->height, 1}};
     vkCmdCopyImageToBuffer(cb, b->image, VK_IMAGE_LAYOUT_GENERAL, out.buf, 1, &c);
     renderer_flush();
+    vk_readback_ready((uint64_t)n * 4);
     const float *d = out.ptr;
     float lo = 1e30f, hi = -1e30f;
     for (uint64_t i = 0; i < n; i++) { if (d[i] < lo) lo = d[i]; if (d[i] > hi) hi = d[i]; }
@@ -3477,9 +3510,11 @@ static void effect_trace_draw(Prog *pr) {
     if (changed_frame) LOG("[effect-trace] frame=%llu burst=%u max_rows=64 adjacent_frames=3 (capture can perturb timing)\n",
         (unsigned long long)frame, effect_trace.bursts);
     // Capture blended effects and depth-read-only passes. No depth/color writes are changed.
-    if (!st.color_state[0] && !(st.ds[0] && !st.ds[1])) return;
+    NvnTexture *rt = st.rt.ncolor ? st.rt.color[0] : NULL;
+    if (!effect_trace_candidate(st.color_state[0], st.rt.ncolor, rt ? rt->width : 0, rt ? rt->height : 0,
+                                st.ds[0], st.ds[1])) return;
     uint64_t key = hash_words(g_cur_fs_hash, &st.rt, sizeof st.rt);
-    key = hash_words(key, st.blend, sizeof st.blend);
+    key = hash_words(key, st.blend, (size_t)st.rt.ncolor * sizeof st.blend[0]);
     key = hash_words(key, st.ds, sizeof st.ds);
     ShaderInfo *infos[2] = {pr->vi, pr->fi};
     for (int stage=0; stage<2; stage++)
@@ -3492,13 +3527,12 @@ static void effect_trace_draw(Prog *pr) {
         if (!was_full && effect_trace.full) LOG("[effect-trace] frame=%llu row cap reached; further bindings omitted\n", (unsigned long long)frame);
         return;
     }
-    NvnTexture *rt = st.rt.ncolor ? st.rt.color[0] : NULL;
-    LOG("[effect-trace] draw frame=%llu row=%u fs=%016llx vs=%llx fs_addr=%llx rt=%llu/%ux%u depth=%llu blend_mask=%02x depth_test=%u depth_write=%u depth_func=%u discard=%u writes_depth=%u cbuf=%x tex=%d/%d\n",
+    LOG("[effect-trace] draw frame=%llu row=%u fs=%016llx vs=%llx fs_addr=%llx rt=%llu/%ux%u depth=%llu blend_mask=%02x depth_test=%u depth_write=%u depth_func=%u discard=%u writes_depth=%u early_z=%u no_ds_write=%u cbuf=%x tex=%d/%d\n",
         (unsigned long long)frame, effect_trace.rows, (unsigned long long)g_cur_fs_hash,
         (unsigned long long)pr->code[0], (unsigned long long)pr->code[1],
         (unsigned long long)(rt ? rt->debug_id : 0), rt ? rt->width : 0, rt ? rt->height : 0,
         (unsigned long long)(st.rt.depth ? st.rt.depth->debug_id : 0), st.color_state[0],
-        st.ds[0], st.ds[1], st.ds[2], pr->fi->uses_discard, pr->fi->writes_depth, pr->fi->cbuf_mask, pr->vi->ntex, pr->fi->ntex);
+        st.ds[0], st.ds[1], st.ds[2], pr->fi->uses_discard, pr->fi->writes_depth, pr->fkey.early_z, pr->fkey.no_ds_write, pr->fi->cbuf_mask, pr->vi->ntex, pr->fi->ntex);
     LOG("[effect-trace] blend frame=%llu row=%u srcC=%u dstC=%u srcA=%u dstA=%u eqC=%u eqA=%u\n",
         (unsigned long long)frame, effect_trace.rows, st.blend[0][1], st.blend[0][2], st.blend[0][3],
         st.blend[0][4], st.blend[0][5], st.blend[0][6]);
@@ -4907,6 +4941,7 @@ static void gcopy_retire(uint64_t done) {
             // back undid the CPU's writes made since, for good - wrong shadows while moving)
             uint8_t *g = (uint8_t *)(uintptr_t)gc_back[i].addr, *sh = gc_back[i].shadow;
             const uint8_t *src = gc_back[i].src;
+            ga_invalidate(src, gc_back[i].len);  // upstream: invalidate before comparing GPU stores on non-coherent heaps
             uint64_t unchanged = gc_merge_writeback(g, sh, src, gc_back[i].len, gc_back[i].bseq, gc_back[i].seq);
             atomic_fetch_add_explicit(&stat_wb_bytes, gc_back[i].len, memory_order_relaxed);
             atomic_fetch_add_explicit(&stat_wb_unchanged, unchanged, memory_order_relaxed);
@@ -4929,12 +4964,20 @@ static void gcopy_retire(uint64_t done) {
 // and copied into the slot by the GPU at the start of the submission. What a shader stored also goes back to guest
 // memory once its submission is done (the game reads some of it as uniform buffers, vertices, textures), and to the
 // range's last-uploaded copy, so that isn't taken for the CPU's write.
-typedef struct { uint64_t lo, hi; } GcRange;  // heap offsets, 256-aligned
+typedef struct { uint64_t lo, hi; bool store, learned; } GcRange;  // heap offsets, 256-aligned; learned: gres_learn
 #define GA_SIZE (128ull << 20)  // (the minimum maxStorageBufferRange)
-#define GA_RES (32ull << 20)    // [0, GA_RES): resident slots; the rest: the ring
+#define GA_RES (48ull << 20)    // [0, GA_RES): resident slots; the rest: the ring
 #define GA_SEG (8ull << 20)
 #define GA_NRES 512
-typedef struct { uint64_t lo, hi, off, checked; uint8_t *shadow; bool live; uint64_t *bseq; } GaRes;  // (bseq: per 256 B)
+typedef struct {
+    uint64_t lo, hi, off, checked;
+    uint8_t *shadow;
+    bool live;
+    uint64_t *bseq;  // (per 256 B)
+    bool learned, stored;  // (made by gres_learn; a shader has stored into it: never let go)
+    bool spare;            // (a learned window out of gl_learned: let go when the space runs out - ga_res_alloc)
+    uint64_t dead_seq;     // (let go: its space reusable once that submission is done - ga_free)
+} GaRes;
 static GaRes ga_res[GA_NRES];
 static int ga_nres;
 static VkBuffer ga_buf;
@@ -4943,7 +4986,42 @@ static uint8_t *ga_ptr;
 static uint64_t ga_res_top, ga_head = GA_RES, ga_seg_seq[GA_SIZE / GA_SEG];
 static int gres_state = -1;
 static uint64_t stat_gres_res, stat_gres_sync;  // (resident ranges used, CPU-changed bytes uploaded)
-static uint64_t stat_gres_fail[4];  // (fell back to the plain copies: 0 no entry/space, 1 table full, 2 ring, 3 too big)
+
+// The arena's memory not coherent (Mali: its cached type 0xb; no type is both cached and coherent): what the CPU
+// writes there is flushed before the next submission (ga_wrote, ga_flush_dirty), what the GPU stored is invalidated
+// before the CPU reads it (ga_invalidate). Without them the GPU read copies still in the CPU's cache and the CPU took
+// stale lines for the GPU's results - null pointers, doubled text (#71); 0.2.3 used the coherent type instead, which
+// on Mali is uncached: the CPU's reads and writes there crawled, 2-9 fps in the world (#88, #89, #93).
+#define GA_NDIRTY 64
+static bool ga_noncoherent;
+static struct { uint64_t lo, hi; } ga_dirty[GA_NDIRTY];
+static int ga_ndirty;
+
+static void ga_flush_dirty(void) {
+    if (!ga_ndirty) return;
+    VmaAllocation a[GA_NDIRTY];
+    VkDeviceSize o[GA_NDIRTY], sz[GA_NDIRTY];
+    for (int i = 0; i < ga_ndirty; i++) a[i] = ga_mem, o[i] = ga_dirty[i].lo, sz[i] = ga_dirty[i].hi - ga_dirty[i].lo;
+    vmaFlushAllocations(g_vk.vma, (uint32_t)ga_ndirty, a, o, sz);
+    ga_ndirty = 0;
+}
+
+// The CPU wrote [off, off + len) of the arena (render thread): flushed with the next submission. The ring's copies
+// follow each other, so they mostly extend the last range.
+static void ga_wrote(uint64_t off, uint64_t len) {
+    if (!ga_noncoherent || !len) return;
+    if (ga_ndirty && ga_dirty[ga_ndirty - 1].hi == off) { ga_dirty[ga_ndirty - 1].hi = off + len; return; }
+    if (ga_ndirty == GA_NDIRTY) ga_flush_dirty();
+    ga_dirty[ga_ndirty].lo = off, ga_dirty[ga_ndirty].hi = off + len;
+    ga_ndirty++;
+}
+
+// The GPU's stores in the arena at p, once their submission is done, before the CPU reads them
+static void ga_invalidate(const void *p, uint64_t len) {
+    if (ga_noncoherent) vmaInvalidateAllocation(g_vk.vma, ga_mem, (VkDeviceSize)((const uint8_t *)p - ga_ptr), len);
+}
+static uint64_t stat_gres_fail[5];  // (fell back to the plain copies: 0 no entry/space, 1 table full, 2 ring, 3 too big;
+                                     // 4 not a fall-back: a learned range left out for lack of table slots)
 
 static bool gres_init(void) {
     if (gres_state >= 0) return gres_state;
@@ -4953,16 +5031,20 @@ static bool gres_init(void) {
     VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = GA_SIZE,
                              .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
                                       VK_BUFFER_USAGE_TRANSFER_SRC_BIT};
-    // (coherent: the CPU writes its copies into it and reads the GPU's stores back with no flush or invalidate. Mali
-    // has no memory both cached and coherent - types 0x7 and 0xb - and cached was the incoherent one: the GPU read
-    // copies still in the CPU's cache and the CPU took stale lines for the GPU's results, written into the game's
-    // memory - null pointers in a different place each run, doubled text (issue #71, Mali-G925; #54, #62, #67).
-    // Adreno's Turnip has a cached coherent type, taken as before.)
+    // (cached: the CPU reads the GPU's stores back. Adreno's Turnip has a cached coherent type; Mali's cached one
+    // isn't coherent - flushed and invalidated by hand, ga_noncoherent)
     VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
                                   .flags = (getenv("LARECOMP_GA_UNCACHED") ? VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT
                                                                            : VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT) |
-                                           VMA_ALLOCATION_CREATE_MAPPED_BIT,  // (cached: read back; LARECOMP_GA_UNCACHED=1, a test)
-                                  .requiredFlags = VK_MEMORY_PROPERTY_HOST_COHERENT_BIT};
+                                           VMA_ALLOCATION_CREATE_MAPPED_BIT};  // (LARECOMP_GA_UNCACHED=1, a test)
+    if (getenv("LARECOMP_GA_NONCOHERENT")) {  // (a test: Mali's case on an Adreno - a cached type that isn't coherent)
+        VkPhysicalDeviceMemoryProperties mp;
+        vkGetPhysicalDeviceMemoryProperties(g_vk.phys, &mp);
+        for (uint32_t i = 0; i < mp.memoryTypeCount; i++)
+            if ((mp.memoryTypes[i].propertyFlags & (VK_MEMORY_PROPERTY_HOST_CACHED_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) ==
+                VK_MEMORY_PROPERTY_HOST_CACHED_BIT)
+                ai.memoryTypeBits |= 1u << i;
+    }
     VmaAllocationInfo inf;
     if (vmaCreateBuffer(g_vk.vma, &bi, &ai, &ga_buf, &ga_mem, &inf) != VK_SUCCESS || !inf.pMappedData) {
         LOG("[vk] global memory arena: not available\n");
@@ -4972,8 +5054,9 @@ static bool gres_init(void) {
     gres_state = 1;
     VkMemoryPropertyFlags mf;
     vmaGetMemoryTypeProperties(g_vk.vma, inf.memoryType, &mf);
-    LOG("[vk] global memory arena: %llu MB (what shaders store stays on the GPU), memory type %u (flags 0x%x)\n",
-        (unsigned long long)(GA_SIZE >> 20), inf.memoryType, (unsigned)mf);
+    ga_noncoherent = !(mf & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    LOG("[vk] global memory arena: %llu MB (what shaders store stays on the GPU), memory type %u (flags 0x%x%s)\n",
+        (unsigned long long)(GA_SIZE >> 20), inf.memoryType, (unsigned)mf, ga_noncoherent ? ": flushed and invalidated" : "");
     return true;
 }
 
@@ -5022,6 +5105,61 @@ static void gres_sync(GaRes *e) {
     }
 }
 
+// The resident part's space let go (merged slots, spare learned windows - gres_learn) and taken again: a slot only
+// ever took new space, and a long session filled the 48 MB - every learned window stayed resident (114 in 6 minutes
+// in Hateno, #89): new ranges no longer fit, the draws fell back to plain copies and the shaders' misses went
+// unlearned, the frame rate falling until the game restarted. A dead slot's space and index come back once its
+// submission is done and no write-back still points into it (gc_back).
+static bool ga_backs_into(uint64_t off, uint64_t len) {  // (a write-back still to come reads arena [off, off + len))
+    bool any = false;
+    pthread_mutex_lock(&gc_lock);
+    for (int i = 0; i < gc_nback && !any; i++) {
+        uint64_t s = (uint64_t)(gc_back[i].src - ga_ptr);
+        any = s < off + len && off < s + gc_back[i].len;
+    }
+    pthread_mutex_unlock(&gc_lock);
+    return any;
+}
+static void gres_reclaim(void) {
+    uint64_t done = vk_completed_seq();
+    for (int i = 0; i < ga_nres; i++) {
+        GaRes *e = &ga_res[i];
+        if (e->live || !e->shadow || e->dead_seq > done || ga_backs_into(e->off, e->hi - e->lo)) continue;
+        free(e->shadow), free(e->bseq);
+        e->shadow = NULL, e->bseq = NULL;  // (its index free: gres_get)
+    }
+    while (ga_nres && !ga_res[ga_nres - 1].live && !ga_res[ga_nres - 1].shadow) ga_nres--;
+}
+
+// Space for len bytes in the resident part: the top if it fits there, else the lowest gap between the slots in use
+// (live, or dead but not reclaimed yet) - ~0 when none
+static uint64_t ga_res_alloc(uint64_t len) {
+    static uint64_t cap;  // (LARECOMP_GA_RES_MB=<n>, a test: a smaller resident part, to see it reused)
+    if (!cap) { const char *e = getenv("LARECOMP_GA_RES_MB"); cap = e && atoi(e) > 0 && ((uint64_t)atoi(e) << 20) < GA_RES ? (uint64_t)atoi(e) << 20 : GA_RES; }
+    len = (len + 255) & ~255ull;
+    if (ga_res_top + len <= cap) { uint64_t off = ga_res_top; ga_res_top += len; return off; }
+    for (int i = 0; i < ga_nres; i++)  // (out of room: the spare learned windows let go - a miss there learns it again)
+        if (ga_res[i].live && ga_res[i].spare) ga_res[i].live = false, ga_res[i].dead_seq = vk_pending_seq();
+    gres_reclaim();
+    uint64_t at = 0;
+    for (;;) {  // (first fit: the slots in use sorted by place, a gap before each)
+        uint64_t next = ~0ull, end = 0;
+        for (int i = 0; i < ga_nres; i++) {
+            GaRes *e = &ga_res[i];
+            if (!e->live && !e->shadow) continue;
+            uint64_t eo = e->off, ee = e->off + ((e->hi - e->lo + 255) & ~255ull);
+            if (ee > at && eo < next) next = eo, end = ee;
+        }
+        if (next == ~0ull) {  // (nothing in use from here on: up to the resident part's end)
+            if (at + len > cap) return ~0ull;
+            if (at + len > ga_res_top) ga_res_top = at + len;
+            return at;
+        }
+        if (next >= at + len) return at;
+        at = end;
+    }
+}
+
 // The live resident entry covering heap [lo, hi); create: else a new one for it (and any it overlaps)
 static GaRes *gres_get(uint64_t lo, uint64_t hi, bool create) {
     for (int i = 0; i < ga_nres; i++)
@@ -5040,21 +5178,32 @@ static GaRes *gres_get(uint64_t lo, uint64_t hi, bool create) {
             if (e->hi > uhi) { uhi = e->hi; grew = true; }
         }
     }
-    if (no && in_pass) return NULL;  // (merging copies slot to slot: not inside a render pass)
+    if (no && in_pass) return NULL;  // (merging copies slot to slot: not inside a render pass - the draw is recorded
+                                     // in it right after, so it takes the plain copies this time)
     uint64_t len = uhi - ulo;
     int slot = -1;
-    for (int i = 0; i < ga_nres; i++) if (!ga_res[i].live && !ga_res[i].shadow) { slot = i; break; }
-    if (slot < 0 && ga_nres < GA_NRES) slot = ga_nres++;
-    if (slot < 0 || ga_res_top + len > GA_RES) return NULL;
+    for (int pass = 0; pass < 2 && slot < 0; pass++) {
+        if (pass) gres_reclaim();
+        for (int i = 0; i < ga_nres; i++) if (!ga_res[i].live && !ga_res[i].shadow) { slot = i; break; }
+        if (slot < 0 && ga_nres < GA_NRES) slot = ga_nres++;
+    }
+    uint64_t at = slot < 0 ? ~0ull : ga_res_alloc(len);
+    if (at == ~0ull) {
+        static int told;
+        if (!told++) LOG("[vk] global memory arena: its resident part is full (%d slots, %.1f of %llu MB in use)\n", ga_nres,
+                         ga_res_top / 1048576.0, (unsigned long long)(GA_RES >> 20));
+        if (slot >= 0 && slot == ga_nres - 1 && !ga_res[slot].shadow) ga_nres--;  // (the index taken back)
+        return NULL;
+    }
     GaRes *n = &ga_res[slot];
     uint8_t *shadow = malloc(len);
     uint64_t *bseq = calloc((len + 255) / 256, sizeof *bseq);
-    if (!shadow || !bseq) { free(shadow); free(bseq); return NULL; }
+    if (!shadow || !bseq) { free(shadow); free(bseq); if (slot == ga_nres - 1) ga_nres--; return NULL; }
     const uint8_t *g = (const uint8_t *)(uintptr_t)(HEAP_BASE + ulo);
-    *n = (GaRes){ulo, uhi, ga_res_top, renderer_present_count() + 1, shadow, true, bseq};  // (synced: this frame)
-    ga_res_top += (len + 255) & ~255ull;
+    *n = (GaRes){ulo, uhi, at, renderer_present_count() + 1, shadow, true, bseq};  // (synced: this frame)
     memcpy(shadow, g, len);
     memcpy(ga_ptr + n->off, g, len);  // (a new slot: nothing on the GPU uses it yet)
+    ga_wrote(n->off, len);
     if (no) {  // the overlapped slots may hold the GPU's results: into the new one, in GPU order
         VkCommandBuffer cb = vk_cmd();
         vk_full_barrier(cb);
@@ -5063,7 +5212,8 @@ static GaRes *gres_get(uint64_t lo, uint64_t hi, bool create) {
             gres_sync(e);
             VkBufferCopy cp = {e->off, n->off + (e->lo - ulo), e->hi - e->lo};
             vkCmdCopyBuffer(cb, ga_buf, ga_buf, 1, &cp);
-            e->live = false;  // (its slot isn't reused: the arena's resident part only grows until a reset)
+            n->stored |= e->stored;
+            e->live = false, e->dead_seq = vk_pending_seq();  // (its space and index back once that's done: gres_reclaim)
         }
         vk_full_barrier(cb);
     }
@@ -5084,6 +5234,7 @@ static void gres_learn(uint32_t off) {
     GaRes *in = NULL;
     for (int i = 0; i < ga_nres && !in; i++)
         if (ga_res[i].live && ga_res[i].lo <= off && off < ga_res[i].hi) in = &ga_res[i];
+    if (in) in->spare = false;
     if (!in) {  // (data the CPU writes, reached by pointer - the lights' parameters, objects' data: resident too, a
                 // window around it between the ranges already resident - 64 KB before, 256 KB after: the objects'
                 // data grows upward as the game allocates (walking around: a miss, and wrong shadows, for every
@@ -5098,8 +5249,15 @@ static void gres_learn(uint32_t off) {
             if (e->lo > off && e->lo < hi) hi = e->lo;
         }
         if (hi <= lo || !(in = gres_get(lo, hi, true))) return;
+        in->learned = true;
     }
-    if (gl_n == GL_MAX) memmove(gl_learned, gl_learned + 1, sizeof gl_learned[0] * --gl_n);
+    if (gl_n == GL_MAX) {  // (the oldest out - its window a spare, if only learning made it: ga_res_alloc)
+        for (int i = 0; i < ga_nres; i++) {
+            GaRes *e = &ga_res[i];
+            if (e->live && e->learned && !e->stored && e->lo == gl_learned[0].lo && e->hi == gl_learned[0].hi) e->spare = true;
+        }
+        memmove(gl_learned, gl_learned + 1, sizeof gl_learned[0] * --gl_n);
+    }
     gl_learned[gl_n++] = (GcRange){in->lo, in->hi};
     LOG("[vk] global memory: shaders reach heap %x outside their tables - %llx+%llx goes in every table\n", off,
         (unsigned long long)in->lo, (unsigned long long)(in->hi - in->lo));
@@ -5120,9 +5278,27 @@ static uint64_t ga_load_copy(uint64_t at, uint64_t size) {
     uint64_t off = ga_ring(size);
     if (off == ~0ull) return off;
     memcpy(ga_ptr + off, src, size);
+    ga_wrote(off, size);
     cache[slot].at = at; cache[slot].size = size; cache[slot].off = off;
     cache[slot].seq = seq; cache[slot].gen = gcopy_gen; cache[slot].valid = true;
     return off;
+}
+
+// The table entries a load range takes (gres_prepare: its resident parts and the gaps between them, one each)
+static int gres_need(uint64_t lo, uint64_t hi) {
+    int n = 0;
+    for (uint64_t at = lo; at < hi; n++) {
+        GaRes *in = NULL;
+        uint64_t next = hi;
+        for (int k = 0; k < ga_nres; k++) {
+            GaRes *e = &ga_res[k];
+            if (!e->live) continue;
+            if (e->lo <= at && at < e->hi) { in = e; break; }
+            if (e->lo > at && e->lo < next) next = e->lo;
+        }
+        at = in ? (hi < in->hi ? hi : in->hi) : next;
+    }
+    return n;
 }
 
 static bool gres_prepare(const GcRange *r, int m, bool store) {
@@ -5134,10 +5310,10 @@ static bool gres_prepare(const GcRange *r, int m, bool store) {
             int live = 0;
             for (int i = 0; i < ga_nres; i++) live += ga_res[i].live;
             LOG("[gres] frame %llu: %d resident ranges (%d entries), %.1f of %llu MB, %d learned, %.1f KB synced; plain copies "
-                "instead: %llu no entry/space, %llu table full, %llu ring, %llu too big\n", (unsigned long long)last, live, ga_nres,
-                ga_res_top / 1048576.0, (unsigned long long)(GA_RES >> 20), gl_n, stat_gres_sync / 1024.0,
-                (unsigned long long)stat_gres_fail[0], (unsigned long long)stat_gres_fail[1], (unsigned long long)stat_gres_fail[2],
-                (unsigned long long)stat_gres_fail[3]);
+                "instead: %llu no entry/space, %llu table full, %llu ring, %llu too big; %llu learned ranges left out\n",
+                (unsigned long long)last, live, ga_nres, ga_res_top / 1048576.0, (unsigned long long)(GA_RES >> 20), gl_n,
+                stat_gres_sync / 1024.0, (unsigned long long)stat_gres_fail[0], (unsigned long long)stat_gres_fail[1],
+                (unsigned long long)stat_gres_fail[2], (unsigned long long)stat_gres_fail[3], (unsigned long long)stat_gres_fail[4]);
             stat_gres_sync = 0;
             memset(stat_gres_fail, 0, sizeof stat_gres_fail);
         }
@@ -5149,6 +5325,7 @@ static bool gres_prepare(const GcRange *r, int m, bool store) {
             static int logit = -1;
             if (logit < 0) logit = getenv("LARECOMP_GMISS") != NULL;
             uint32_t *w = (uint32_t *)(ga_ptr + (uint64_t)GMISS_WORD * 4);
+            ga_invalidate(w, 4096);
             uint32_t cnt = __atomic_load_n(&w[0], __ATOMIC_RELAXED);
             if (cnt) {
                 char b[1024];
@@ -5165,8 +5342,19 @@ static bool gres_prepare(const GcRange *r, int m, bool store) {
                 }
                 if (logit) LOG("[gmiss] frame %llu: %u accesses outside the tables, at:%s\n", (unsigned long long)last_frame, cnt, b);
                 w[0] = 0;
+                ga_wrote((uint64_t)GMISS_WORD * 4, 4);
             }
         }
+    }
+    // Learned ranges take only the slots the draw's own ranges leave: a table they filled failed the whole draw over
+    // to the plain copies - every range copied by the CPU, megabytes a draw. After loads (a teleport, out of a shrine)
+    // the learned ranges fill up: 15 GB of copies every 2 s and 6 fps on a Mali-G925 until the game restarted (#89),
+    // the same on a Mali-G720 before its crashes (#131). A learned range left out reads zero there, as before learning.
+    int need[6 * 16 + GL_MAX], after[6 * 16 + GL_MAX + 1];  // (entries each range takes; the bound ones' from i on)
+    after[m] = 0;
+    for (int i = m - 1; i >= 0; i--) {
+        need[i] = r[i].store ? 1 : gres_need(r[i].lo, r[i].hi);
+        after[i] = after[i + 1] + (r[i].learned ? 0 : need[i]);
     }
     uint32_t tab[(GMAP_MAX + 1) * 4];
     memset(tab, 0, sizeof tab);
@@ -5181,9 +5369,11 @@ static bool gres_prepare(const GcRange *r, int m, bool store) {
     } while (0)
     for (int i = 0; i < m; i++) {
         uint64_t lo = r[i].lo, hi = r[i].hi;
-        if (store) {  // a storing shader's ranges: resident from now on
+        if (r[i].learned && n + need[i] + after[i + 1] > GMAP_MAX && AB("glskip") != 0) { stat_gres_fail[4]++; continue; }
+        if (r[i].store) {  // a storing shader's bound ranges: resident from now on
             GaRes *e = gres_get(lo, hi, true);
             if (!e) { stat_gres_fail[0]++; return false; }
+            e->stored = true;
             gres_sync(e);
             GRES_ADD(lo, hi - lo, e->off + (lo - e->lo));
             stat_gres_res++;
@@ -5208,12 +5398,19 @@ static bool gres_prepare(const GcRange *r, int m, bool store) {
             }
             if (in) {
                 uint64_t end = hi < in->hi ? hi : in->hi;
+                if (end < hi && n == GMAP_MAX - 1) {  // (one table slot left: copy the whole tail rather than overflow)
+                    uint64_t off = ga_load_copy(at, hi - at);
+                    if (off == ~0ull) { stat_gres_fail[hi - at > GA_SEG ? 3 : 2]++; return false; }
+                    GRES_ADD(at, hi - at, off);
+                    break;
+                }
                 gres_sync(in);
                 GRES_ADD(at, end - at, in->off + (at - in->lo));
                 stat_gres_res++;
                 at = end;
                 continue;
             }
+            if (next < hi && n == GMAP_MAX - 1) next = hi;
             uint64_t off = ga_load_copy(at, next - at);
             if (off == ~0ull) { stat_gres_fail[next - at > GA_SEG ? 3 : 2]++; return false; }
             GRES_ADD(at, next - at, off);
@@ -5237,11 +5434,16 @@ static VkDescriptorBufferInfo gmiss_info(void) {
 }
 
 static void gres_reset(void) {
+    pthread_mutex_lock(&gc_lock);
+    gc_nback = 0;  // (their shadow / bseq pointers and guest addresses belong to the boot being torn down)
+    pthread_mutex_unlock(&gc_lock);
     for (int i = 0; i < ga_nres; i++) { free(ga_res[i].shadow); free(ga_res[i].bseq); }
     memset(ga_res, 0, sizeof ga_res);
     ga_nres = 0;
     ga_res_top = 0;
     ga_head = GA_RES;
+    ga_ndirty = 0;
+    gl_n = 0;
     memset(ga_seg_seq, 0, sizeof ga_seg_seq);
 }
 
@@ -5255,6 +5457,7 @@ static void gres_reset(void) {
 static void gwin_prepare(unsigned stage_mask) {
     memset(gmap_tab, 0, sizeof gmap_tab);
     gfast_n = 0;
+    gc_size = 0;
     gmem_info();
     uint64_t reach = g_vk.props.limits.maxStorageBufferRange & ~3ull;
     gfast_win = (VkDescriptorBufferInfo){gmem_buf, 0, reach < gmem_size ? reach : gmem_size};
@@ -5315,22 +5518,32 @@ static void gcopy_prepare(unsigned stage_mask, bool store) {
             lo = lo > (uint64_t)margin ? (lo - (uint64_t)margin) & ~255ull : 0;
             int k = n++;
             while (k > 0 && r[k - 1].lo > lo) { r[k] = r[k - 1]; k--; }
-            r[k].lo = lo; r[k].hi = hi;
+            r[k] = (GcRange){lo, hi, store};
         }
     }
-    for (int i = 0; i < gl_n && n < 6 * 16; i++) {  // (the learned ranges: reached through pointers - gres_learn)
-        int k = n++;
-        while (k > 0 && r[k - 1].lo > gl_learned[i].lo) { r[k] = r[k - 1]; k--; }
-        r[k] = gl_learned[i];
-    }
     int m = 0;
-    for (int i = 0; i < n; i++) {  // merged (nearby ranges too: a table entry costs more than a small gap)
+    for (int i = 0; i < n; i++) {  // merged (nearby bound ranges too: a table entry costs more than a small gap)
         if (m && r[i].lo <= r[m - 1].hi + 4096) { if (r[i].hi > r[m - 1].hi) r[m - 1].hi = r[i].hi; }
         else r[m++] = r[i];
     }
-    if (m > GMAP_MAX) {  // (more ranges than the table holds: one covering them all)
-        r[0].hi = r[m - 1].hi;
-        m = 1;
+    if (m > GMAP_MAX) m = GMAP_MAX;
+    // The learned ranges (reached through pointers - gres_learn): newest first while table slots remain, never
+    // expanding a storing range's write-back or collapsing unrelated heap regions into one multi-megabyte span.
+    for (int i = gl_n - 1; i >= 0 && m < GMAP_MAX - 2; i--) {
+        uint64_t lo = gl_learned[i].lo, hi = gl_learned[i].hi;
+        bool covered = false;
+        for (int k = 0; k < m && !covered; k++) {
+            if (r[k].lo <= lo && hi <= r[k].hi) { covered = true; break; }
+            if (!r[k].store && lo <= r[k].hi + 4096 && hi + 4096 >= r[k].lo) {
+                if (lo < r[k].lo) r[k].lo = lo;
+                if (hi > r[k].hi) r[k].hi = hi;
+                covered = true;
+            }
+        }
+        if (covered) continue;
+        int k = m++;
+        while (k > 0 && r[k - 1].lo > lo) { r[k] = r[k - 1]; k--; }
+        r[k] = (GcRange){lo, hi, false, true};
     }
     uint64_t total = 0;
     for (int i = 0; i < m; i++) total += (r[i].hi - r[i].lo + 255) & ~255ull;
@@ -5360,12 +5573,25 @@ static void gcopy_prepare(unsigned stage_mask, bool store) {
         gmap_tab[i * 4 + 0] = (uint32_t)r[i].lo;
         gmap_tab[i * 4 + 1] = (uint32_t)len;
         gmap_tab[i * 4 + 2] = (uint32_t)(off >> 2);
-        if (store && gc_nback < 256)
+        if (r[i].store && !gres_init() && gc_nback < 256)
             gc_back[gc_nback++] = (GcBack){(const uint8_t *)gc_span.ptr + off, HEAP_BASE + r[i].lo, len, seq, NULL, NULL};
         off += (len + 255) & ~255ull;
     }
     pthread_mutex_unlock(&gc_lock);
     gmap_tab[GMAP_MAX * 4] = (uint32_t)m;
+}
+static void arena_diag_stats(void) {
+    unsigned live=0, stored=0;
+    uint64_t bytes=0;
+    for (int i=0; i<ga_nres; i++) if (ga_res[i].live) {
+        live++;
+        stored += ga_res[i].stored;
+        bytes += ga_res[i].hi-ga_res[i].lo;
+    }
+    LOG("[arena-diag] table_slots=%u live=%u stored=%u learned=%d resident_live=%.2fMB capacity=%lluMB noncoherent=%u fallback_counts=%llu/%llu/%llu/%llu learned_omitted=%llu\n",
+        GMAP_MAX, live, stored, gl_n, bytes/1048576.0, (unsigned long long)(GA_RES>>20), ga_noncoherent,
+        (unsigned long long)stat_gres_fail[0], (unsigned long long)stat_gres_fail[1],
+        (unsigned long long)stat_gres_fail[2], (unsigned long long)stat_gres_fail[3], (unsigned long long)stat_gres_fail[4]);
 }
 #endif
 
@@ -7501,6 +7727,7 @@ static void copy_texture_to_buffer(const TexRefRec *src, uint64_t dst) {
     vkCmdCopyImageToBuffer(cb, srcimg, VK_IMAGE_LAYOUT_GENERAL, out.buf, 1, &c);
     wait_why = "texture -> buffer readback";
     renderer_flush();  // the CPU may read the result right after the fence
+    vk_readback_ready(total);
     memcpy((void *)(uintptr_t)dst, out.ptr, total);
     {   static int nlog, max = -1;
         if (max < 0) max = !getenv("LARECOMP_LOG_READBACK") ? 0 : atoi(getenv("LARECOMP_LOG_READBACK")) > 1 ? 1 << 30 : 20;
@@ -8141,6 +8368,7 @@ static void save_texture_raw(TexBackend *b, const char *path) {
                            .imageExtent = {b->width, b->height, 1}};
     vkCmdCopyImageToBuffer(cb, b->image, VK_IMAGE_LAYOUT_GENERAL, out.buf, 1, &c);
     renderer_flush();
+    vk_readback_ready(size);
     char rp[300];
     snprintf(rp, sizeof rp, "%s.raw", path);
     FILE *f = fopen(rp, "wb");
@@ -8199,6 +8427,7 @@ void renderer_save_texture_tex(TexBackend *b, const char *path) {
     VkBufferImageCopy c = {.bufferOffset = out.off, .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .imageExtent = {w, h, 1}};
     vkCmdCopyImageToBuffer(cb, img, VK_IMAGE_LAYOUT_GENERAL, out.buf, 1, &c);
     renderer_flush();
+    vk_readback_ready((uint64_t)w * h * 4);
     vk_save_png(path, out.ptr, w, h);
     vk_rp_forget_view(tv);
     vkDestroyImageView(g_vk.dev, tv, NULL);
@@ -8274,6 +8503,7 @@ static void exec_list(uint64_t handle, int depth) {
             if (log < 0) log = getenv("LARECOMP_LOG_RENDER_ENABLE") != NULL;
             bool clr = r->op == CMD_CLEAR_COLOR || r->op == CMD_CLEAR_DEPTH_STENCIL || r->op == CMD_CLEAR_TEXTURE;
             clr ? nclear++ : ndraw++;
+            if (clr) stat_cond_clears++; else stat_cond_draws++;
             if (log && renderer_present_count() >= at) {
                 at = renderer_present_count() + 120;
                 LOG("[vk] render enable: %llu draws, %llu clears left out\n", (unsigned long long)ndraw, (unsigned long long)nclear);

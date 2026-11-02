@@ -2,6 +2,12 @@
 #include <stdio.h>
 #include "../runtime/nvn/vulkan/effect_trace.h"
 int main(void) {
+    assert(!effect_trace_candidate(0xfe,1,1280,720,false,false));
+    assert(!effect_trace_candidate(0xff,1,64,64,false,false));
+    assert(!effect_trace_candidate(0xff,0,1280,720,true,false));
+    assert(effect_trace_candidate(1,1,640,360,true,false));
+    assert(effect_trace_candidate(0,1,1280,720,true,false));
+    assert(!effect_trace_candidate(0,1,1280,720,true,true));
     EffectTrace s={0};
     assert(!effect_trace_frame(&s,0,false));
     for(unsigned burst=0;burst<3;burst++) {
