@@ -25,6 +25,7 @@
 #include <string.h>
 
 #include "vk.h"
+#include "fg_pacing.h"
 #include "../../diag.h"
 #include "../../platform.h"
 #include "../../settings.h"
@@ -89,6 +90,7 @@ static VkExtent2D ctx_ext;
 static uint64_t fg_count;     // real frames given to the framegen (the one of number k is in fin[k % 2])
 static bool have_prev;        // fin[(fg_count - 1) % 2] holds the real frame before (a generated one can be shown)
 static uint64_t last_real_ns, last_shown_ns, base_ewma_ns;
+static uint64_t pacing_skipped, pacing_resets;
 static uint64_t next_slot_ns;  // (with presentation times) the next free slot of the 60 Hz output grid
 static VkQueryPool ts_pool;   // (the framegen's GPU time: our timestamps either side of its work)
 static uint32_t ts_i;
@@ -368,13 +370,14 @@ bool fg_frame(TexBackend *b, float vx, float vy, float vw, float vh, const float
     if (g_vk.display_timing) {
         // With presentation times (FIFO): I at the next slot of a 60 Hz grid, B at the one after, both queued at once -
         // the compositor holds each until its time, and the render thread goes straight on to the next frame. The grid
-        // follows the real frames: a slot already past, or more than two periods ahead (the queue would grow), starts
-        // it again from now.
+        // follows the real frames: missed deadlines advance by whole output periods, preserving phase.
+        // A pause or an excessive backlog starts it again from the current scheduling time.
         const uint64_t OUT_NS = 1000000000ull / (uint64_t)modes[mode_now()].out;
         period = OUT_NS;
-        uint64_t t_i = now + 2000000ull;
-        if (next_slot_ns > t_i && next_slot_ns - t_i < 2ull * OUT_NS) t_i = next_slot_ns;
-        else if (next_slot_ns && next_slot_ns > t_i) st_drop++;  // (behind: the grid starts over, no image skipped)
+        FgSlot slot = fg_slot(have_prev ? next_slot_ns : 0, plat_now_ns(), OUT_NS);
+        uint64_t t_i = slot.target;
+        pacing_skipped += slot.skipped;
+        pacing_resets += slot.reset;
         if (have_prev) {
             if (ts_pool) ts_write(vk_cmd(), tq + 1), ts_used[ts_i] = true;
             for (int i = 0; i < ctx_nout; i++) {  // (the generated frames in order, one slot each, then B)
@@ -435,6 +438,10 @@ bool fg_frame(TexBackend *b, float vx, float vy, float vw, float vh, const float
                         b->width, b->height, (int)b->format, tg[0] ? tg : "none");
                 }
             }
+            if (diag_want_gpu_ts())
+                LOG("[fg-pacing] grid_skipped_slots=%llu grid_resets=%llu (time slots, not dropped images)\n",
+                    (unsigned long long)pacing_skipped, (unsigned long long)pacing_resets);
+            pacing_skipped = pacing_resets = 0;
             st_real = st_gen = st_drop = st_gpu_ns = st_gpu_n = st_hud = 0, st_since = t;
         }
     }
