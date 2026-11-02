@@ -2,6 +2,7 @@
 #include <SDL3/SDL_cpuinfo.h>
 #include "writeback_policy.h"
 #include "writeback_merge.h"
+#include "writeback_queue.h"
 #include "effect_trace.h"
 #include <SDL3/SDL_timer.h>
 #include <float.h>
@@ -39,6 +40,7 @@ static uint64_t stat_inplace_breaks;  // (passes ended so a draw reads a target 
 static uint64_t stat_upload_bytes;
 static uint64_t stat_cond_draws, stat_cond_clears;
 static _Atomic uint64_t stat_wb_bytes, stat_wb_unchanged;
+static _Atomic uint64_t stat_wb_coalesced, stat_wb_avoided, stat_wb_full;
 static uint64_t stat_cb_bytes[2], stat_cb_n[2], stat_cb_copied, stat_cbwin;  // (LARECOMP_LOG_CBUF_BYTES: game constant buffers bound,
                                                                  // fixed [0] / dynamically indexed [1], and bytes copied)
 static uint64_t stat_pipe_binds, stat_set_binds;  // (graphics draws: pipelines / descriptor sets bound)
@@ -1521,6 +1523,9 @@ const char *renderer_stats(void) {
     LOG("[graphics-diag] conditional render suppressed draws=%llu clears=%llu (separate from shader/pipeline skips)\n",
         (unsigned long long)stat_cond_draws, (unsigned long long)stat_cond_clears);
     stat_cond_draws = stat_cond_clears = 0;
+    LOG("[graphics-diag] writeback coalesced=%llu avoided_scan=%.2fMB queue_full=%llu\n",
+        (unsigned long long)atomic_exchange(&stat_wb_coalesced, 0), atomic_exchange(&stat_wb_avoided, 0)/1048576.0,
+        (unsigned long long)atomic_exchange(&stat_wb_full, 0));
     LOG("[graphics-diag] writeback checked=%.2fMB bulk_unchanged=%.2fMB (CPU conflict policy remains 256 bytes)\n",
         atomic_exchange(&stat_wb_bytes, 0) / 1048576.0, atomic_exchange(&stat_wb_unchanged, 0) / 1048576.0);
     stat_feedback_depth_copies = stat_feedback_color_copies = stat_feedback_reused = 0;
@@ -4922,10 +4927,19 @@ static void gfast_finish(VkCommandBuffer cb) {
 // What a storing shader wrote goes back to guest memory once its submission is done (gcopy_retire: from vk_transient
 // before the ring reuses a chunk, and after every wait). Without this, global loads read zero: the game's text is
 // drawn by a vertex shader that reads its vertices that way (nothing of it showed).
-typedef struct { const uint8_t *src; uint64_t addr, len, seq; uint8_t *shadow; const uint64_t *bseq; } GcBack;  // (arena)
 static GcBack gc_back[256];
 static int gc_nback;
 static pthread_mutex_t gc_lock = PTHREAD_MUTEX_INITIALIZER;
+static int gc_hints[256];
+// gc_lock held. Exact duplicates share one retirement; overlapping intervening writes keep their order.
+static void gcopy_enqueue(GcBack v) {
+    int result = wb_queue_add(gc_back, &gc_nback, 256, gc_hints, v);
+    if (!result) {
+        atomic_fetch_add_explicit(&stat_wb_coalesced, 1, memory_order_relaxed);
+        atomic_fetch_add_explicit(&stat_wb_avoided, v.len, memory_order_relaxed);
+    } else if (result < 0) atomic_fetch_add_explicit(&stat_wb_full, 1, memory_order_relaxed);
+}
+
 
 static void gcopy_retire(uint64_t done) {
     pthread_mutex_lock(&gc_lock);
@@ -5022,6 +5036,7 @@ static void ga_invalidate(const void *p, uint64_t len) {
 }
 static uint64_t stat_gres_fail[5];  // (fell back to the plain copies: 0 no entry/space, 1 table full, 2 ring, 3 too big;
                                      // 4 not a fall-back: a learned range left out for lack of table slots)
+static uint64_t stat_gres_pass_merge;
 
 static bool gres_init(void) {
     if (gres_state >= 0) return gres_state;
@@ -5178,7 +5193,7 @@ static GaRes *gres_get(uint64_t lo, uint64_t hi, bool create) {
             if (e->hi > uhi) { uhi = e->hi; grew = true; }
         }
     }
-    if (no && in_pass) return NULL;  // (merging copies slot to slot: not inside a render pass - the draw is recorded
+    if (no && in_pass) { stat_gres_pass_merge++; return NULL; }  // (merging copies slot to slot: not inside a render pass - the draw is recorded
                                      // in it right after, so it takes the plain copies this time)
     uint64_t len = uhi - ulo;
     int slot = -1;
@@ -5381,9 +5396,8 @@ static bool gres_prepare(const GcRange *r, int m, bool store) {
             // also reads what its compute shaders wrote as uniform buffers, vertices and textures, which come from
             // guest memory (gcopy_retire, at the game's waits)
             pthread_mutex_lock(&gc_lock);
-            if (gc_nback < 256)
-                gc_back[gc_nback++] = (GcBack){ga_ptr + e->off + (lo - e->lo), HEAP_BASE + lo, hi - lo, vk_pending_seq(),
-                                               e->shadow + (lo - e->lo), e->bseq + (lo - e->lo) / 256};
+            gcopy_enqueue((GcBack){ga_ptr + e->off + (lo - e->lo), HEAP_BASE + lo, hi - lo, vk_pending_seq(),
+                                   e->shadow + (lo - e->lo), e->bseq + (lo - e->lo) / 256});
             pthread_mutex_unlock(&gc_lock);
             continue;
         }
@@ -5573,8 +5587,8 @@ static void gcopy_prepare(unsigned stage_mask, bool store) {
         gmap_tab[i * 4 + 0] = (uint32_t)r[i].lo;
         gmap_tab[i * 4 + 1] = (uint32_t)len;
         gmap_tab[i * 4 + 2] = (uint32_t)(off >> 2);
-        if (r[i].store && !gres_init() && gc_nback < 256)
-            gc_back[gc_nback++] = (GcBack){(const uint8_t *)gc_span.ptr + off, HEAP_BASE + r[i].lo, len, seq, NULL, NULL};
+        if (r[i].store && !gres_init())
+            gcopy_enqueue((GcBack){(const uint8_t *)gc_span.ptr + off, HEAP_BASE + r[i].lo, len, seq, NULL, NULL});
         off += (len + 255) & ~255ull;
     }
     pthread_mutex_unlock(&gc_lock);
@@ -5588,8 +5602,9 @@ static void arena_diag_stats(void) {
         stored += ga_res[i].stored;
         bytes += ga_res[i].hi-ga_res[i].lo;
     }
-    LOG("[arena-diag] table_slots=%u live=%u stored=%u learned=%d resident_live=%.2fMB capacity=%lluMB noncoherent=%u fallback_counts=%llu/%llu/%llu/%llu learned_omitted=%llu\n",
+    LOG("[arena-diag] table_slots=%u live=%u stored=%u learned=%d resident_live=%.2fMB capacity=%lluMB noncoherent=%u merge_in_pass_rejects=%llu fallback_counts=%llu/%llu/%llu/%llu learned_omitted=%llu\n",
         GMAP_MAX, live, stored, gl_n, bytes/1048576.0, (unsigned long long)(GA_RES>>20), ga_noncoherent,
+        (unsigned long long)stat_gres_pass_merge,
         (unsigned long long)stat_gres_fail[0], (unsigned long long)stat_gres_fail[1],
         (unsigned long long)stat_gres_fail[2], (unsigned long long)stat_gres_fail[3], (unsigned long long)stat_gres_fail[4]);
 }
