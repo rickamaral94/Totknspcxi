@@ -24,8 +24,8 @@ android {
         applicationId = "com.totkrecompandroid"
         minSdk = 30
         targetSdk = 36
-        versionCode = 14
-        versionName = "0.2.1-beta-amaral.11"
+        versionCode = 15
+        versionName = "0.2.1-beta-amaral.12"
         ndk {
             abiFilters += "arm64-v8a"
         }

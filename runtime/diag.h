@@ -72,6 +72,7 @@ const char *diag_function_name(uint64_t pc, uint64_t *offset);         // f_<gue
 const char *diag_report_path(void);                                    // where the report file goes (NULL: log only)
 
 #ifdef DIAG_TESTING
+int diag_test_present_count(void);
 // (tests) the pure parts: percentiles, the per-thread accounting and the ring
 double diag_test_percentile(uint64_t *v, int n, double p);
 void diag_test_set_clock(uint64_t (*now)(void));

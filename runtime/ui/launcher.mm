@@ -1714,6 +1714,8 @@ static void prelaunch_tab(float sc) {
             if (st == 1) ImGui::TextDisabled("%s", tr("Performance measurement: waiting for 5 s of gameplay, out of the menus."));
             else if (st == 2) ImGui::Text(tr("Measuring performance: %s s left."), msg);
             else {
+                if (ImGui::Button(tr("Measure performance (10 min)"))) diag_request(600);
+                ImGui::SameLine();
                 if (ImGui::Button(tr("Measure performance (60 s)"))) diag_request(60);
                 ImGui::SameLine();
                 if (ImGui::Button(tr("Compare: constant buffers (120 s)"))) diag_request_ab_feature(120, 1);
@@ -1721,6 +1723,7 @@ static void prelaunch_tab(float sc) {
                 if (ImGui::Button(tr("Compare: ADPF threads (120 s)"))) diag_request_ab_feature(120, 2);
                 if (st == 3) ImGui::Text(tr("Measurement done: the report is in the log and in %s"), msg);
             }
+            ImGui::TextDisabled("%s", tr("10-minute capture: keep playing until the countdown ends, then send the log. Includes minute-by-minute FPS and temperature."));
             ImGui::TextDisabled("%s", tr("In the next game session, records 60 s of gameplay once you have played 5 s out of "
                                          "the menus: where each frame's time goes (the game's threads, the GPU, the clocks). "
                                          "A line in the corner shows it. Play the same stretch as usual, then send the log. "

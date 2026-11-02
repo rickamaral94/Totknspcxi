@@ -254,7 +254,7 @@ void diag_pop_(void) {
 }
 
 // ---------------------------------------------------------------- frames
-#define FMAX 16384
+#define FMAX 131072  // 10 min at 120 presents/s plus headroom; includes generated images
 static uint64_t f_interval[FMAX], f_acquire[FMAX], f_present[FMAX], f_gpu[FMAX], f_comp[FMAX];
 static uint64_t f_shown[FMAX], f_last_shown;  // (the intervals between images as the compositor showed them)
 static uint8_t f_shown_flags[FMAX];            // (1, and 4 with the compared feature on)
@@ -267,6 +267,7 @@ static uint8_t f_flags[FMAX];  // 1 gameplay, 2 sampler on, 4 the compared featu
 static uint64_t f_rcpu[FMAX], f_mcpu[FMAX];  // the render thread's and the main thread's own CPU time per interval
 static int f_n, f_ncomp, f_nmenu;
 static uint64_t f_last, f_last_gpu, f_next_stats, f_next_block;
+static uint64_t f_checkpoint_next, f_checkpoint_real, f_checkpoint_ns;
 #define CL 8
 static uint32_t cl_min[CL], cl_max[CL];
 static uint64_t cl_sum[CL];
@@ -324,7 +325,7 @@ bool diag_want_gpuprof(void) {
     if (atomic_load_explicit(&g_state, memory_order_relaxed) != 2 || g_gp_n >= GPCAP || atomic_load(&g_gp_pending)) return false;
     uint64_t now = now_fn();
     if (now < g_gp_next || now + 1000000000ull > atomic_load(&win_t1) || !diag_in_gameplay()) return false;  // (not in the last 1 s)
-    g_gp_next = now + 15000000000ull;
+    g_gp_next = now + (uint64_t)(g_seconds > 60 ? (g_seconds - 20) / 3 : 15) * 1000000000ull;
     atomic_store(&g_gp_pending, 1);
     atomic_store(&g_gp_skip, 3);
     return true;
@@ -496,6 +497,8 @@ void diag_present(uint64_t acquire_ns, uint64_t present_ns) {
         atomic_store(&g_sampler_on, 1);
         f_next_block = now + 5000000000ull;
         f_next_stats = now;
+        f_checkpoint_next = now + 60000000000ull;
+        f_checkpoint_real = f_checkpoint_ns = 0;
         f_last = 0;
         f_last_gpu = diag_gpu_busy_total_ns();
         atomic_store(&win_t1, now + (uint64_t)g_seconds * 1000000000ull);
@@ -554,6 +557,14 @@ void diag_present(uint64_t acquire_ns, uint64_t present_ns) {
         }
         if (ds.thermal > thermal_max) thermal_max = ds.thermal;
         if (ds.headroom >= 0 && ds.headroom < headroom_min) headroom_min = ds.headroom;
+        if (now >= f_checkpoint_next) {
+            uint64_t nr = rf_n - f_checkpoint_real, ns = rf_ns - f_checkpoint_ns;
+            LOG("[diag-minute] elapsed=%llu/%ds real_fps=%.2f SoC=%.1fC thermal=%d presents=%d/%d\n",
+                (unsigned long long)((now - atomic_load(&win_t0)) / 1000000000ull), g_seconds,
+                ns ? nr * 1e9 / ns : 0.0, ds.soc_temp_c, ds.thermal, f_n, FMAX);
+            f_checkpoint_real = rf_n; f_checkpoint_ns = rf_ns;
+            f_checkpoint_next += 60000000000ull;
+        }
     }
 #endif
     if (now >= f_next_block) {  // the sampler: 5 s on, 5 s off
@@ -1016,6 +1027,7 @@ static void report_start(void) {
 }
 
 #ifdef DIAG_TESTING
+int diag_test_present_count(void) { return f_n; }
 double diag_test_percentile(uint64_t *v, int n, double p) { return percentile(v, n, p); }
 void diag_test_set_clock(uint64_t (*fn)(void)) { now_fn = fn ? fn : clock_now; }
 void diag_test_begin_window(uint64_t t0, uint64_t t1) {

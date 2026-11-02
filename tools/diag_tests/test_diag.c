@@ -215,6 +215,30 @@ static void test_framegen(void) {
     diag_test_set_clock(NULL);
 }
 
+static void test_ten_minutes(void) {
+    diag_test_set_clock(fake_now);
+    fake_ns = 900000000000ull;
+    diag_request(600);
+    uint32_t id = 0;
+    for (int f = 0; f < 606 * 120; f++) {
+        fake_ns += 8333333;
+        if (!(f % 4)) diag_real_frame();
+        diag_present(100000, 200000);
+        diag_displayed(++id, fake_ns);
+    }
+    uint64_t real, real_ns, shown0;
+    int shown;
+    diag_test_framegen(&real, &real_ns, &shown, &shown0);
+    CHECK(diag_test_present_count() > 71000);
+    CHECK(shown > 71000);
+    CHECK(real > 17900 && real < 18100);
+    CHECK(real_ns > 599000000000ull);
+    struct timespec ts = {1, 0};
+    nanosleep(&ts, NULL);
+    CHECK(diag_status(NULL, 0) == 3);
+    diag_test_set_clock(NULL);
+}
+
 int main(void) {
     test_percentiles();
     test_accounting();
@@ -223,6 +247,7 @@ int main(void) {
     test_ab();
     test_graphics();
     test_framegen();
+    test_ten_minutes();
     if (fails) { fprintf(stderr, "%d failed\n", fails); return 1; }
     fprintf(stderr, "all passed\n");
     return 0;
