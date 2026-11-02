@@ -39,6 +39,7 @@ static uint64_t stat_feedback_reads;  // (attachments sampled as they are: only 
 static uint64_t stat_inplace_breaks;  // (passes ended so a draw reads a target the pass wrote: resolve_feedback)
 static uint64_t stat_upload_bytes;
 static uint64_t stat_guest_upload[3], stat_guest_reused;
+static uint64_t stat_guest_miss_bytes[3], stat_guest_misses[3], stat_guest_invalidated;
 static uint64_t stat_ga_copied, stat_ga_reused, stat_ga_evicted, stat_ga_hits, stat_ga_misses;
 static uint64_t stat_cond_draws, stat_cond_clears;
 static _Atomic uint64_t stat_wb_bytes, stat_wb_unchanged;
@@ -1225,7 +1226,7 @@ static VkSpan copy_dedupe(int slot, const void *data, uint64_t size, uint64_t al
 
 // Guest memory copied once per submission: draws binding the same range share the copy.
 #define GCOPY_TAB 4096
-static struct { uint64_t addr, size, seq; VkSpan span; } gcopy[GCOPY_TAB];
+static struct { uint64_t addr, size, seq, tracked; VkSpan span; } gcopy[GCOPY_TAB];
 static uint16_t gcopy_active[GCOPY_TAB];
 static int gcopy_nactive;
 static uint64_t gcopy_active_seq;
@@ -1236,7 +1237,9 @@ static void guest_copy_invalidate(uint64_t lo, uint64_t hi) {
     if (gcopy_active_seq != seq) return;
     for (int i = 0; i < gcopy_nactive; i++) {
         uint16_t s = gcopy_active[i];
-        if (gcopy[s].seq == seq && gcopy[s].addr < hi && lo < gcopy[s].addr + gcopy[s].size) gcopy[s].seq = 0;
+        if (gcopy[s].seq == seq && gcopy[s].addr < hi && lo < gcopy[s].addr + gcopy[s].size) {
+            gcopy[s].seq = 0; stat_guest_invalidated++;
+        }
     }
 }
 // Buffer copies made on the GPU (gpu_buffer_copy, below): their destinations, until the submission that copies is done.
@@ -1281,18 +1284,37 @@ static VkSpan guest_copy(uint64_t addr, uint64_t size, int kind) {
     }
     uint64_t seq = vk_pending_seq() + (gcopy_gen << 40), h = addr * 0x9E3779B97F4A7C15ull;
     if (gcopy_active_seq != seq) { gcopy_active_seq = seq; gcopy_nactive = 0; }
-    uint32_t slot = (uint32_t)(h ^ (h >> 32)) & (GCOPY_TAB - 1);
-    if (gcopy[slot].seq == seq && gcopy[slot].addr == addr && (gcopy[slot].size == size || (gcopy[slot].size > size && AB("gcreuse") != 0))) {
-        prof_gcopy_reused += size;
-        stat_guest_reused += size;
-        return gcopy[slot].span;
+    // Four ways, still GCOPY_TAB entries. Only metadata is shared; payloads are immutable.
+    uint32_t home = ((uint32_t)(h ^ (h >> 32)) & (GCOPY_TAB / 4 - 1)) * 4;
+    uint32_t slot = home, stale = GCOPY_TAB;
+    int reason = 2;  // 0 no live key in this bucket, 1 same key needs more bytes, 2 live collision
+    for (uint32_t i = home; i < home + 4; i++) {
+        if (gcopy[i].seq != seq) { if (stale == GCOPY_TAB) stale = i; continue; }
+        if (gcopy[i].addr != addr) continue;
+        if (gcopy[i].size == size || (gcopy[i].size > size && AB("gcreuse") != 0)) {
+            prof_gcopy_reused += size;
+            stat_guest_reused += size;
+            return gcopy[i].span;
+        }
+        slot = i; stale = i; reason = 1;
+        break;
     }
+    if (stale != GCOPY_TAB) {
+        slot = stale;
+        if (reason != 1) reason = 0;
+    }
+    stat_guest_misses[reason]++; stat_guest_miss_bytes[reason] += size;
     prof_gcopy_bytes += size;
     prof_gcopy_kind[kind] += size;
     stat_guest_upload[kind] += size;
     prof_gcopy_where[addr >= HEAP_BASE && addr < HEAP_BASE + HEAP_MAX ? 0 : addr >= ALIAS_BASE && addr < ALIAS_BASE + ALIAS_SIZE ? 1 : 2] += size;
     if (addr >= ALIAS_BASE && addr < ALIAS_BASE + ALIAS_SIZE) prof_gcopy_alias[(addr - ALIAS_BASE) >> 28] += size;
-    if (gcopy[slot].seq != seq && gcopy_nactive < GCOPY_TAB) gcopy_active[gcopy_nactive++] = (uint16_t)slot;
+    // Register a slot once per epoch, even when a range write invalidated its payload.
+    // Repeated invalidate/refill must not fill the active list with duplicate indices.
+    if (gcopy[slot].tracked != seq) {
+        gcopy_active[gcopy_nactive++] = (uint16_t)slot;
+        gcopy[slot].tracked = seq;
+    }
     VkSpan s = vk_transient_copy((const void *)(uintptr_t)addr, size, 256);
     static int log_copy = -1, logged_copy;
     if (log_copy < 0) log_copy = getenv("LARECOMP_LOG_GUEST_COPY") != NULL;
@@ -1538,6 +1560,14 @@ const char *renderer_stats(void) {
         stat_guest_upload[2] / 1048576.0, stat_guest_reused / 1048576.0, stat_ga_copied / 1048576.0,
         stat_ga_reused / 1048576.0, (unsigned long long)stat_ga_hits, (unsigned long long)stat_ga_misses,
         (unsigned long long)stat_ga_evicted);
+    LOG("[vertex-cache-diag] guest_misses cold=%llu/%.2fMB grow=%llu/%.2fMB collision=%llu/%.2fMB invalidated=%llu (all guest-copy kinds; cold includes submission changes and invalidation)\n",
+        (unsigned long long)stat_guest_misses[0], stat_guest_miss_bytes[0]/1048576.0,
+        (unsigned long long)stat_guest_misses[1], stat_guest_miss_bytes[1]/1048576.0,
+        (unsigned long long)stat_guest_misses[2], stat_guest_miss_bytes[2]/1048576.0,
+        (unsigned long long)stat_guest_invalidated);
+    memset(stat_guest_misses, 0, sizeof stat_guest_misses);
+    memset(stat_guest_miss_bytes, 0, sizeof stat_guest_miss_bytes);
+    stat_guest_invalidated = 0;
     memset(stat_guest_upload, 0, sizeof stat_guest_upload);
     stat_guest_reused = stat_ga_copied = stat_ga_reused = stat_ga_hits = stat_ga_misses = stat_ga_evicted = 0;
     stat_feedback_copies = stat_feedback_reads = stat_inplace_breaks = stat_upload_bytes = stat_build_wait_ns = stat_pipe_binds = stat_set_binds = 0;
