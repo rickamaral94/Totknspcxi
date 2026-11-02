@@ -725,3 +725,10 @@
  "O jogo base, sem atualizações. Só com o código do jogo recompilado, a no máximo 30 fps, sem as correções da 1.4.3 - e nunca rodou neste app antes: um experimento. Conte o que der errado mandando o log."},
 {"Tears of the Kingdom 1.0.0 (recompiled game code only; an experiment).",
  "Tears of the Kingdom 1.0.0 (só com o código do jogo recompilado; um experimento)."},
+
+{"2x (60 -> 120, experimental)", "2x (60 -> 120, experimental)"},
+{"TOTK clock smoothing", "Suavização do relógio do TOTK"},
+{"5 real frames (default)", "5 quadros reais (padrão)"},
+{"Last real frame (experimental)", "Último quadro real (experimental)"},
+{"Five real frames smooth timing changes. Last frame follows changes sooner but may expose jitter. Generated frames never advance the game clock.", "Cinco quadros reais suavizam mudanças de tempo. O último quadro acompanha mudanças mais cedo, mas pode expor oscilações. Quadros gerados não avançam o relógio do jogo."},
+{"60 -> 120 is experimental: requires 60 real FPS and a 120 Hz display. It does not make rendering faster. Cutscenes remain at 30 real FPS.", "60 -> 120 é experimental: exige 60 FPS reais e tela de 120 Hz. Não torna a renderização mais rápida. Cutscenes permanecem a 30 FPS reais."},

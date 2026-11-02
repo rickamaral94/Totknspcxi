@@ -155,13 +155,13 @@ static int lib_flow = -1, lib_perf = -1, lib_mult = -1;  // (what the framegen w
 // The multipliers: 2x 30 -> 60, 3x 40 -> 120, 4x 30 -> 120 (Video > Frame generation multiplier). Above 60 shown it
 // takes presentation times and a screen that runs at 120 Hz: Android is asked for the rate (vk_set_frame_rate), and the
 // swapchain's refresh cycle (VK_GOOGLE_display_timing) says what it got; short of that, 2x, and the menu says why.
-static const struct { int mult, base, out; } modes[3] = {{2, 30, 60}, {3, 40, 120}, {4, 30, 120}};
+static const struct { int mult, base, out; } modes[4] = {{2, 30, 60}, {3, 40, 120}, {4, 30, 120}, {2, 60, 120}};
 static uint64_t refresh_ns;   // the screen's refresh period as the swapchain reports it (0: unknown)
 static int rate_asked;        // the frame rate asked of the window (0: none)
 static char mode_note[160];   // why a multiplier above 2x isn't in effect
 
 static int mode_now(void) {
-    int m = g_settings.fg_mult >= 0 && g_settings.fg_mult <= 2 ? g_settings.fg_mult : 0;
+    int m = g_settings.fg_mult >= 0 && g_settings.fg_mult <= 3 ? g_settings.fg_mult : 0;
     mode_note[0] = 0;
     if (modes[m].out <= 60) return m;
     if (!g_vk.display_timing) {
@@ -199,7 +199,8 @@ static bool ready(VkExtent2D e) {
         VkQueryPoolCreateInfo qi = {.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, .queryType = VK_QUERY_TYPE_TIMESTAMP, .queryCount = 16};
         if (!ts_pool && g_vk.props.limits.timestampComputeAndGraphics && vkCreateQueryPool(g_vk.dev, &qi, NULL, &ts_pool) != VK_SUCCESS)
             ts_pool = VK_NULL_HANDLE;
-        LOG("[fg] framegen ready (LSFG 3.1%s, %dx, flow scale %.2f)\n", perf ? "P, performance" : "", mult, flow_of[flow]);
+        LOG("[fg] framegen ready (LSFG 3.1%s, %dx, flow scale %.2f; base %d real -> %d shown FPS)\n",
+            perf ? "P, performance" : "", mult, flow_of[flow], modes[mode_now()].base, modes[mode_now()].out);
     }
     if (ctx_on && (ctx_ext.width != e.width || ctx_ext.height != e.height)) release();
     if (!ctx_on) {
@@ -263,7 +264,7 @@ bool fg_hud_capture_wanted(uint32_t w, uint32_t h) {
 }
 
 // (device.c) the most images a real frame queues (the swapchain's extra images)
-int fg_queued_images(void) { return modes[g_settings.fg_mult >= 0 && g_settings.fg_mult <= 2 ? g_settings.fg_mult : 0].mult; }
+int fg_queued_images(void) { return modes[g_settings.fg_mult >= 0 && g_settings.fg_mult <= 3 ? g_settings.fg_mult : 0].mult; }
 
 // (device.c) one of our images into the window, with the menus and the overlay over it; false: no window image now
 static bool show(VkImageView view) {
@@ -295,7 +296,7 @@ bool fg_frame(TexBackend *b, float vx, float vy, float vw, float vh, const float
     {   // the rate asked of Android (the multiplier's shown rate), and the refresh the swapchain reports, each second
         static uint64_t next;
         uint64_t t = plat_now_ns();
-        int want = modes[g_settings.fg_mult >= 0 && g_settings.fg_mult <= 2 ? g_settings.fg_mult : 0].out;
+        int want = modes[g_settings.fg_mult >= 0 && g_settings.fg_mult <= 3 ? g_settings.fg_mult : 0].out;
         if (want != rate_asked) {
             extern void vk_set_frame_rate(float hz);
             vk_set_frame_rate((float)want);

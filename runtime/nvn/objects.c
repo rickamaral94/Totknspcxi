@@ -9,6 +9,7 @@
 #include "../settings.h"
 #include "../framepace.h"
 #include "nvn.h"
+#include "totk_step.h"
 #include "vulkan/writeback_policy.h"
 
 volatile bool g_sync_lag_now;  // (nvnSyncWait: the last wait was one frame back, the CPU may run a frame ahead of the GPU)
@@ -1631,9 +1632,19 @@ bool rt_fps60(void) {
     if (env == -2) env = getenv("LARECOMP_FPS60") ? atoi(getenv("LARECOMP_FPS60")) : -1;
 #ifdef __ANDROID__
     extern int fg_base_fps(void);
-    if (fg_base_fps() > 0) return false;
+    int base = fg_base_fps();
+    if (base > 0) return g_game_version == GAME_V_143 && base >= 60;
 #endif
     return env >= 0 ? env != 0 : g_game_version == GAME_V_143 && g_settings.fps_mode != 1;
+}
+
+static bool rt_fg_native60(void) {
+#ifdef __ANDROID__
+    extern int fg_base_fps(void);
+    return g_game_version == GAME_V_143 && fg_base_fps() >= 60;
+#else
+    return false;
+#endif
 }
 
 // TOTK cutscenes: some of their timing counts frames, so above 30 fps they played fast. tools/patches.py marks the
@@ -1752,7 +1763,7 @@ int64_t rt_frame_ticks(int64_t ticks) {
 }
 
 // TOTK 1.4.3 (tools/patches.py, after MacNativeGames' real-time frame step): the world's step is the measured time
-// between the game's presents - the mean of the last 5, kept within 1/120..1/15 s - instead of the nominal 1/30 s a
+// between the game's presents - the mean of the last 5 (or optional last frame), kept within 1/240..1/15 s - instead of the nominal 1/30 s a
 // frame: a phone that renders 22 fps plays at full speed, not in slow motion. LARECOMP_REALTIME=0: the nominal values,
 // as the original computes them.
 static _Atomic uint32_t frame_step_bits;  // (seconds, as a float; 0: none measured yet)
@@ -1762,19 +1773,19 @@ static int realtime_on(void) {
     return on;
 }
 static void frame_step_update(uint64_t now_ns) {
-    static uint64_t last;
-    static double samples[5];
-    static unsigned n, next;
-    double dt = last ? (double)(now_ns - last) * 1e-9 : 0;
-    last = now_ns;
-    if (dt > 0.25 || dt < 0.001) { n = next = 0; return; }  // (a load, a pause: start over)
-    if (dt < 1.0 / 120) dt = 1.0 / 120;
-    if (dt > 1.0 / 15) dt = 1.0 / 15;
-    samples[next++ % 5] = dt;
-    if (n < 5) n++;
-    double sum = 0;
-    for (unsigned i = 0; i < n; i++) sum += samples[i];
-    float f = (float)(sum / n);
+    static TotkStep state;
+    float f;
+#ifdef __ANDROID__
+    unsigned window = g_settings.totk_step_smoothing == 1 ? 1 : 5;
+#else
+    unsigned window = 5;
+#endif
+    static unsigned last_window;
+    if (last_window != window) {
+        last_window = window;
+        LOG("[totk-clock] smoothing=%u real frames; step bounds 1/240..1/15 s; generated images do not advance the clock\n", window);
+    }
+    if (!totk_step_update(&state, now_ns, window, &f)) return;
     uint32_t b;
     memcpy(&b, &f, 4);
     atomic_store_explicit(&frame_step_bits, b, memory_order_relaxed);
@@ -1881,7 +1892,7 @@ NVN(nvnWindowSetPresentInterval) {
     // TOTK at Frame rate 60: always 1. Its controller (rt_fps60) went back to 2 within a second each time it tried 1
     // in the cave (2026-10-29: 6 tries in 200 s, 30.8 fps on average); held at 1 the same walk ran 35 fps there (GPU
     // and the ~18 ms render thread: 42 at a 960x540 scene) - Auto leaves the choice to the game.
-    if (g_game_version == GAME_V_143 && (g_settings.fps_mode == 2 || rt_totk_auto60()) && rt_fps60() && force <= 0 &&
+    if (g_game_version == GAME_V_143 && (g_settings.fps_mode == 2 || rt_totk_auto60() || rt_fg_native60()) && rt_fps60() && force <= 0 &&
         !rt_cutscene())
         c->x[1] = 1;
     if ((int)A(1) != g_present_interval)
@@ -1936,8 +1947,8 @@ NVN(nvnQueuePresentTexture) {
         int n = w->interval > cap ? w->interval : cap;
         // (TOTK at Frame rate 60: 1 whatever the window kept - the controller calls it only on a change, and a
         // cutscene's 2 stayed there after it; a cutscene at 30, as on the Switch)
-        if (g_game_version == GAME_V_143 && g_settings.fps_mode == 2 && rt_fps60()) n = 1;
-        if (rt_totk_auto()) {  // (Auto: rt_totk_auto60's pick)
+        if (g_game_version == GAME_V_143 && (g_settings.fps_mode == 2 || rt_fg_native60()) && rt_fps60()) n = 1;
+        if (rt_totk_auto() && !rt_fg_native60()) {  // (Auto: rt_totk_auto60's pick)
             totk_auto_present(plat_now_ns());
             n = totk_auto60 ? 1 : 2;
         }
@@ -1952,6 +1963,7 @@ NVN(nvnQueuePresentTexture) {
 #else
         int fg_base = 0;
 #endif
+        if (fg_base > 30 && rt_cutscene()) fg_base = 30;
         if (on && fg_base > 0) {
             // A steady grid at the base rate, whatever the interval (40 a second is no whole number of 60 Hz vsyncs);
             // after a long frame the grid starts again. The frame generation shows its frames on its own times.

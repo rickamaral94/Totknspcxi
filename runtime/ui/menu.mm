@@ -703,11 +703,15 @@ static void tab_display(void) {
             desc += fs == 1 ? tr("On.") : fs == 2 ? tr("On when TOTKDroid starts again.") : fs == 3 ? tr("Unavailable: ") : tr("Off.");
             if (fs == 3 || (fs == 1 && why[0])) desc += std::string(fs == 1 ? "\n" : "") + why;
             opt_toggle("Frame generation", &g_settings.framegen, false, desc.c_str());
-            static const char *mults[] = {"2x (30 -> 60)", "3x (40 -> 120)", "4x (30 -> 120)"};
-            opt_choice("Frame generation multiplier", &g_settings.fg_mult, mults, 3, 0,
+            static const char *mults[] = {"2x (30 -> 60)", "3x (40 -> 120)", "4x (30 -> 120)", "2x (60 -> 120, experimental)"};
+            opt_choice("Frame generation multiplier", &g_settings.fg_mult, mults, 4, 0,
                        "How many frames are shown for each of the game's. 2x: the game at 30, 60 shown. 3x and 4x need a "
                        "120 Hz screen (the Odin 2 Portal's, for one): the game at 40 or 30, 120 shown - each generated frame costs the "
                        "GPU, input feels a little later. Where the screen can't, 2x. Applies at once.");
+            static const char *steps[] = {"5 real frames (default)", "Last real frame (experimental)"};
+            opt_choice("TOTK clock smoothing", &g_settings.totk_step_smoothing, steps, 2, 0,
+                       "Five real frames smooth timing changes. Last frame follows changes sooner but may expose jitter. Generated frames never advance the game clock.");
+            ImGui::TextWrapped("%s", tr("60 -> 120 is experimental: requires 60 real FPS and a 120 Hz display. It does not make rendering faster. Cutscenes remain at 30 real FPS."));
             static const char *flows[] = {"100%", "75%", "50%"};
             opt_choice("Frame generation flow scale", &g_settings.fg_flow, flows, 3, 2,
                        "The size at which the motion between two frames is estimated, a share of the screen's. Lower: the "
