@@ -2156,6 +2156,7 @@ static volatile uint64_t g_scene_frame;
 uint64_t vk_scene_frame(void) { return g_scene_frame; }
 
 static VkRect2D scissor_rect(void);
+static bool pass_defer_submit; // prepared arena entries must stay in this submission
 static void begin_pass(void) {
     if (in_pass && !st.rt_dirty) return;
     pipeline_dirty = true;
@@ -2210,11 +2211,11 @@ static void begin_pass(void) {
         }
         extern int vk_ab(const char *what);
         long ch = chunk > 0 && AB("chunk") == 1 ? 500 : chunk;
-        if (ch > 0 && vk_async_on() && last_submit_ns && SDL_GetTicksNS() - last_submit_ns > (uint64_t)ch * 1000)
+        if (!pass_defer_submit && ch > 0 && vk_async_on() && last_submit_ns && SDL_GetTicksNS() - last_submit_ns > (uint64_t)ch * 1000)
             renderer_submit();
     }
 #endif
-    if (dl_on == 2) renderer_flush();  // (LARECOMP_VK_DEVLOST_TRACE=2: each pass its own submission)
+    if (dl_on == 2 && !pass_defer_submit) renderer_flush();  // preserve pending arena bindings when restarting
     st.rt_dirty = false;
     VkCommandBuffer cb = vk_cmd();
     static int no_barrier = -1;  // (LARECOMP_VK_NO_PASS_BARRIER=1: none - unsafe, a measurement of what it costs)
@@ -5234,8 +5235,9 @@ static GaRes *gres_get(uint64_t lo, uint64_t hi, bool create) {
             if (e->hi > uhi) { uhi = e->hi; grew = true; }
         }
     }
-    if (no && in_pass) { stat_gres_pass_merge++; return NULL; }  // (merging copies slot to slot: not inside a render pass - the draw is recorded
-                                     // in it right after, so it takes the plain copies this time)
+    // draw_ prepares global memory before recording pipeline/dynamic state. End the
+    // previous pass only when a merge needs a GPU transfer, preserving its stores.
+    if (no && in_pass) { stat_gres_pass_merge++; vk_end_pass(); }
     uint64_t len = uhi - ulo;
     int slot = -1;
     for (int pass = 0; pass < 2 && slot < 0; pass++) {
@@ -5663,7 +5665,7 @@ static void arena_diag_stats(void) {
         stored += ga_res[i].stored;
         bytes += ga_res[i].hi-ga_res[i].lo;
     }
-    LOG("[arena-diag] table_slots=%u live=%u stored=%u learned=%d resident_live=%.2fMB capacity=%lluMB noncoherent=%u merge_in_pass_rejects=%llu fallback_counts=%llu/%llu/%llu/%llu learned_omitted=%llu\n",
+    LOG("[arena-diag] table_slots=%u live=%u stored=%u learned=%d resident_live=%.2fMB capacity=%lluMB noncoherent=%u merge_pass_breaks=%llu fallback_counts=%llu/%llu/%llu/%llu learned_omitted=%llu\n",
         GMAP_MAX, live, stored, gl_n, bytes/1048576.0, (unsigned long long)(GA_RES>>20), ga_noncoherent,
         (unsigned long long)stat_gres_pass_merge,
         (unsigned long long)stat_gres_fail[0], (unsigned long long)stat_gres_fail[1],
@@ -6926,7 +6928,22 @@ static void draw_(CmdRec *r, bool indexed) {
         noatt_dims(&nw, &nh);
         if (nw > pass_w || nh > pass_h) st.rt_dirty = true;
     }
-    begin_pass();
+    begin_pass(); // allow the normal pass-boundary submission BEFORE preparing arena bindings
+#ifdef __ANDROID__
+    pass_defer_submit = true;
+#endif
+#ifdef __ANDROID__
+    // Prepare before pipeline/dynamic state is recorded. A merge can end the pass.
+    if (gcopy_mode && (pr->vi->uses_gmem_map || pr->fi->uses_gmem_map))  // (the table both stages' sets use)
+        gcopy_prepare((pr->vi->uses_gmem_map ? 1u : 0u) | (pr->fi->uses_gmem_map ? 2u : 0u),
+                      pr->vi->uses_gmem_store || pr->fi->uses_gmem_store);
+    else if (gwin_mode && (pr->vi->uses_gmem_map || pr->fi->uses_gmem_map))
+        gwin_prepare((pr->vi->uses_gmem_map ? 1u : 0u) | (pr->fi->uses_gmem_map ? 2u : 0u));
+#endif
+#ifdef __ANDROID__
+    if (!in_pass) begin_pass(); // restore rendering after a GPU merge, without submitting its pending writebacks
+    pass_defer_submit = false;
+#endif
     VkCommandBuffer cb = vk_cmd();
 
     uint32_t mode = (uint32_t)r->x[0];
@@ -7178,11 +7195,6 @@ static void draw_(CmdRec *r, bool indexed) {
     if (prof) prof_dyn += SDL_GetTicksNS() - prof_td_;
     PROF_T0();
 #ifdef __ANDROID__
-    if (gcopy_mode && (pr->vi->uses_gmem_map || pr->fi->uses_gmem_map))  // (the table both stages' sets use)
-        gcopy_prepare((pr->vi->uses_gmem_map ? 1u : 0u) | (pr->fi->uses_gmem_map ? 2u : 0u),
-                      pr->vi->uses_gmem_store || pr->fi->uses_gmem_store);
-    else if (gwin_mode && (pr->vi->uses_gmem_map || pr->fi->uses_gmem_map))
-        gwin_prepare((pr->vi->uses_gmem_map ? 1u : 0u) | (pr->fi->uses_gmem_map ? 2u : 0u));
 #endif
     uint32_t dyn[64], ndv = 0, ndf = 0;  // (the sets' dynamic uniform buffer offsets: vertex, then fragment)
     memset(cbw_patch, 0, sizeof cbw_patch);  // (cbwin_bind fills them while the sets are written)
