@@ -1,6 +1,7 @@
 // Executes recorded NVN command lists with Vulkan (port of renderer.m; same structure, same behaviour).
 #include <SDL3/SDL_cpuinfo.h>
 #include "writeback_policy.h"
+#include "writeback_merge.h"
 #include <SDL3/SDL_timer.h>
 #include <float.h>
 #include <math.h>
@@ -3782,8 +3783,15 @@ static void resolve_feedback(Prog *pr, uint32_t draw_written) {
             bool have = false;
             for (int k = 0; k < nfeedback; k++) have |= feedback_tex[k] == t;
             if (have || nfeedback == 4) continue;
-            static int nosnap = -1;
-            if (nosnap < 0) nosnap = getenv("LARECOMP_NO_SNAPSHOT_REUSE") != NULL;
+            static int nosnap = -1, snap_version = -1;
+            if (nosnap < 0 || snap_version != g_game_version) {
+                snap_version = g_game_version;
+                extern bool vk_driver_is_turnip(void);
+                bool odin_test = g_game_version == 142 && vk_driver_is_turnip() && strstr(g_vk.props.deviceName, "740");
+                nosnap = getenv("LARECOMP_NO_SNAPSHOT_REUSE") != NULL || odin_test;
+                LOG("[graphics-diag] snapshot reuse %s; amaral.6 A740/v142 conservative-copy experiment=%d\n",
+                    nosnap ? "off" : "on", odin_test);
+            }
             int si = -1;
             for (int k = 0; k < 8; k++) if (snap_tex[k] == t) si = k;
             TexBackend *src = vk_tex(t, true);
@@ -4829,16 +4837,7 @@ static void gcopy_retire(uint64_t done) {
             // back undid the CPU's writes made since, for good - wrong shadows while moving)
             uint8_t *g = (uint8_t *)(uintptr_t)gc_back[i].addr, *sh = gc_back[i].shadow;
             const uint8_t *src = gc_back[i].src;
-            for (uint64_t b = 0; b < gc_back[i].len; b += 256) {
-                uint64_t n = gc_back[i].len - b < 256 ? gc_back[i].len - b : 256;
-                // (a block the CPU's newer data was uploaded into after this submission: the shadow is that data
-                // already while the slot may not have it yet - comparing them took the slot's older bytes for the
-                // GPU's and wrote them over the CPU's: the game's allocator lists looped, the game hung)
-                if (gc_back[i].bseq[b / 256] > gc_back[i].seq) continue;
-                if (!memcmp(src + b, sh + b, n) || memcmp(g + b, sh + b, n)) continue;  // (GPU unchanged / CPU wrote)
-                memcpy(g + b, src + b, n);
-                memcpy(sh + b, src + b, n);
-            }
+            gc_merge_writeback(g, sh, src, gc_back[i].len, gc_back[i].bseq, gc_back[i].seq);
         } else gc_back[k++] = gc_back[i];
     }
     gc_nback = k;
