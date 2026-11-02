@@ -38,6 +38,8 @@ static uint64_t stat_feedback_depth_copies, stat_feedback_color_copies, stat_fee
 static uint64_t stat_feedback_reads;  // (attachments sampled as they are: only read, resolve_feedback)
 static uint64_t stat_inplace_breaks;  // (passes ended so a draw reads a target the pass wrote: resolve_feedback)
 static uint64_t stat_upload_bytes;
+static uint64_t stat_guest_upload[3], stat_guest_reused;
+static uint64_t stat_ga_copied, stat_ga_reused, stat_ga_evicted, stat_ga_hits, stat_ga_misses;
 static uint64_t stat_cond_draws, stat_cond_clears;
 static _Atomic uint64_t stat_wb_bytes, stat_wb_unchanged;
 static _Atomic uint64_t stat_wb_coalesced, stat_wb_avoided, stat_wb_full;
@@ -1282,10 +1284,12 @@ static VkSpan guest_copy(uint64_t addr, uint64_t size, int kind) {
     uint32_t slot = (uint32_t)(h ^ (h >> 32)) & (GCOPY_TAB - 1);
     if (gcopy[slot].seq == seq && gcopy[slot].addr == addr && (gcopy[slot].size == size || (gcopy[slot].size > size && AB("gcreuse") != 0))) {
         prof_gcopy_reused += size;
+        stat_guest_reused += size;
         return gcopy[slot].span;
     }
     prof_gcopy_bytes += size;
     prof_gcopy_kind[kind] += size;
+    stat_guest_upload[kind] += size;
     prof_gcopy_where[addr >= HEAP_BASE && addr < HEAP_BASE + HEAP_MAX ? 0 : addr >= ALIAS_BASE && addr < ALIAS_BASE + ALIAS_SIZE ? 1 : 2] += size;
     if (addr >= ALIAS_BASE && addr < ALIAS_BASE + ALIAS_SIZE) prof_gcopy_alias[(addr - ALIAS_BASE) >> 28] += size;
     if (gcopy[slot].seq != seq && gcopy_nactive < GCOPY_TAB) gcopy_active[gcopy_nactive++] = (uint16_t)slot;
@@ -1529,6 +1533,13 @@ const char *renderer_stats(void) {
     LOG("[graphics-diag] writeback checked=%.2fMB bulk_unchanged=%.2fMB (CPU conflict policy remains 256 bytes)\n",
         atomic_exchange(&stat_wb_bytes, 0) / 1048576.0, atomic_exchange(&stat_wb_unchanged, 0) / 1048576.0);
     stat_feedback_depth_copies = stat_feedback_color_copies = stat_feedback_reused = 0;
+    LOG("[upload-diag] ring_alloc=%.2fMB guest_constants=%.2fMB guest_uniforms=%.2fMB guest_vertices=%.2fMB guest_reused=%.2fMB arena_load_copied=%.2fMB arena_load_reused=%.2fMB arena_hits=%llu arena_misses=%llu arena_evictions=%llu\n",
+        stat_upload_bytes / 1048576.0, stat_guest_upload[0] / 1048576.0, stat_guest_upload[1] / 1048576.0,
+        stat_guest_upload[2] / 1048576.0, stat_guest_reused / 1048576.0, stat_ga_copied / 1048576.0,
+        stat_ga_reused / 1048576.0, (unsigned long long)stat_ga_hits, (unsigned long long)stat_ga_misses,
+        (unsigned long long)stat_ga_evicted);
+    memset(stat_guest_upload, 0, sizeof stat_guest_upload);
+    stat_guest_reused = stat_ga_copied = stat_ga_reused = stat_ga_hits = stat_ga_misses = stat_ga_evicted = 0;
     stat_feedback_copies = stat_feedback_reads = stat_inplace_breaks = stat_upload_bytes = stat_build_wait_ns = stat_pipe_binds = stat_set_binds = 0;
     if (getenv("LARECOMP_LOG_CBUF_BYTES")) {
         LOG("[cbuf] fixed %llu x %.1f KB, dynamic %llu x %.1f KB; copied %.1f MB; in place, patched %llu\n",
@@ -5281,21 +5292,41 @@ static void gres_learn(uint32_t off) {
 // Load-only arena copies are immutable until their submission retires. Compare against that exact copy;
 // no assumption that guest memory remains unchanged between draws.
 static uint64_t ga_load_copy(uint64_t at, uint64_t size) {
-    static struct { uint64_t at, size, off, seq, gen; bool valid; } cache[64];
+    // Same 64 metadata entries, four ways per bucket. Payloads stay in the ring.
+    static struct { uint64_t at, size, off, seq, gen; bool valid; } cache[16][4];
+    static unsigned char next[16];
     static int reuse = -1;
     if (reuse < 0) { const char *e = getenv("LARECOMP_GCOPY_REUSE"); reuse = !e || atoi(e) != 0; }
     uint64_t seq = vk_pending_seq();
-    unsigned slot = (unsigned)((at >> 8) ^ (size >> 8)) & 63;
+    unsigned slot = (unsigned)((at >> 8) ^ (size >> 8)) & 15;
     const uint8_t *src = (const uint8_t *)(uintptr_t)(HEAP_BASE + at);
-    if (reuse && cache[slot].valid && cache[slot].seq == seq && cache[slot].gen == gcopy_gen &&
-        cache[slot].at == at && cache[slot].size == size && !memcmp(ga_ptr + cache[slot].off, src, size))
-        return cache[slot].off;
+    unsigned pick = next[slot], stale = 4;
+    for (unsigned i = 0; i < 4; i++) {
+        if (!cache[slot][i].valid || cache[slot][i].seq != seq || cache[slot][i].gen != gcopy_gen) {
+            if (stale == 4) stale = i;
+            continue;
+        }
+        if (cache[slot][i].at != at || cache[slot][i].size != size) continue;
+        // Replace the same key on a content change; never return its old bytes.
+        pick = i;
+        if (reuse && !memcmp(ga_ptr + cache[slot][i].off, src, size)) {
+            stat_ga_hits++; stat_ga_reused += size;
+            return cache[slot][i].off;
+        }
+        stale = i;
+        break;
+    }
+    if (stale < 4) pick = stale;
     uint64_t off = ga_ring(size);
-    if (off == ~0ull) return off;
+    if (off == ~0ull) return off;  // keep every valid entry on allocation failure
+    if (cache[slot][pick].valid && cache[slot][pick].seq == seq &&
+        cache[slot][pick].gen == gcopy_gen && cache[slot][pick].at != at) stat_ga_evicted++;
     memcpy(ga_ptr + off, src, size);
     ga_wrote(off, size);
-    cache[slot].at = at; cache[slot].size = size; cache[slot].off = off;
-    cache[slot].seq = seq; cache[slot].gen = gcopy_gen; cache[slot].valid = true;
+    stat_ga_misses++; stat_ga_copied += size;
+    cache[slot][pick].at = at; cache[slot][pick].size = size; cache[slot][pick].off = off;
+    cache[slot][pick].seq = seq; cache[slot][pick].gen = gcopy_gen; cache[slot][pick].valid = true;
+    next[slot] = (unsigned char)((pick + 1) & 3);
     return off;
 }
 
