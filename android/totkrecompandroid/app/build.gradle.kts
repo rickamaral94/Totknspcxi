@@ -12,7 +12,7 @@ val ffmpeg: File = repo.resolve("android/deps/ffmpeg").let { if (it.resolve("lib
 fun depLib(name: String): File = (if (name.startsWith("libav") || name.startsWith("libsw")) ffmpeg else deps).resolve("lib/$name")
 val gen = layout.buildDirectory.dir("generated/totkrecompandroid")
 // The release key: outside the repository, in ~/.totkrecompandroid/keystore.properties (storeFile, storePassword, keyAlias,
-// keyPassword); without it, release builds are signed with the debug key
+// keyPassword). Release builds must never silently fall back to a new debug key.
 val releaseKey: File = File(System.getProperty("user.home"), ".totkrecompandroid/keystore.properties")
 
 android {
@@ -24,8 +24,8 @@ android {
         applicationId = "com.totkrecompandroid"
         minSdk = 30
         targetSdk = 36
-        versionCode = 7
-        versionName = "0.2.0-beta-amaral.4"
+        versionCode = 8
+        versionName = "0.2.0-beta-amaral.5"
         ndk {
             abiFilters += "arm64-v8a"
         }
@@ -78,7 +78,7 @@ android {
     buildTypes {
         getByName("release") {
             isMinifyEnabled = false
-            signingConfig = signingConfigs.findByName("release") ?: signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.findByName("release")
         }
     }
 

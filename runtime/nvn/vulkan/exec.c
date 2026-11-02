@@ -31,6 +31,7 @@ static uint64_t hash_words(uint64_t h, const void *p, size_t n);
 
 static uint64_t stat_draws, stat_skipped, stat_passes, stat_dispatches, stat_wait_ns, stat_flushes, stat_feedback_copies;
 static uint64_t stat_dchained;  // (dispatches with no barrier before them: dchain)
+static uint64_t stat_feedback_depth_copies, stat_feedback_color_copies, stat_feedback_reused;
 static uint64_t stat_feedback_reads;  // (attachments sampled as they are: only read, resolve_feedback)
 static uint64_t stat_inplace_breaks;  // (passes ended so a draw reads a target the pass wrote: resolve_feedback)
 static uint64_t stat_upload_bytes;
@@ -898,6 +899,16 @@ void vk_gpuprof_report(void) {
     renderer_flush();
     static uint64_t t[GP_MAX];
     if (vkGetQueryPoolResults(g_vk.dev, gp_qp, 0, (uint32_t)gp_n, sizeof t, t, 8, VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT) == VK_SUCCESS) {
+        // Do not turn an out-of-order timestamp into an unsigned, multi-year duration.
+        // Reject the capture rather than use partial data to rank rendering costs.
+        for (int i = 1; i < gp_n; i++) {
+            if (t[i] < t[i - 1]) {
+                LOG("[gpuprof] rejected capture: non-monotonic timestamps at mark %d\n", i);
+                diag_gpuprof_end(false);
+                gp_n = 0;
+                return;
+            }
+        }
         double per = g_vk.props.limits.timestampPeriod / 1e6, total = (t[gp_n - 1] - t[0]) * per;
         LOG("[gpuprof] %d marks, %.2f ms first to last (rows: the work after each mark, until the next)\n", gp_n, total);
         bool diag = diag_gpuprof_begin(gp_n, total);  // (the performance diagnosis's graphics section, diag.c)
@@ -1340,7 +1351,12 @@ static void run_job(void (*fn)(void *), void *arg) {
         const char *workers = getenv("LARECOMP_SHADER_WORKERS");
         if (workers) n = atoi(workers);
         if (n < 1) n = 1;
-        n = 1;  // amaral.4 diagnostic: serialize driver compilation, including environment overrides
+        if (n > 16) n = 16;
+#ifdef __ANDROID__
+        // Preserve the tested stable profile: parallel driver compilation exhausted Scudo regions.
+        n = 1;
+#endif
+        LOG("[driver-diag] pipeline workers=%d\n", n);
         for (int i = 0; i < n; i++) { pthread_t t; pthread_create(&t, NULL, worker, NULL); }
     }
     Job *j = malloc(sizeof *j);
@@ -1469,6 +1485,10 @@ const char *renderer_stats(void) {
              (unsigned long long)stat_dispatches, (unsigned long long)stat_dchained, (unsigned long long)stat_flushes, (double)stat_wait_ns / 1e6,
              atomic_exchange(&stat_compiles, 0), (double)stat_build_wait_ns / 1e6, (unsigned long long)stat_feedback_copies, (unsigned long long)stat_feedback_reads, (unsigned long long)stat_inplace_breaks, (double)stat_upload_bytes / 1048576.0,
              (unsigned long long)stat_pipe_binds, (unsigned long long)stat_set_binds);
+    LOG("[graphics-diag] feedback copies: depth=%llu color=%llu reused=%llu; counts cover the same interval as renderer stats\n",
+        (unsigned long long)stat_feedback_depth_copies, (unsigned long long)stat_feedback_color_copies,
+        (unsigned long long)stat_feedback_reused);
+    stat_feedback_depth_copies = stat_feedback_color_copies = stat_feedback_reused = 0;
     stat_feedback_copies = stat_feedback_reads = stat_inplace_breaks = stat_upload_bytes = stat_build_wait_ns = stat_pipe_binds = stat_set_binds = 0;
     if (getenv("LARECOMP_LOG_CBUF_BYTES")) {
         LOG("[cbuf] fixed %llu x %.1f KB, dynamic %llu x %.1f KB; copied %.1f MB; in place, patched %llu\n",
@@ -3772,12 +3792,15 @@ static void resolve_feedback(Prog *pr, uint32_t draw_written) {
             VkImageAspectFlags sa = src->aspect & VK_IMAGE_ASPECT_DEPTH_BIT ? VK_IMAGE_ASPECT_DEPTH_BIT : src->aspect;
             static const VkComponentMapping id = {0};
             if (!nosnap && si >= 0 && snap_ok[si] && existing) {
+                stat_feedback_reused++;
                 feedback_tex[nfeedback] = t;
                 feedback_snap[nfeedback] = &existing->copy;
                 feedback_view[nfeedback++] = vk_image_view(&existing->copy, VK_IMAGE_VIEW_TYPE_2D, src->format, 0, 1, 0, 1, id, sa);
                 continue;
             }
             stat_feedback_copies++;
+            if (sa & VK_IMAGE_ASPECT_DEPTH_BIT) stat_feedback_depth_copies++;
+            else stat_feedback_color_copies++;
             if (ct_on()) LOG("[ct] snapshot %p %ux%u (was %s, si %d)\n", (void *)t, src->width, src->height, si >= 0 ? snap_why[si] : "new", si);
             vk_end_pass();
             TexBackend *dst = snapshot_image(t, src);

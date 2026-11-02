@@ -238,10 +238,17 @@ static void bc_decode(VkFormat bc, const uint8_t *blocks, uint32_t wb, uint32_t 
 //   RS_SCENE  the 3D scene's targets (1600x900 docked, the game's dynamic sizes down to 1280x720, their fractions):
 //             the internal resolution (Video > Internal resolution)
 static float g_rs[3][2] = {{1, 1}, {1, 1}, {1, 1}};
+static uint64_t stat_scale_output, stat_scale_scene, stat_image_resize;
 void renderer_get_scale(float *sx, float *sy) { *sx = g_rs[RS_OUT][0]; *sy = g_rs[RS_OUT][1]; }
-void renderer_set_scale(float sx, float sy) { g_rs[RS_OUT][0] = sx; g_rs[RS_OUT][1] = sy; }
+void renderer_set_scale(float sx, float sy) {
+    if (g_rs[RS_OUT][0] != sx || g_rs[RS_OUT][1] != sy) stat_scale_output++;
+    g_rs[RS_OUT][0] = sx; g_rs[RS_OUT][1] = sy;
+}
 void renderer_get_scene_scale(float *sx, float *sy) { *sx = g_rs[RS_SCENE][0]; *sy = g_rs[RS_SCENE][1]; }
-void renderer_set_scene_scale(float sx, float sy) { g_rs[RS_SCENE][0] = sx; g_rs[RS_SCENE][1] = sy; }
+void renderer_set_scene_scale(float sx, float sy) {
+    if (g_rs[RS_SCENE][0] != sx || g_rs[RS_SCENE][1] != sy) stat_scale_scene++;
+    g_rs[RS_SCENE][0] = sx; g_rs[RS_SCENE][1] = sy;
+}
 uint64_t renderer_present_count(void);
 static bool rs_stale(const TexBackend *b) {
     return b->rs_group && (b->sx != g_rs[b->rs_group][0] || b->sy != g_rs[b->rs_group][1]);
@@ -616,6 +623,11 @@ static void destroy_image(TexBackend *b) {
 static NvnTexture **g_live;
 static int g_nlive, g_cap_live;
 int vk_texture_count(void) {
+    // Constant-time aggregates only: do not enable the optional quadratic alias scan.
+    LOG("[graphics-diag] scale output=%.4fx%.4f scene=%.4fx%.4f; changes output=%llu scene=%llu image_resizes=%llu\n",
+        g_rs[RS_OUT][0], g_rs[RS_OUT][1], g_rs[RS_SCENE][0], g_rs[RS_SCENE][1],
+        (unsigned long long)stat_scale_output, (unsigned long long)stat_scale_scene, (unsigned long long)stat_image_resize);
+    stat_scale_output = stat_scale_scene = stat_image_resize = 0;
     static int log_diag = -1;
     if (log_diag < 0) log_diag = getenv("LARECOMP_LOG_TEXDIAG") ? 1 : 0;
     if (log_diag) {
@@ -672,6 +684,7 @@ static TexBackend *tex_backend(NvnTexture *t) {
     TexBackend *b = t->backend;
     if (b) {
         if (rs_stale(b)) {  // output resolution changed: reallocate
+            stat_image_resize++;
             destroy_image(b);
             create_image(t, b);
         }
