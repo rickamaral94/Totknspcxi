@@ -1633,8 +1633,8 @@ static void prelaunch_tab(float sc) {
     {   // (runtime/settings.h gpu_heap / inplace_reads / turnip_lrz / log_file: for GPUs where a Turnip path draws wrong;
         // LASRecompAndroid's, with BOTW's in-place reads of draw targets)
         bool changed = false;
-        const bool a8 = vk_adreno_8xx(vk_gpu_name());  // (Automatic: on for Adreno 8xx only)
-        const bool lrz_auto = vk_lrz_auto(vk_gpu_name());  // (the LRZ's: the 740 too)
+        const bool a8 = vk_lrz_auto(vk_gpu_name());  // (Automatic: on for the Adreno 8xx and the 740, device.c)
+        const bool lrz_auto = a8;
         auto tri = [&](const char *id, int *v, bool auto_on) {  // Automatic / On / Off: -1 / 1 / 0
             bool ch = false;
             ImGui::PushID(id);
@@ -1648,8 +1648,8 @@ static void prelaunch_tab(float sc) {
         };
         ImGui::PushTextWrapPos(0);
         ImGui::TextDisabled("%s", tr("For GPUs where the game draws wrong with Turnip (missing text, odd colors, black "
-                                  "patches). Automatic suits most phones: the fastest paths on Adreno 8xx GPUs, the safer "
-                                  "ones on the others."));
+                                  "patches). Automatic suits most phones: the fastest paths on Adreno 8xx GPUs and the Adreno "
+                                  "740, the safer ones on the others."));
         ImGui::Text(tr("This GPU: %s"), vk_gpu_desc());
         if (!vk_driver_is_turnip())
             ImGui::TextDisabled("%s", tr("These options are for Turnip: the driver in use takes the safer paths anyway."));
@@ -1659,14 +1659,15 @@ static void prelaunch_tab(float sc) {
         ImGui::TextDisabled("%s", tr("On: the game's memory is mapped straight into the GPU's, the fastest way. Off: what each "
                                   "frame uses is copied instead - it draws right where the fast way doesn't, but this game "
                                   "runs at about half the frame rate (15 fps instead of 35 on an Adreno 830). Automatic: on "
-                                  "for Adreno 8xx GPUs, off for the others - on another Adreno, try On first. Applies when "
+                                  "for Adreno 8xx GPUs and the Adreno 740, off for the others - on another Adreno, try On "
+                                  "first. Applies when "
                                   "the game starts."));
         ImGui::Spacing();
         ImGui::Text("%s", tr("Draw-target reads in place (Turnip)"));
         changed |= tri("inplace", &g_settings.inplace_reads, a8);
         ImGui::TextDisabled("%s", tr("On: decals and effects read the image they draw on as it is, the fastest way. Off: a copy "
                                   "of it each time, slower (fewer fps) but by the Vulkan rules. Automatic: on for Adreno 8xx "
-                                  "GPUs, off for the others. Applies when the game starts."));
+                                  "GPUs and the Adreno 740, off for the others. Applies when the game starts."));
         ImGui::Spacing();
         ImGui::Text("%s", tr("Turnip low-resolution Z (LRZ)"));
         changed |= tri("lrz", &g_settings.turnip_lrz, lrz_auto);

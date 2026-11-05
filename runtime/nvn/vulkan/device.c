@@ -1880,7 +1880,7 @@ bool vk_adreno_8xx(const char *name) {
     int n = atoi(a);
     return n >= 800 && n < 900;
 }
-// Turnip's low-resolution Z, Automatic: the Adreno 8xx GPUs, and the Adreno 740 - measured in BOTWRecompAndroid on the
+// Turnip's low-resolution Z (and the other Turnip paths', vk_turnip_path_on), Automatic: the Adreno 8xx GPUs, and the Adreno 740 - measured in BOTWRecompAndroid on the
 // Odin 2 Portal (Turnip 27.0.0-devel, 2026-10-30): the GPU's time per real frame 14.9 ms with it at 1x against 16.5 ms
 // without it at 0.55 scale, and no drawing missing or flickering (docs/DESEMPENHO-DIAG.md). Other Adreno 7xx stay off.
 bool vk_lrz_auto(const char *name) {
@@ -1890,8 +1890,13 @@ bool vk_lrz_auto(const char *name) {
     while (*a && (*a < '0' || *a > '9')) a++;
     return atoi(a) == 740;
 }
-// A Turnip path's setting (-1 Automatic, 1 on, 0 off) for this GPU
-bool vk_turnip_path_on(int setting) { return setting < 0 ? vk_adreno_8xx(g_vk.props.deviceName) : setting != 0; }
+// A Turnip path's setting (-1 Automatic, 1 on, 0 off) for this GPU. Automatic: the Adreno 8xx GPUs, and the Adreno 740
+// (the same GPUs as the LRZ's) - measured on the Odin 2 Portal (Turnip 27.0.0-devel, TOTK 1.4.2 amaral.19, 2026-11-05):
+// game memory on the GPU, draw-target reads in place and LRZ on together took the gameplay from 29.2 to 41.4 real
+// frames a second, the GPU's time per frame 25.1 -> 20.8 ms, the render thread's 21.9 -> 16.0 ms, uploads ~1.7 GB/s ->
+// ~0.25 GB/s and the feedback copies (~6.5 ms of GPU a frame) to none, with no drawing errors seen. Other Adreno 7xx
+// stay off (an Adreno 750 drew LAS's text and colors wrong with them).
+bool vk_turnip_path_on(int setting) { return setting < 0 ? vk_lrz_auto(g_vk.props.deviceName) : setting != 0; }
 static bool g_lrz_at_start = true;
 // (diag.c) what the measurement ran with: the GPU, the driver and the settings that move the GPU's work
 void vk_diag_context(char *buf, size_t n) {
@@ -1925,7 +1930,7 @@ void ui_window_init(void) {
     SDL_SetHint(SDL_HINT_ANDROID_TRAP_BACK_BUTTON, "1");  // (the back button opens the menu: ui/touch_controls.mm)
 #endif
     settings_load();
-    LOG("[driver-diag] amaral.19 TOTK 1.4.2 two-worker experiment: shader_int32=%d sync_lag=%d framegen=%d cbuf_inplace=%d gpu_heap=%d inplace_reads=%d turnip_lrz=%d\n",
+    LOG("[driver-diag] amaral.20 TOTK 1.4.2 two workers, Adreno 740 Automatic fast paths: shader_int32=%d sync_lag=%d framegen=%d cbuf_inplace=%d gpu_heap=%d inplace_reads=%d turnip_lrz=%d\n",
         g_settings.shader_int32, g_settings.sync_lag, g_settings.framegen, g_settings.cbuf_inplace,
         g_settings.gpu_heap, g_settings.inplace_reads, g_settings.turnip_lrz);
 #ifdef __ANDROID__

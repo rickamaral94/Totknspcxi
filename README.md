@@ -6,6 +6,8 @@ A native Android port of *The Legend of Zelda: Tears of the Kingdom* **1.4.3**, 
 The game’s ARM64 code runs on the phone and its graphics (NVN) are translated to Vulkan. This fork also keeps
 **1.4.2** and experimental **1.0.0**, which run recompiled only.
 
+> **Amaral.20:** on the Adreno 740, Driver compatibility's Automatic now turns on game memory on the GPU and draw-target reads in place (29 → 41 fps measured on the Odin 2 Portal). See [notes](docs/PERFORMANCE-AMARAL20.md).
+
 > **Amaral.16 / 1.4.2:** real-time world clock and experimental 60 FPS require a one-time game-code rebuild. Cutscenes and high-FPS physics still need device validation. See [build notes](docs/PERFORMANCE-AMARAL16.md).
 
 > [!NOTE]
