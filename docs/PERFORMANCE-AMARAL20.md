@@ -10,12 +10,13 @@ só no Adreno 8xx. Os outros Adreno 7xx continuam desligados: um Adreno 750 dese
 caminhos no LASRecomp. Ligado e Desligado continuam valendo do mesmo jeito.
 
 Código: `vk_turnip_path_on` (`runtime/nvn/vulkan/device.c`) usa o mesmo conjunto de GPUs de `vk_lrz_auto`. Os textos
-da tela de início e as chaves de tradução foram atualizados (pt-BR traduzido; nos outros idiomas a tradução antiga
-ainda cita só "Adreno 8xx").
+da tela de início e as traduções de todos os idiomas foram atualizados (inclusive a do LRZ, que nas traduções ainda
+dizia só "Adreno 8xx").
 
 ## Medição que motivou (Odin 2 Portal, Turnip Amaral 27.0.0-devel v5.8.17.1, 1.4.2, 60 fps, 1x, GSR 1, AA 2)
 
-Mesmo trajeto, APK amaral.19, janela de diagnóstico de 60 s em gameplay:
+Mesmo trajeto, APK amaral.19, janela de diagnóstico de 60 s em gameplay. **Sessões não controladas, não é A/B/A:**
+as três opções mudaram juntas, então o ganho não é atribuído a cada uma; estabilidade longa não foi medida.
 
 | | Heap, in-place e LRZ desligados | Os três ligados (em Ligado) |
 |---|---|---|
