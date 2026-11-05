@@ -1633,15 +1633,15 @@ bool rt_fps60(void) {
 #ifdef __ANDROID__
     extern int fg_base_fps(void);
     int base = fg_base_fps();
-    if (base > 0) return g_game_version == GAME_V_143 && base >= 60;
+    if (base > 0) return (g_game_version == GAME_V_143 || g_game_version == GAME_V_142) && base >= 60;
 #endif
-    return env >= 0 ? env != 0 : g_game_version == GAME_V_143 && g_settings.fps_mode != 1;
+    return env >= 0 ? env != 0 : (g_game_version == GAME_V_143 || g_game_version == GAME_V_142) && g_settings.fps_mode != 1;
 }
 
 static bool rt_fg_native60(void) {
 #ifdef __ANDROID__
     extern int fg_base_fps(void);
-    return g_game_version == GAME_V_143 && fg_base_fps() >= 60;
+    return (g_game_version == GAME_V_143 || g_game_version == GAME_V_142) && fg_base_fps() >= 60;
 #else
     return false;
 #endif
@@ -1718,7 +1718,7 @@ static bool totk_auto60 = true;
 bool rt_totk_auto(void) {
     static int on = -1;
     if (on < 0) on = !getenv("LARECOMP_AUTO60") || atoi(getenv("LARECOMP_AUTO60")) != 0;
-    return on && g_game_version == GAME_V_143 && !g_settings.fps_mode && rt_fps60();
+    return on && (g_game_version == GAME_V_143 || g_game_version == GAME_V_142) && !g_settings.fps_mode && rt_fps60();
 }
 bool rt_totk_auto60(void) { return rt_totk_auto() && totk_auto60; }
 static void totk_auto_present(uint64_t now) {
@@ -1892,7 +1892,7 @@ NVN(nvnWindowSetPresentInterval) {
     // TOTK at Frame rate 60: always 1. Its controller (rt_fps60) went back to 2 within a second each time it tried 1
     // in the cave (2026-10-29: 6 tries in 200 s, 30.8 fps on average); held at 1 the same walk ran 35 fps there (GPU
     // and the ~18 ms render thread: 42 at a 960x540 scene) - Auto leaves the choice to the game.
-    if (g_game_version == GAME_V_143 && (g_settings.fps_mode == 2 || rt_totk_auto60() || rt_fg_native60()) && rt_fps60() && force <= 0 &&
+    if ((g_game_version == GAME_V_143 || g_game_version == GAME_V_142) && (g_settings.fps_mode == 2 || rt_totk_auto60() || rt_fg_native60()) && rt_fps60() && force <= 0 &&
         !rt_cutscene())
         c->x[1] = 1;
     if ((int)A(1) != g_present_interval)
@@ -1947,12 +1947,12 @@ NVN(nvnQueuePresentTexture) {
         int n = w->interval > cap ? w->interval : cap;
         // (TOTK at Frame rate 60: 1 whatever the window kept - the controller calls it only on a change, and a
         // cutscene's 2 stayed there after it; a cutscene at 30, as on the Switch)
-        if (g_game_version == GAME_V_143 && (g_settings.fps_mode == 2 || rt_fg_native60()) && rt_fps60()) n = 1;
+        if ((g_game_version == GAME_V_143 || g_game_version == GAME_V_142) && (g_settings.fps_mode == 2 || rt_fg_native60()) && rt_fps60()) n = 1;
         if (rt_totk_auto() && !rt_fg_native60()) {  // (Auto: rt_totk_auto60's pick)
             totk_auto_present(plat_now_ns());
             n = totk_auto60 ? 1 : 2;
         }
-        if (g_game_version == GAME_V_143) rt_cutscene_present();
+        if ((g_game_version == GAME_V_143 || g_game_version == GAME_V_142)) rt_cutscene_present();
         if (n < 2 && rt_cutscene()) n = 2;
         {   extern int g_present_vsyncs;  // (output_scale.c: dynamic resolution's frame time target)
             g_present_vsyncs = n;

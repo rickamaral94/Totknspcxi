@@ -34,9 +34,9 @@ static bool bcopy_pending(uint64_t a,uint64_t b) { (void)a;(void)b;return false;
 static int AB(const char *name) { (void)name;return reuse; }
 static uint64_t vk_pending_seq(void) { return seq; }
 static uint64_t renderer_present_count(void) { return 0; }
-static VkSpan vk_transient_copy(const void *src,uint64_t n,uint64_t align) {
+static VkSpan vk_transient(uint64_t n,uint64_t align) {
     top=(top+align-1)&~(align-1);assert(top+n<=sizeof copies);
-    VkSpan out={1,top,copies+top};memcpy(out.ptr,src,n);top+=n;allocations++;return out;
+    VkSpan out={1,top,copies+top};top+=n;allocations++;return out;
 }
 '''
 tests=r'''

@@ -215,6 +215,52 @@ PATCHES_143[0x70002daa78] = _drop(0x1e210800, 'fmul s0, s0, s1')
 PATCHES_143[0x70003e5658] = _step_interval
 
 
+# 1.4.2 (5cb42b1c...). Verified against the player's NSO, not a fixed
+# translation of 1.4.3 addresses. The two clock consumers and seven controller
+# sites have the same instructions/registers; every replacement asserts them.
+BUILD_TOTK_1_4_2 = '5cb42b1cf25469fb'
+
+
+def _equipment_timer142(gen, a):
+    # The update skips a remainder <= FLT_EPSILON, while main+0x34b454
+    # blocks equipment for any remainder > 0. main+0x480a90 steps this
+    # timer with main+0x536b6c (value += ratio * rate).
+    _expect(gen, a - 4, 0xbd509e60)  # ldr s0, [x19, #0x109c]
+    _expect(gen, a, 0x0f016681)      # movi v1.2s, #FLT_EPSILON
+    _expect(gen, a + 4, 0x1e212000) # fcmp s0, s1
+    return '{ c->v[1] = 0; } /* equipment timer: consume every positive remainder */'
+
+
+def _bounce_clock142(gen, a):
+    # 1.4.2 uses x8 for the time object (1.4.3 uses x9). The following
+    # compare is against 100; its taken path scales the vector by 0.1.
+    _expect(gen, a, 0xbd402900)     # ldr s0, [x8, #0x28]
+    _expect(gen, a + 4, 0x52a85908) # mov w8, #100.0 bits (x8 dies here)
+    return ('{ float inverse, ratio; uint32_t ib = LD32(c->x[8] + 0x28ull), '
+            'rb = LD32(c->x[8] + 0x38ull); memcpy(&inverse, &ib, 4); memcpy(&ratio, &rb, 4); '
+            'float f = inverse * ratio; c->v[0] = 0; memcpy(&c->v[0], &f, 4); }')
+
+
+PATCHES_142 = {
+    0x70002d4730: _step_ratio_load,
+    0x70002d4748: _drop(0x5e21d800, 'scvtf s0, s0'),
+    0x70002d474c: _drop(0x1e201820, 'fdiv s0, s1, s0'),
+    0x70002d4754: _drop(0x1e210800, 'fmul s0, s0, s1'),
+    0x700037ea88: _step_interval,
+    0x70002d4f14: _interval_pick,
+    0x700047e5bc: _equipment_timer142,
+    0x70002e9ad4: _bounce_clock142,
+}
+for _a, _old, _new in ((0x70002d4ee0, 0x6b08015f, 0x7100055f),
+                       (0x70002d4ee4, 0x1a89b10a, 0x1a9fa52a),
+                       (0x70002d4f08, 0xb940468a, 0xd503201f),
+                       (0x70002d501c, 0xb9400288, 0x52800028),
+                       (0x70002d5028, 0x2a0a03f5, 0x1a9fa555),
+                       (0x70002d503c, 0x6b0801bf, 0x710005bf),
+                       (0x70002d5048, 0x1a88c1ac, 0x1a9fc5ac)):
+    PATCHES_142[_a] = _fps60(_old, _new)
+
+
 def patches_for(build_id):
     """The patches for a module, by its build id (sdk and anything unknown: none)."""
-    return {BUILD_TOTK_1_4_3: PATCHES_143}.get(build_id[:16], {})
+    return {BUILD_TOTK_1_4_3: PATCHES_143, BUILD_TOTK_1_4_2: PATCHES_142}.get(build_id[:16], {})

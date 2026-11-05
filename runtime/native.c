@@ -258,8 +258,22 @@ static int fix_aspect_setup(Cpu *c) { return fix_aspect_load(c, 22, 0x68); }
 static int fix_aspect_view(Cpu *c) { vset(c, 0, rt_widen_aspect(vget(c, 0) / vget(c, 1))); return 3; }  // fdiv s0, s0, s1
 static int fix_fade_w8(Cpu *c) { return fade_step(c, 8); }
 static int fix_fade_w10(Cpu *c) { return fade_step(c, 10); }
+// PC timing follow-up (MIT, valentderah/totk-pc-recomp recomp/patches-v143.txt).
+// The equipment timer must consume a positive remainder below FLT_EPSILON too.
+static int fix_equipment_timer(Cpu *c) { c->v[1] = 0; return 3; }  // movi v1.2s, #0
+// Contact's threshold uses 30 / time scale, independent of the real frame step.
+// Keep s1: the original instruction only writes s0 (s1 is dead in the PC veneer).
+static int fix_bounce_clock(Cpu *c) {
+    float inverse, ratio;
+    memcpy(&inverse, (const void *)(uintptr_t)(c->x[9] + 0x28), 4);
+    memcpy(&ratio, (const void *)(uintptr_t)(c->x[9] + 0x38), 4);
+    vset(c, 0, inverse * ratio);
+    return 3;
+}
 typedef struct { int version; uint64_t addr, alt; uint32_t word; int (*fn)(Cpu *); const char *what; } Fix;
 static const Fix fixes[] = {  // (canonical addresses, 0x7000000000 + the offset in main)
+    {143, 0x70002b036c, 0, 0x0f016681, fix_equipment_timer, "equipment timer remainder"},
+    {143, 0x7000562a64, 0, 0xbd402920, fix_bounce_clock, "bounce clock independent of FPS"},
     {143, 0x70005848a8, 0, 0x2a1703e9, fix_dynres_scale, "dynamic resolution scale"},
     {143, 0x7000584a70, 0, 0xb9013678, fix_dynres_tier24, "dynamic resolution tier (up)"},
     {143, 0x7000584b70, 0, 0xb9013660, fix_dynres_tier0, "dynamic resolution tier (reset)"},

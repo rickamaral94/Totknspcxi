@@ -588,6 +588,12 @@ static void cq_resolve(int i) {  // (cq_lock held) submission slot i is done: it
         if (result == VK_SUCCESS) {
             double per = g_vk.props.limits.timestampPeriod;
             int64_t s0 = (int64_t)((double)se[0] * per), s1 = (int64_t)((double)se[1] * per);
+            // A stale end from another timestamp epoch can otherwise make every subsequent span appear covered.
+            if (last_end >= 0 && s1 >= s0 && s0 < last_end && last_end - s0 > 1000000000ll) {
+                LOG("[gpu-ts] recovered timestamp span at submission %llu (previous end %.3f ms, new start %.3f ms, end %.3f ms)\n",
+                    (unsigned long long)q->seq, last_end / 1e6, s0 / 1e6, s1 / 1e6);
+                last_end = -1;
+            }
             if (last_end >= 0 && s0 > last_end) idle += s0 - last_end;
             if (cq_calibrated) {
                 tl_add(s0 + cq_offset, "gpu: start of submission", q->seq, q->presentation);
@@ -1226,7 +1232,8 @@ static VkSpan copy_dedupe(int slot, const void *data, uint64_t size, uint64_t al
 
 // Guest memory copied once per submission: draws binding the same range share the copy.
 #define GCOPY_TAB 4096
-static struct { uint64_t addr, size, seq, tracked; VkSpan span; } gcopy[GCOPY_TAB];
+static struct { uint64_t addr, size, capacity, seq, tracked; VkSpan span; } gcopy[GCOPY_TAB];
+static uint64_t stat_guest_grow_saved, stat_guest_grow_appends;
 static uint16_t gcopy_active[GCOPY_TAB];
 static int gcopy_nactive;
 static uint64_t gcopy_active_seq;
@@ -1296,6 +1303,21 @@ static VkSpan guest_copy(uint64_t addr, uint64_t size, int kind) {
             stat_guest_reused += size;
             return gcopy[i].span;
         }
+        // Only append a newly reached tail, within this submission's reserved
+        // allocation. Never rewrite the prefix an earlier draw already binds.
+        // Invalidations cover the initialized size and drop the entire entry.
+        if (kind == GC_VTX && size > gcopy[i].size && size <= gcopy[i].capacity) {
+            uint64_t old = gcopy[i].size, tail = size - old;
+            memcpy((uint8_t *)gcopy[i].span.ptr + old, (const void *)(uintptr_t)(addr + old), tail);
+            gcopy[i].size = size;
+            stat_guest_grow_saved += old; stat_guest_grow_appends++;
+            stat_guest_reused += old; prof_gcopy_reused += old;
+            stat_guest_upload[kind] += tail; stat_cb_copied += tail;
+            prof_gcopy_bytes += tail; prof_gcopy_kind[kind] += tail;
+            prof_gcopy_where[addr >= HEAP_BASE && addr < HEAP_BASE + HEAP_MAX ? 0 : addr >= ALIAS_BASE && addr < ALIAS_BASE + ALIAS_SIZE ? 1 : 2] += tail;
+            if (addr >= ALIAS_BASE && addr < ALIAS_BASE + ALIAS_SIZE) prof_gcopy_alias[(addr - ALIAS_BASE) >> 28] += tail;
+            return gcopy[i].span;
+        }
         slot = i; stale = i; reason = 1;
         break;
     }
@@ -1315,7 +1337,15 @@ static VkSpan guest_copy(uint64_t addr, uint64_t size, int kind) {
         gcopy_active[gcopy_nactive++] = (uint16_t)slot;
         gcopy[slot].tracked = seq;
     }
-    VkSpan s = vk_transient_copy((const void *)(uintptr_t)addr, size, 256);
+    // Reserve geometrically only after a key actually grows: cold one-shot
+    // copies pay no extra ring space. Read only requested guest bytes.
+    uint64_t capacity = size;
+    if (kind == GC_VTX && reason == 1 && size && size <= (1u << 20)) {
+        capacity = 16;
+        while (capacity < size) capacity <<= 1;
+    }
+    VkSpan s = vk_transient(capacity ? capacity : 16, 256);
+    if (size) memcpy(s.ptr, (const void *)(uintptr_t)addr, size);
     static int log_copy = -1, logged_copy;
     if (log_copy < 0) log_copy = getenv("LARECOMP_LOG_GUEST_COPY") != NULL;
     static long log_copy_from = -1;
@@ -1324,17 +1354,20 @@ static VkSpan guest_copy(uint64_t addr, uint64_t size, int kind) {
         LOG("[guest-copy] addr %llx size %llu seq %llu\n", (unsigned long long)addr,
             (unsigned long long)size, (unsigned long long)vk_pending_seq());
     stat_cb_copied += size;
-    gcopy[slot].addr = addr; gcopy[slot].size = size; gcopy[slot].seq = seq; gcopy[slot].span = s;
+    gcopy[slot].addr = addr; gcopy[slot].size = size; gcopy[slot].capacity = capacity;
+    gcopy[slot].seq = seq; gcopy[slot].span = s;
     return s;
 }
 
 // ================================================================== worker threads (shader / pipeline builds)
 // First-use compiles run off the render thread; draws needing them are skipped until ready (as on Metal).
 // LARECOMP_SYNC_SHADERS=1 builds on first use, blocking (deterministic tests).
-typedef struct Job { void (*fn)(void *); void *arg; struct Job *next; } Job;
+typedef struct Job { void (*fn)(void *); void *arg; _Atomic int *state; struct Job *next; } Job;
 static Job *jobs_head, *jobs_tail;
 static pthread_mutex_t jobs_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t jobs_cond = PTHREAD_COND_INITIALIZER;
+static _Atomic(_Atomic int *) urgent_build;
+static _Atomic uint64_t stat_urgent_promoted, stat_urgent_queued;
 
 static void *worker(void *a) {
     (void)a;
@@ -1391,7 +1424,7 @@ static void run_translate(void (*fn)(void *), void *arg) {
     pthread_mutex_unlock(&tjobs_lock);
 }
 
-static void run_job(void (*fn)(void *), void *arg) {
+static void run_job(void (*fn)(void *), void *arg, _Atomic int *state) {
     if (sync_shaders()) { fn(arg); return; }
     static bool started;
     if (!started) {
@@ -1408,17 +1441,24 @@ static void run_job(void (*fn)(void *), void *arg) {
         if (n < 1) n = 1;
         if (n > 16) n = 16;
 #ifdef __ANDROID__
-        // Preserve the tested stable profile: parallel driver compilation exhausted Scudo regions.
-        n = 1;
+        // Experimental two-worker profile. Four concurrent driver compiles previously exhausted Scudo regions.
+        n = 2;
 #endif
         LOG("[driver-diag] pipeline workers=%d\n", n);
         for (int i = 0; i < n; i++) { pthread_t t; pthread_create(&t, NULL, worker, NULL); }
     }
     Job *j = malloc(sizeof *j);
-    j->fn = fn; j->arg = arg; j->next = NULL;
+    j->fn = fn; j->arg = arg; j->state = state; j->next = NULL;
     pthread_mutex_lock(&jobs_lock);
-    if (jobs_tail) jobs_tail->next = j; else jobs_head = j;
-    jobs_tail = j;
+    if (state && atomic_load(&urgent_build) == state) {
+        j->next = jobs_head;
+        jobs_head = j;
+        if (!jobs_tail) jobs_tail = j;
+        atomic_fetch_add(&stat_urgent_queued, 1);
+    } else {
+        if (jobs_tail) jobs_tail->next = j; else jobs_head = j;
+        jobs_tail = j;
+    }
     pthread_cond_signal(&jobs_cond);
     pthread_mutex_unlock(&jobs_lock);
 }
@@ -1431,7 +1471,23 @@ static uint64_t stat_build_wait_ns;
 static void wait_built(_Atomic int *state) {
     if (atomic_load(state)) return;
     uint64_t t0 = plat_now_ns();
+    atomic_store(&urgent_build, state);
+    pthread_mutex_lock(&jobs_lock);
+    Job *prev = NULL;
+    for (Job *j = jobs_head; j; prev = j, j = j->next) {
+        if (j->state != state) continue;
+        if (prev) {
+            prev->next = j->next;
+            if (jobs_tail == j) jobs_tail = prev;
+            j->next = jobs_head;
+            jobs_head = j;
+            atomic_fetch_add(&stat_urgent_promoted, 1);
+        }
+        break;
+    }
+    pthread_mutex_unlock(&jobs_lock);
     while (!atomic_load(state)) usleep(200);
+    atomic_store(&urgent_build, NULL);
     stat_build_wait_ns += plat_now_ns() - t0;
 }
 static bool rt_is_persistent(NvnTexture *t) {
@@ -1540,6 +1596,9 @@ const char *renderer_stats(void) {
              (unsigned long long)stat_dispatches, (unsigned long long)stat_dchained, (unsigned long long)stat_flushes, (double)stat_wait_ns / 1e6,
              atomic_exchange(&stat_compiles, 0), (double)stat_build_wait_ns / 1e6, (unsigned long long)stat_feedback_copies, (unsigned long long)stat_feedback_reads, (unsigned long long)stat_inplace_breaks, (double)stat_upload_bytes / 1048576.0,
              (unsigned long long)stat_pipe_binds, (unsigned long long)stat_set_binds);
+    LOG("[shader-priority] promoted=%llu queued urgent=%llu; same renderer interval\n",
+        (unsigned long long)atomic_exchange(&stat_urgent_promoted, 0),
+        (unsigned long long)atomic_exchange(&stat_urgent_queued, 0));
     LOG("[graphics-diag] feedback copies: depth=%llu color=%llu reused=%llu; counts cover the same interval as renderer stats\n",
         (unsigned long long)stat_feedback_depth_copies, (unsigned long long)stat_feedback_color_copies,
         (unsigned long long)stat_feedback_reused);
@@ -1566,6 +1625,9 @@ const char *renderer_stats(void) {
         (unsigned long long)stat_guest_misses[2], stat_guest_miss_bytes[2]/1048576.0,
         (unsigned long long)stat_guest_invalidated);
     memset(stat_guest_misses, 0, sizeof stat_guest_misses);
+    LOG("[vertex-growth] tail_appends=%llu avoided_prefix_copy=%.2fMB (same submission; initialized bytes only)\n",
+        (unsigned long long)stat_guest_grow_appends, stat_guest_grow_saved / 1048576.0);
+    stat_guest_grow_appends = stat_guest_grow_saved = 0;
     memset(stat_guest_miss_bytes, 0, sizeof stat_guest_miss_bytes);
     stat_guest_invalidated = 0;
     memset(stat_guest_upload, 0, sizeof stat_guest_upload);
@@ -2931,7 +2993,7 @@ static void translate_program(void *arg) {
     }
     save_glsl(p->vi->msl, p->code[0], "vs");
     save_glsl(p->fi->msl, p->code[1], "fs");
-    run_job(compile_program, p);
+    run_job(compile_program, p, &p->state);
 }
 
 #define PROG_TAB 4096
@@ -6346,7 +6408,7 @@ static CsProg *compute_program(NvnProgram *np) {
         if (!cp->local[i]) cp->local[i] = 1;
     }
     save_glsl(cp->si->msl, ss->code_addr, "cs");
-    run_job(build_compute, cp);
+    run_job(build_compute, cp, &cp->p.state);
     return cp;
 }
 
@@ -7104,7 +7166,7 @@ static void draw_(CmdRec *r, bool indexed) {
             pp->k = k;
             pipe_tab[pslot].key = ph;
             pipe_tab[pslot].pipe = pp;
-            run_job(build_pipeline, pp);
+            run_job(build_pipeline, pp, &pp->state);
         }
         // Verification rebuilds the original key to detect missing invalidations during later device tests.
         if (hit && memcmp(&k, &last_pipeline->k, sizeof k)) {

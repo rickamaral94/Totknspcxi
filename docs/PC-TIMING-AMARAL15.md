@@ -30,3 +30,29 @@ The amaral.14 GPU arena merge correction is retained. No new Turnip binary or fo
 Android native library compiled successfully with NDK r30. Production timing helper tested at 15/20/30/40/60/120/240 Hz, in both smoothing modes, including pause, timer rollback, short intervals, maximum step, and post-average minimum clamp. Production FPS selection and settings encoding tested, including unchanged legacy mode values. Arena merge regression test passed. These are host/build checks, not an Odin GPU performance or visual validation.
 
 APK is repackaged from the existing Java/resources with the newly compiled native library; game import assets remain byte-identical. Signed with the fixed Amaral certificate; versionCode 18, versionName 0.2.1-beta-amaral.15.
+
+## Follow-up after the .15 APK
+
+The native 1.4.3 path now includes two additional handlers adapted from
+`valentderah/totk-pc-recomp/recomp/patches-v143.txt` (MIT):
+
+- `main+0x2b036c`, expected instruction `0x0f016681`: zero the equipment
+  timer comparison threshold, so a positive remainder at or below FLT_EPSILON
+  continues counting down rather than locking equipment changes.
+- `main+0x562a64`, expected instruction `0xbd402920`: load the contact clock's
+  inverse step and multiply by its ratio, removing FPS dependence from the
+  trampoline threshold. Other registers remain intact.
+
+Both sites use the native rewriter's existing version and instruction checks.
+`tools/test_native_timing_fixes.py` executes the production handlers with
+synthetic guest memory under ASan/UBSan, checks untouched registers, and checks
+the contact clock at 15–240 FPS and four time scales. Existing clock and FG
+policy tests also pass. Leak detection is disabled for the test executable
+because the managed executor prevents LeakSanitizer from inspecting /proc.
+
+These additions are source changes after the delivered .15 APK, not changes to
+that APK. No Android SDK/NDK is installed in the continuation workspace, so no
+new Android build or device validation was performed here. The recompiled
+path still lacks these two patches: its generator and GAMELIB_ID are deliberately
+unchanged, preserving compatibility with installed compiled game assets.
+The two pending rows above describe the original .15 APK.

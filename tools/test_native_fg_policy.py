@@ -20,6 +20,7 @@ prefix=r'''
 #include <stdio.h>
 #define __ANDROID__ 1
 #define GAME_V_143 143
+#define GAME_V_142 142
 static int g_game_version=143,base;
 static struct { int fps_mode,fg_mult; } g_settings;
 int fg_base_fps(void) { return base; }
@@ -41,6 +42,7 @@ int main(void) {
     base=40;assert(!rt_fps60() && !rt_fg_native60());
     base=60;assert(rt_fps60() && rt_fg_native60());
     g_settings.fps_mode=1;assert(rt_fps60());
+    g_game_version=142;assert(rt_fps60() && rt_fg_native60());
     g_game_version=182;assert(!rt_fps60() && !rt_fg_native60());
     puts("native FG policy: legacy settings round-trip, 30/40 behavior and TOTK-only native60 controller OK");
 }

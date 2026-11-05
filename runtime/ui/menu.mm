@@ -558,8 +558,9 @@ static void tab_display(void) {
         // (before the game loads - the menu on the start screen - its version is 0: the data root's, 1.4.3, so a 60
         // isn't shown missing and set back to 30)
         extern int rt_game_version(void);
-        int version = g_game_version ? g_game_version : rt_game_version();  // (1.4.2: 30 at most - no 60 fps patches)
-        bool sixty = version == 182 || version == 143;
+        int version = g_game_version ? g_game_version : rt_game_version();
+        bool sixty = version == 182 || version == 143 || version == 142;
+        if (version == 142) ImGui::TextWrapped("%s", tr("1.4.2: 60 fps is experimental. Rebuild game code once. Cutscenes and high-FPS physics are not fully validated; select 30 fps if their timing is wrong."));
         if (!sixty && g_settings.fps_mode > 1) g_settings.fps_mode = 1;
         static const char *fr[] = {"Auto (20 / 30)", "30 fps"};
         static const char *fr60[] = {"Auto (30 / 60)", "30 fps", "60 fps"};

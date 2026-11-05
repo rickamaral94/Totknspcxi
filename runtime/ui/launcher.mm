@@ -1550,9 +1550,9 @@ static void version_rows(bool busy, bool focus) {
     static const char *const notes[N_VERSIONS] = {
         "The game with its update 1.4.3, the last one: everything this app does (60 fps, the world in real time, Native game "
         "code).",
-        "The game with its update 1.4.2. Recompiled game code only, at 30 fps at most, without 1.4.3's fixes: below 30 fps "
-        "the game runs slower than real time, and the scene may darken for a moment when it changes size. Saves of 1.4.2 "
-        "also open in 1.4.3.",
+        "The game with its update 1.4.2. Recompiled game code only. Real-time world clock and experimental 60 fps "
+        "after rebuilding game code once. Cutscenes and high-FPS physics are not fully validated; scene-size changes "
+        "may still flicker. Saves of 1.4.2 also open in 1.4.3.",
         "The base game, without updates. Recompiled game code only, at 30 fps at most, without 1.4.3's fixes - and never "
         "run in this app before: an experiment. Report what goes wrong with the log."};
     opt_section("Game version");

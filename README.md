@@ -6,6 +6,8 @@ A native Android port of *The Legend of Zelda: Tears of the Kingdom* **1.4.3**, 
 The game’s ARM64 code runs on the phone and its graphics (NVN) are translated to Vulkan. This fork also keeps
 **1.4.2** and experimental **1.0.0**, which run recompiled only.
 
+> **Amaral.16 / 1.4.2:** real-time world clock and experimental 60 FPS require a one-time game-code rebuild. Cutscenes and high-FPS physics still need device validation. See [build notes](docs/PERFORMANCE-AMARAL16.md).
+
 > [!NOTE]
 > **1.0.0** (the base game alone, imported without an update) is an experiment on the same terms as 1.4.2 below, never
 > run in this app before.
