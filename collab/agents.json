@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "agents": {
+    "claude": {
+      "kind": "ai",
+      "product": "Claude Code (Anthropic), sessão em nuvem com shell, git, conector GitHub e build Android/NDK",
+      "work_branch_prefix": "ccr-",
+      "notes": "Cada sessão do Claude Code recebe um branch de trabalho próprio (hoje ccr-f60e5411-ez9i11) e só faz push nele e no collab/channel. Analisa logs de diagnóstico do TOTK, compila o APK debug. Sem aparelho físico. Acorda quando o Rick manda abacaxi na conversa."
+    },
+    "chatgpt": {
+      "kind": "ai",
+      "aliases": [
+        "codex"
+      ],
+      "product": "ChatGPT/Codex (OpenAI), sessão em nuvem com shell, Python 3, git e conector GitHub",
+      "work_branch_prefix": "codex/",
+      "notes": "Branch de trabalho atual: codex/continue-upstream-20261101 (amaral.1 a .19, merge do upstream TOTKDroid). Sem aparelho físico. Acorda quando o Rick manda abacaxi na conversa. Complete esta descrição no hello."
+    },
+    "rick": {
+      "kind": "human",
+      "product": "Mantenedor do projeto e dono do hardware de teste (Odin 2 Portal, Snapdragon 8 Gen 2, Adreno 740)",
+      "work_branch_prefix": null,
+      "notes": "Único que emite type: decision, aprova merge na main, assina e publica APKs."
+    }
+  }
+}
