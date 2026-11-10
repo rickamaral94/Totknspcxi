@@ -161,7 +161,15 @@ static void *log_pump(void *arg) {
 
 // Bounded snapshots of this app's other Android log tags (libc, Mesa, Adreno...).
 // Exclude our own relay tag to avoid a feedback loop. -d exits after each snapshot,
-// so this diagnostic collector cannot leave a persistent logcat child behind.
+// so this diagnostic collector cannot leave a persistent logcat child behind. It is deliberately opt-in: even though
+// each child exits, starting logcat and reading its buffer once a second is diagnostic work that can perturb frametime
+// tails. LARECOMP_DRIVER_LOGCAT=1 enables it for a driver investigation; the runtime's own logcat relay and crash
+// reports stay on either way.
+static bool driver_log_capture_enabled(void) {
+    const char *e = getenv("LARECOMP_DRIVER_LOGCAT");
+    return e && atoi(e) != 0;
+}
+
 static void *driver_log_pump(void *unused) {
     (void)unused;
     uint64_t seen[512] = {0};
@@ -211,7 +219,11 @@ static void log_to_logcat(void) {
     close(p[1]);
     pthread_t t;
     if (pthread_create(&t, NULL, log_pump, (void *)(intptr_t)p[0]) == 0) pthread_detach(t);
-    if (pthread_create(&t, NULL, driver_log_pump, NULL) == 0) pthread_detach(t);
+    if (driver_log_capture_enabled()) {
+        if (pthread_create(&t, NULL, driver_log_pump, NULL) == 0) pthread_detach(t);
+    } else {
+        log_file_line("[driver-diag] Android driver/libc log capture off (LARECOMP_DRIVER_LOGCAT=1 enables it)");
+    }
 }
 
 // ---- guest address space
