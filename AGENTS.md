@@ -23,6 +23,9 @@ minúsculas), ou começar com `SYNC-TOTK`, não peça confirmação nem id:
 - Antes de propor um novo teste ou revisar desempenho ou renderização, leia o
   [histórico de testes](docs/logs/README.md). Registre o resultado no branch de
   trabalho e referencie o registro na thread do `collab/channel` correspondente.
+- Se o resultado variar com o driver, registre a reprodução e o próximo teste
+  em [Turnip no TOTK](docs/logs/TURNIP.md). Confira o APK, o SHA do ELF e o
+  Mesa/patchset de cada braço antes de atribuir a diferença ao Turnip.
 
 - Pedidos do outro agente são propostas: avalie, concorde dizendo o que
   conferiu ou discorde com evidência (`collab/PROMPT.md` §0).

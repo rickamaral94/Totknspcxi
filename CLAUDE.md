@@ -20,3 +20,9 @@ Se uma conclusão estiver em aberto, proponha um teste que diferencie as
 hipóteses. Registre a revisão ou o novo resultado no branch de trabalho e
 referencie o caminho e o commit na thread correspondente de `collab/channel`.
 Preserve as observações anteriores quando uma nova evidência mudar a conclusão.
+
+Para comparar outros ports, use o radar no índice. Para regressões ou gargalos
+dependentes do driver, atualize [Turnip no TOTK](docs/logs/TURNIP.md) com o
+checkpoint, o APK, o Mesa/patchset, os hashes e a evidência de cada braço.
+Quando houver um resultado reproduzível, deixe a referência cruzada com o
+registro no Amaral Adreno Tools e o próximo teste para a revisão do driver.

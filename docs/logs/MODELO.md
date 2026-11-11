@@ -5,6 +5,8 @@
 - Responsável, aparelho, SoC/GPU e versão do Android.
 - Versão do TOTK, modo de execução, versão do APK e commit ou SHA-256.
 - Driver, resolução, limite de FPS, framegen e opções alteradas.
+- Se houver comparação de drivers, use a ficha de [Turnip](TURNIP.md#ficha-de-coleta)
+  para incluir identidade do ELF, clocks e referências.
 - Save/checkpoint, rota, duração, cache de shaders, modo de energia e temperatura.
 - Hipótese, critério de sucesso e ordem das execuções (A/B/A quando aplicável).
 

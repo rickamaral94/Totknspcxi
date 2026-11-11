@@ -13,6 +13,14 @@ passo. Os relatórios detalhados de cada build continuam em `docs/`.
 | [Histórico inicial do Odin 2](2026-11-historico-odin2.md#amaral20) | Sessões na `.19` que motivaram a `.20` | 29,2 e 41,4 FPS reais em duas sessões com três opções alteradas juntas. |
 | [Histórico inicial do Odin 2](2026-11-historico-odin2.md#amaral21) | `.21`, upstream e captura do log do driver | Build e testes no host passaram. Falta validação no Odin 2. |
 
+## Pesquisa de outros ports e Turnip
+
+- [Radar de ports — 11/11/2026](2026-11-11-radar-ports.md) reúne commits
+  avaliados, o que já temos no fork e os próximos testes por prioridade.
+- [Turnip no TOTK](TURNIP.md) concentra hipóteses, medições e critérios de
+  encaminhamento ao Amaral Adreno Tools. Consulte este tópico quando o driver
+  receber uma candidata ou surgir uma regressão reproduzível.
+
 ## Próxima rodada no Odin 2 Portal
 
 1. Comparar `.20 → .21 → .20` com o mesmo save, trajeto, versão do jogo, driver,
@@ -22,6 +30,10 @@ passo. Os relatórios detalhados de cada build continuam em `docs/`.
 2. Para atribuir efeito a heap, leituras in-place ou LRZ, repetir A/B/A dentro
    do mesmo APK, variando uma opção por vez. Anotar configuração e estado
    efetivo no log quando a opção estiver em Automático.
+
+3. Registrar clocks, temperatura e cache em cada braço. Com a linha de base
+   da `.21` estabelecida, comparar o Turnip atual com a próxima candidata
+   mantendo o APK fixo. Ver [matriz de testes do driver](TURNIP.md#matriz-de-testes).
 
 ## Como registrar e revisar
 
