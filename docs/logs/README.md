@@ -13,6 +13,8 @@ passo. Os relatórios detalhados de cada build continuam em `docs/`.
 | [Histórico inicial do Odin 2](2026-11-historico-odin2.md#amaral20) | Sessões na `.19` que motivaram a `.20` | 29,2 e 41,4 FPS reais em duas sessões com três opções alteradas juntas. |
 | [Histórico inicial do Odin 2](2026-11-historico-odin2.md#amaral21) | `.21`, upstream e captura do log do driver | Build e testes no host passaram. Falta validação no Odin 2. |
 
+| [Relatório da .22](https://github.com/rickamaral94/Totknspcxi/blob/c3cca75e956eceb984adc5619d0e6663bde72961/docs/PERFORMANCE-AMARAL22.md) | Fila Vulkan, cache e clock GPU | APK ARM64 assinado com a chave fixa e validado no host. A/B/A no Odin pendente. |
+
 ## Pesquisa de outros ports e Turnip
 
 - [Radar de ports — 11/11/2026](2026-11-11-radar-ports.md) reúne commits
@@ -23,15 +25,17 @@ passo. Os relatórios detalhados de cada build continuam em `docs/`.
 
 ## Próxima rodada no Odin 2 Portal
 
-1. Comparar `.20 → .21 → .20` com o mesmo save, trajeto, versão do jogo, driver,
+1. Priorizar `.21 → .22 → .21` para medir a fila e o cache. Seguir o
+   [roteiro da .22](https://github.com/rickamaral94/Totknspcxi/blob/c3cca75e956eceb984adc5619d0e6663bde72961/docs/PERFORMANCE-AMARAL22.md) e separar cache frio de cache quente.
+2. Comparar `.20 → .21 → .20` com o mesmo save, trajeto, versão do jogo, driver,
    resolução, cache aquecido e estado térmico comparável. Manter framegen
    desligado na linha de base. Registrar o salto inicial, a saída da primeira
    caverna e a superfície, com vídeo se houver piscadas.
-2. Para atribuir efeito a heap, leituras in-place ou LRZ, repetir A/B/A dentro
+3. Para atribuir efeito a heap, leituras in-place ou LRZ, repetir A/B/A dentro
    do mesmo APK, variando uma opção por vez. Anotar configuração e estado
    efetivo no log quando a opção estiver em Automático.
 
-3. Registrar clocks, temperatura e cache em cada braço. Com a linha de base
+4. Registrar clocks, temperatura e cache em cada braço. Com a linha de base
    da `.21` estabelecida, comparar o Turnip atual com a próxima candidata
    mantendo o APK fixo. Ver [matriz de testes do driver](TURNIP.md#matriz-de-testes).
 

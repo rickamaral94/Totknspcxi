@@ -33,6 +33,11 @@ e o ELF do ensaio histórico precisam ter seus hashes conferidos antes de
 serem tratados como um binário reproduzível.
 [Lock do Mesa](https://github.com/rickamaral94/Amaral-Adreno-Tools/blob/main/config/mesa-lock.json)
 
+A [amaral.22](https://github.com/rickamaral94/Totknspcxi/blob/c3cca75e956eceb984adc5619d0e6663bde72961/docs/PERFORMANCE-AMARAL22.md) coleta amostras instantâneas do clock KGSL a cada
+2 s durante o diagnóstico, quando o Android permite a leitura. Usar a
+contagem e a dispersão como triagem. Para o controle por residência,
+guardar os contadores de residência separadamente.
+
 ## Matriz de testes
 
 | Caso | A/B/A no mesmo APK e save | Evidência que orienta o próximo passo | Estado |
