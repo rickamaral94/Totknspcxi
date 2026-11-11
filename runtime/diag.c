@@ -272,6 +272,11 @@ static uint64_t f_checkpoint_next, f_checkpoint_real, f_checkpoint_ns;
 static uint32_t cl_min[CL], cl_max[CL];
 static uint64_t cl_sum[CL];
 static int cl_n, cl_samples;
+#ifdef __ANDROID__
+static uint32_t gpu_clock_min, gpu_clock_max;
+static uint64_t gpu_clock_sum;
+static unsigned gpu_clock_samples;
+#endif
 static float temp_min = 1e9f, temp_max = -1e9f, headroom_min = 1e9f;
 static int thermal_max = -1;
 static uint64_t g_move_cost_ns;
@@ -449,6 +454,10 @@ void diag_request(int seconds) {
     f_n = f_ncomp = f_nmenu = 0;
     f_last = f_last_gpu = 0;
     cl_n = cl_samples = 0;
+#ifdef __ANDROID__
+    gpu_clock_min = gpu_clock_max = 0;
+    gpu_clock_sum = gpu_clock_samples = 0;
+#endif
     memset(cl_min, 0, sizeof cl_min), memset(cl_max, 0, sizeof cl_max), memset(cl_sum, 0, sizeof cl_sum);
     temp_min = 1e9f, temp_max = -1e9f, headroom_min = 1e9f, thermal_max = -1;
     atomic_fetch_add(&g_session, 1);
@@ -551,6 +560,12 @@ void diag_present(uint64_t acquire_ns, uint64_t present_ns) {
         }
         if (g_diag_ab >= 0) ab_cl_samples[g_diag_ab]++;
         cl_samples++;
+        if (ds.gpu_mhz && diag_in_gameplay()) {
+            if (!gpu_clock_samples || ds.gpu_mhz < gpu_clock_min) gpu_clock_min = ds.gpu_mhz;
+            if (ds.gpu_mhz > gpu_clock_max) gpu_clock_max = ds.gpu_mhz;
+            gpu_clock_sum += ds.gpu_mhz;
+            gpu_clock_samples++;
+        }
         if (ds.soc_temp_c > 0) {
             if (ds.soc_temp_c < temp_min) temp_min = ds.soc_temp_c;
             if (ds.soc_temp_c > temp_max) temp_max = ds.soc_temp_c;
@@ -921,6 +936,12 @@ static void *report_main(void *arg) {
                           (unsigned long long)(cl_sum[i] / (uint64_t)cl_samples), cl_max[i]);
         out("%s", line);
     } else out("CPU clusters: n/a");
+#ifdef __ANDROID__
+    if (gpu_clock_samples)
+        out("GPU clock MHz (gameplay snapshots, min / mean / max): %u / %.1f / %u (%u samples)",
+            gpu_clock_min, (double)gpu_clock_sum / gpu_clock_samples, gpu_clock_max, gpu_clock_samples);
+    else out("GPU clock: n/a (KGSL clock unavailable or no gameplay samples)");
+#endif
     if (temp_max > -1e8f) out("SoC temperature %.0f-%.0f C", temp_min, temp_max); else out("SoC temperature: n/a");
     if (thermal_max >= 0) out("Android thermal status (max): %d", thermal_max); else out("Android thermal status: n/a");
     if (headroom_min < 1e8f) out("thermal headroom (min): %.2f", headroom_min); else out("thermal headroom: n/a");

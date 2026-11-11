@@ -2,6 +2,7 @@
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
 #include <math.h>
+#include <pthread.h>
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
@@ -925,15 +926,34 @@ void vk_pipeline_cache_save(void) {
     if (getenv("LARECOMP_VK_NO_PIPELINE_CACHE")) return;
     size_t sz = 0;
     if (vkGetPipelineCacheData(g_vk.dev, g_vk.pcache, &sz, NULL) != VK_SUCCESS || !sz) return;
+#ifdef __ANDROID__
+    if (sz > VK_BACKEND_PIPELINE_CACHE_MAX) return;
+#endif
     void *data = malloc(sz);
+    if (!data) return;
     if (vkGetPipelineCacheData(g_vk.dev, g_vk.pcache, &sz, data) == VK_SUCCESS) {
         mkdir("cache", 0755);
+#ifdef __ANDROID__
+        // A stopped app can leave a partial temp file. Keep the last good cache
+        // until the new file is complete and replace it in one rename.
+        static pthread_mutex_t cache_write_lock = PTHREAD_MUTEX_INITIALIZER;
+        const char *temp = "cache/vk_pipelines.bin.tmp";
+        pthread_mutex_lock(&cache_write_lock);
+        FILE *f = fopen(temp, "wb");
+        if (f) {
+            bool ok = fwrite(data, 1, sz, f) == sz;
+            if (fclose(f) != 0) ok = false;
+            if (!ok || rename(temp, "cache/vk_pipelines.bin") != 0) remove(temp);
+        }
+        pthread_mutex_unlock(&cache_write_lock);
+#else
         FILE *f = fopen("cache/vk_pipelines.bin.tmp", "wb");
         if (f) {
             bool ok = fwrite(data, 1, sz, f) == sz;
             fclose(f);
             if (ok) { remove("cache/vk_pipelines.bin"); rename("cache/vk_pipelines.bin.tmp", "cache/vk_pipelines.bin"); }
         }
+#endif
     }
     free(data);
 }
@@ -1930,7 +1950,7 @@ void ui_window_init(void) {
     SDL_SetHint(SDL_HINT_ANDROID_TRAP_BACK_BUTTON, "1");  // (the back button opens the menu: ui/touch_controls.mm)
 #endif
     settings_load();
-    LOG("[driver-diag] amaral.20 TOTK 1.4.2 two workers, Adreno 740 Automatic fast paths: shader_int32=%d sync_lag=%d framegen=%d cbuf_inplace=%d gpu_heap=%d inplace_reads=%d turnip_lrz=%d\n",
+    LOG("[driver-diag] render settings: shader_int32=%d sync_lag=%d framegen=%d cbuf_inplace=%d gpu_heap=%d inplace_reads=%d turnip_lrz=%d\n",
         g_settings.shader_int32, g_settings.sync_lag, g_settings.framegen, g_settings.cbuf_inplace,
         g_settings.gpu_heap, g_settings.inplace_reads, g_settings.turnip_lrz);
 #ifdef __ANDROID__

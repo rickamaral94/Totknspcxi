@@ -1366,7 +1366,10 @@ typedef struct Job { void (*fn)(void *); void *arg; _Atomic int *state; struct J
 static Job *jobs_head, *jobs_tail;
 static pthread_mutex_t jobs_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t jobs_cond = PTHREAD_COND_INITIALIZER;
-static _Atomic(_Atomic int *) urgent_build;
+static pthread_cond_t build_done = PTHREAD_COND_INITIALIZER;
+static _Atomic int *urgent_build;  // protected by jobs_lock
+static pthread_once_t workers_once = PTHREAD_ONCE_INIT;
+static int active_workers;
 static _Atomic uint64_t stat_urgent_promoted, stat_urgent_queued;
 
 static void *worker(void *a) {
@@ -1410,7 +1413,6 @@ static void *translator(void *a) {
     }
     return NULL;
 }
-static bool sync_shaders(void);
 static void run_translate(void (*fn)(void *), void *arg) {
     if (sync_shaders()) { fn(arg); return; }
     static bool started;
@@ -1424,33 +1426,36 @@ static void run_translate(void (*fn)(void *), void *arg) {
     pthread_mutex_unlock(&tjobs_lock);
 }
 
+static void start_workers(void) {
+    const char *workers = getenv("LARECOMP_SHADER_WORKERS");
+#ifdef __ANDROID__
+    // Keep the two-worker profile by default. One worker is the control
+    // for A/B tests; four concurrent compiles previously exhausted Scudo regions.
+    int n = workers && !strcmp(workers, "1") ? 1 : 2;
+#else
+    int n = workers ? atoi(workers) : SDL_GetNumLogicalCPUCores() - 4;
+    if (n < 1) n = 1;
+    if (n > 16) n = 16;
+#endif
+    for (int i = 0; i < n; i++) {
+        pthread_t t;
+        if (pthread_create(&t, NULL, worker, NULL) == 0) {
+            pthread_detach(t);
+            active_workers++;
+        }
+    }
+    LOG("[driver-diag] pipeline workers=%d (requested %d)\n", active_workers, n);
+}
+
 static void run_job(void (*fn)(void *), void *arg, _Atomic int *state) {
     if (sync_shaders()) { fn(arg); return; }
-    static bool started;
-    if (!started) {
-        started = true;
-        // first entry into an area builds dozens of pipelines at once: use most of the CPU (draws wait for them)
-        int cores = SDL_GetNumLogicalCPUCores();
-        int n = cores - 4;
-#ifdef __ANDROID__
-        n = cores / 2;
-        if (n > 4) n = 4;  // leave CPU capacity for the game and Vulkan translation
-#endif
-        const char *workers = getenv("LARECOMP_SHADER_WORKERS");
-        if (workers) n = atoi(workers);
-        if (n < 1) n = 1;
-        if (n > 16) n = 16;
-#ifdef __ANDROID__
-        // Experimental two-worker profile. Four concurrent driver compiles previously exhausted Scudo regions.
-        n = 2;
-#endif
-        LOG("[driver-diag] pipeline workers=%d\n", n);
-        for (int i = 0; i < n; i++) { pthread_t t; pthread_create(&t, NULL, worker, NULL); }
-    }
+    pthread_once(&workers_once, start_workers);
+    if (!active_workers) { fn(arg); return; }
     Job *j = malloc(sizeof *j);
+    if (!j) { fn(arg); return; }
     j->fn = fn; j->arg = arg; j->state = state; j->next = NULL;
     pthread_mutex_lock(&jobs_lock);
-    if (state && atomic_load(&urgent_build) == state) {
+    if (state && urgent_build == state) {
         j->next = jobs_head;
         jobs_head = j;
         if (!jobs_tail) jobs_tail = j;
@@ -1468,11 +1473,23 @@ static void run_job(void (*fn)(void *), void *arg, _Atomic int *state) {
 // empty: no ground on the plateau). Draws into arrays, cubemaps, 3D textures and mipmapped targets wait for their
 // shader and pipeline instead (LARECOMP_WAIT_PERSISTENT=0: skip them like the rest).
 static uint64_t stat_build_wait_ns;
+static void finish_graphics_build(_Atomic int *state, int result) {
+    pthread_mutex_lock(&jobs_lock);
+    atomic_store(state, result);
+    if (urgent_build == state) pthread_cond_signal(&build_done);
+    pthread_mutex_unlock(&jobs_lock);
+}
+
 static void wait_built(_Atomic int *state) {
     if (atomic_load(state)) return;
     uint64_t t0 = plat_now_ns();
-    atomic_store(&urgent_build, state);
     pthread_mutex_lock(&jobs_lock);
+    if (atomic_load(state)) {
+        pthread_mutex_unlock(&jobs_lock);
+        stat_build_wait_ns += plat_now_ns() - t0;
+        return;
+    }
+    urgent_build = state;
     Job *prev = NULL;
     for (Job *j = jobs_head; j; prev = j, j = j->next) {
         if (j->state != state) continue;
@@ -1485,9 +1502,9 @@ static void wait_built(_Atomic int *state) {
         }
         break;
     }
+    while (!atomic_load(state)) pthread_cond_wait(&build_done, &jobs_lock);
+    urgent_build = NULL;
     pthread_mutex_unlock(&jobs_lock);
-    while (!atomic_load(state)) usleep(200);
-    atomic_store(&urgent_build, NULL);
     stat_build_wait_ns += plat_now_ns() - t0;
 }
 static bool rt_is_persistent(NvnTexture *t) {
@@ -2844,7 +2861,7 @@ static void compile_program(void *arg) {
     size_t nv = 0, nf = 0;
     uint32_t *sv = vk_glsl_to_spirv(p->vi->msl, STAGE_VERTEX, "vs", &nv);
     uint32_t *sf = sv ? vk_glsl_to_spirv(p->fi->msl, STAGE_FRAGMENT, "fs", &nf) : NULL;
-    if (!sv || !sf) { free(sv); free(sf); atomic_store(&p->state, 2); return; }
+    if (!sv || !sf) { free(sv); free(sf); finish_graphics_build(&p->state, 2); return; }
     p->nbinds = vk_reflect(sv, nv, p->binds, MAX_BIND);
     p->nbinds += vk_reflect(sf, nf, p->binds + p->nbinds, MAX_BIND - p->nbinds);
     p->vs = vk_module(sv, nv);
@@ -2855,7 +2872,7 @@ static void compile_program(void *arg) {
         if (p->vs) vkDestroyShaderModule(g_vk.dev, p->vs, NULL);
         if (p->fs) vkDestroyShaderModule(g_vk.dev, p->fs, NULL);
         p->vs = p->fs = VK_NULL_HANDLE;
-        atomic_store(&p->state, 2);
+        finish_graphics_build(&p->state, 2);
         return;
     }
 #ifdef __ANDROID__
@@ -2880,7 +2897,7 @@ static void compile_program(void *arg) {
 #endif
     p->layout = make_layout(p, 2, VK_SHADER_STAGE_VERTEX_BIT, VK_SHADER_STAGE_FRAGMENT_BIT);
     atomic_fetch_add(&stat_compiles, 1);
-    atomic_store(&p->state, p->vs && p->fs ? 1 : 2);
+    finish_graphics_build(&p->state, p->vs && p->fs ? 1 : 2);
 }
 
 #ifdef __ANDROID__
@@ -2949,12 +2966,12 @@ static void translate_program(void *arg) {
     pthread_mutex_unlock(&translate_lock);
     if (!p->vi->msl) {
         LOG("[shader] VS translate failed: %s (code %llx)\n", p->vi->error, (unsigned long long)p->code[0]);
-        atomic_store(&p->state, 2);
+        finish_graphics_build(&p->state, 2);
         return;
     }
     if (!p->fi->msl) {
         LOG("[shader] FS translate failed: %s\n", p->fi->error);
-        atomic_store(&p->state, 2);
+        finish_graphics_build(&p->state, 2);
         return;
     }
 #ifdef __ANDROID__
@@ -3413,7 +3430,7 @@ static void build_pipeline(void *arg) {
         if (n++ < 20) LOG("[vk] graphics pipeline failed (%d): vs %llx fs %llx\n", (int)r,
                           (unsigned long long)k->prog->code[0], (unsigned long long)k->prog->code[1]);
     }
-    atomic_store(&pp->state, r == VK_SUCCESS ? 1 : 2);
+    finish_graphics_build(&pp->state, r == VK_SUCCESS ? 1 : 2);
 }
 
 // ================================================================== feedback snapshots (renderer.m resolve_feedback)

@@ -81,6 +81,7 @@ void rt_fault_report(const char *what, uint64_t fault_addr, uint64_t host_pc, ui
 typedef struct {
     int ncluster;                  // CPU clusters (cpufreq policies)
     uint32_t cluster_mhz[8];
+    uint32_t gpu_mhz;              // sampled KGSL clock, zero if unavailable
     float cpu_pct;                 // this process's CPU time, as a share of all cores
     uint32_t rss_mb, avail_mb;     // this process's memory, the system's available memory
     float soc_temp_c;              // a thermal zone the app may read

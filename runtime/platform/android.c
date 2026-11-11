@@ -689,6 +689,9 @@ void plat_device_stats(PlatDeviceStats *out) {
     pthread_mutex_unlock(&g_ds_lock);
     out->ncluster = g_npolicy;
     for (int i = 0; i < g_npolicy; i++) out->cluster_mhz[i] = (uint32_t)(read_u64(g_policy[i]) / 1000);
+    uint64_t gpu_hz = read_u64("/sys/class/kgsl/kgsl-3d0/devfreq/cur_freq");
+    if (!gpu_hz) gpu_hz = read_u64("/sys/class/kgsl/kgsl-3d0/gpuclk");
+    if (gpu_hz >= 1000000 && gpu_hz <= 10000000000ULL) out->gpu_mhz = (uint32_t)(gpu_hz / 1000000);
     out->soc_temp_c = g_tzone[0] ? (float)read_u64(g_tzone) / 1000.0f : -1;
     // this process's CPU time since the last call, as a share of every core
     static uint64_t last_ticks, last_ns;
