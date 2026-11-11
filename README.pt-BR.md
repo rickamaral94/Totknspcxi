@@ -33,6 +33,10 @@ O id Android continua `com.totkrecompandroid`; atualizar uma instalação també
 > prólogo e 54-57 no bosque da ilha; em sessões longas o calor do celular baixa isso para ~45. O plano e o estado de
 > cada fase estão em [docs/TOTK-PORT.md](docs/TOTK-PORT.md). Versões: [Releases](https://github.com/mamcjr/TOTKDroid/releases).
 
+## Logs de testes
+
+Consulte o [histórico de testes](docs/logs/README.md) para ver o que foi avaliado no Android, as evidências, as conclusões e os testes pendentes.
+
 ## Plataforma
 
 Somente Android (arm64, Vulkan). Windows, Linux ou macOS servem como máquina de desenvolvimento, com o SDK/NDK do

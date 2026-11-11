@@ -1,0 +1,41 @@
+# Logs de testes do TOTK no Android
+
+Histórico compartilhado por Rick, Claude e Codex. Cada registro guarda o que
+foi testado, o resultado, a conclusão sustentada pela evidência e o próximo
+passo. Os relatórios detalhados de cada build continuam em `docs/`.
+
+## Histórico
+
+| Registro | Escopo | Resultado e situação |
+| --- | --- | --- |
+| [Histórico inicial do Odin 2](2026-11-historico-odin2.md#piscadas-e-frame-generation) | Piscadas, sync lag e frame generation | As piscadas voltaram após a saída da primeira caverna. A causa permanece em aberto. |
+| [Histórico inicial do Odin 2](2026-11-historico-odin2.md#amaral14-a-amaral19) | `.14` a `.19`, TOTK 1.4.2 | FPS e CPU observados na `.16`; prioridade de shaders e dois workers ainda sem comparação controlada registrada. |
+| [Histórico inicial do Odin 2](2026-11-historico-odin2.md#amaral20) | Sessões na `.19` que motivaram a `.20` | 29,2 e 41,4 FPS reais em duas sessões com três opções alteradas juntas. |
+| [Histórico inicial do Odin 2](2026-11-historico-odin2.md#amaral21) | `.21`, upstream e captura do log do driver | Build e testes no host passaram. Falta validação no Odin 2. |
+
+## Próxima rodada no Odin 2 Portal
+
+1. Comparar `.20 → .21 → .20` com o mesmo save, trajeto, versão do jogo, driver,
+   resolução, cache aquecido e estado térmico comparável. Manter framegen
+   desligado na linha de base. Registrar o salto inicial, a saída da primeira
+   caverna e a superfície, com vídeo se houver piscadas.
+2. Para atribuir efeito a heap, leituras in-place ou LRZ, repetir A/B/A dentro
+   do mesmo APK, variando uma opção por vez. Anotar configuração e estado
+   efetivo no log quando a opção estiver em Automático.
+
+## Como registrar e revisar
+
+- Crie `AAAA-MM-DD-build-cenario.md` a partir do [modelo](MODELO.md) e acrescente
+  uma linha ao índice. Use a mesma entrada para rodadas do mesmo experimento e
+  acrescente uma nota datada se a conclusão mudar.
+- Identifique **medição no aparelho**, **relato do jogador**, **verificação no
+  host** e **hipótese**. Indique se a coleta foi controlada, o que ficou sem
+  medir e que conclusão os dados permitem. Use o `[diag] summary` quando
+  disponível e registre FPS reais e frames gerados em campos separados.
+- Mantenha os logs brutos com Rick. No Git, guarde o nome da captura, janela ou
+  marcador relevante e métricas resumidas, sem dados pessoais, credenciais ou
+  arquivos do jogo.
+- Claude e Codex consultam este índice antes de repetir um teste. Quando
+  revisarem uma conclusão, deixem o parecer e a evidência no registro e
+  apontem o caminho e o commit na thread existente do
+  [canal de colaboração](https://github.com/rickamaral94/Totknspcxi/tree/collab/channel/collab).

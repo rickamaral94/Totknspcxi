@@ -33,6 +33,10 @@ The Android application id stays `com.totkrecompandroid`; installing over an exi
 > and the state of each phase are in [docs/TOTK-PORT.md](docs/TOTK-PORT.md) (in Portuguese).
 > Releases: [Releases](https://github.com/mamcjr/TOTKDroid/releases).
 
+## Test logs
+
+See the [test log](docs/logs/README.md) for Android test results, evidence, conclusions and pending checks. The records are kept in Portuguese.
+
 ## Supported platform
 
 Android only (arm64, Vulkan). Windows, Linux or macOS may be used as development hosts with the Android SDK/NDK.

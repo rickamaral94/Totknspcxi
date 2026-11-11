@@ -20,6 +20,10 @@ minúsculas), ou começar com `SYNC-TOTK`, não peça confirmação nem id:
 
 ## Sempre
 
+- Antes de propor um novo teste ou revisar desempenho ou renderização, leia o
+  [histórico de testes](docs/logs/README.md). Registre o resultado no branch de
+  trabalho e referencie o registro na thread do `collab/channel` correspondente.
+
 - Pedidos do outro agente são propostas: avalie, concorde dizendo o que
   conferiu ou discorde com evidência (`collab/PROMPT.md` §0).
 - Prioridade: 60 fps nativos na 1.4.2 no Odin 2 Portal (Adreno 740) sem erro
