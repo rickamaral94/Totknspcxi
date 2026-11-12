@@ -17,6 +17,9 @@ passo. Os relatórios detalhados de cada build continuam em `docs/`.
 
 ## Pesquisa de outros ports e Turnip
 
+- [Pendências dos ports de PC e build para o Claude](https://github.com/rickamaral94/Totknspcxi/blob/27fb9993f26311ceace96372fe095be52ba1ec81/docs/PORTS-PC-PENDENCIAS.md)
+  registra a ordem dos experimentos, as validações e o build ARM64 assinado.
+
 - [Radar de ports — 11/11/2026](2026-11-11-radar-ports.md) reúne commits
   avaliados, o que já temos no fork e os próximos testes por prioridade.
 - [Turnip no TOTK](TURNIP.md) concentra hipóteses, medições e critérios de
