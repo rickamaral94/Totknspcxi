@@ -1667,6 +1667,24 @@ const char *renderer_stats(void) {
         extern int vk_texture_count(void);
         size_t n = strlen(stats_text);
         snprintf(stats_text + n, sizeof stats_text - n, ", gpu mem %.0fMB, %d textures", (double)used / 1048576.0, vk_texture_count());
+#ifdef __ANDROID__
+        // Memory across loads (docs/PORTS-PC-PENDENCIAS.md item 2: repeated fast travel between two checkpoints): the
+        // app's resident set, the system's available memory, what VMA holds in blocks against what is allocated in
+        // them, and the run's peak and lowest point. A load is a window with a long "max" in the [vk] line; a value
+        // that climbs from one fast travel to the next and never comes back down is something kept that should not be.
+        uint64_t blocks = 0, allocs = 0;
+        for (uint32_t i = 0; i < mp->memoryHeapCount; i++) blocks += bud[i].statistics.blockBytes, allocs += bud[i].statistics.allocationBytes;
+        static uint32_t rss_peak, avail_low;
+        uint32_t rss = 0, avail = 0;
+        extern void plat_mem_stats(uint32_t *rss_mb, uint32_t *avail_mb);
+        plat_mem_stats(&rss, &avail);
+        if (rss > rss_peak) rss_peak = rss;
+        if (avail && (!avail_low || avail < avail_low)) avail_low = avail;
+        extern size_t vk_pipeline_cache_bytes(void);
+        LOG("[mem] rss %u MB (peak %u), available %u MB (lowest %u), vma blocks %.0f MB, allocations %.0f MB, %d textures, "
+            "pipeline cache %zu KB\n", rss, rss_peak, avail, avail_low, (double)blocks / 1048576.0,
+            (double)allocs / 1048576.0, vk_texture_count(), vk_pipeline_cache_bytes() >> 10);
+#endif
     }
     {
         extern void vk_alias_stats(void);

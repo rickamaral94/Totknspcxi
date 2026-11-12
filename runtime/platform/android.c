@@ -730,17 +730,21 @@ void plat_device_stats(PlatDeviceStats *out) {
             last_ticks = ticks, last_ns = ns;
         }
     }
-    // memory: this process's resident set, and what the system has available
-    out->rss_mb = out->avail_mb = 0;
+    plat_mem_stats(&out->rss_mb, &out->avail_mb);
+}
+
+// memory: this process's resident set, and what the system has available
+void plat_mem_stats(uint32_t *rss_mb, uint32_t *avail_mb) {
+    *rss_mb = *avail_mb = 0;
     FILE *f = fopen("/proc/self/status", "re");
     if (f) {
         char line[256];
-        while (fgets(line, sizeof line, f)) if (!strncmp(line, "VmRSS:", 6)) out->rss_mb = (uint32_t)(atoll(line + 6) / 1024);
+        while (fgets(line, sizeof line, f)) if (!strncmp(line, "VmRSS:", 6)) *rss_mb = (uint32_t)(atoll(line + 6) / 1024);
         fclose(f);
     }
     if ((f = fopen("/proc/meminfo", "re"))) {
         char line[256];
-        while (fgets(line, sizeof line, f)) if (!strncmp(line, "MemAvailable:", 13)) out->avail_mb = (uint32_t)(atoll(line + 13) / 1024);
+        while (fgets(line, sizeof line, f)) if (!strncmp(line, "MemAvailable:", 13)) *avail_mb = (uint32_t)(atoll(line + 13) / 1024);
         fclose(f);
     }
 }

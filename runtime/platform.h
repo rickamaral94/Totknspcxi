@@ -90,6 +90,8 @@ typedef struct {
     float headroom;                // PowerManager thermal headroom (1.0 = throttling begins)
 } PlatDeviceStats;
 void plat_device_stats(PlatDeviceStats *out);
+// this process's resident memory and the system's available memory, MB (0 where unknown); no other state touched
+void plat_mem_stats(uint32_t *rss_mb, uint32_t *avail_mb);
 // ADPF: the calling thread's work for a frame (busy, ns) and its target (the frame time it must fit)
 void plat_frame_work(uint64_t work_ns, uint64_t target_ns);
 // (the presenting thread: cpu_ns is the frame's critical path - the longer of its own and the render thread's work -,

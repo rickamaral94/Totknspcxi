@@ -926,6 +926,19 @@ static void create_device(void) {
     free(data);
 }
 
+// the pipeline cache's size (exec.c's [mem] line, every 2 s): asked of the driver at most every 20 s - sizing it walks
+// every entry under the cache's lock, which pipeline builds share; 0 if unknown
+size_t vk_pipeline_cache_bytes(void) {
+    static uint64_t last;
+    static size_t sz;
+    uint64_t now = SDL_GetTicks();
+    if (last && now - last < 20000) return sz;
+    last = now;
+    size_t n = 0;
+    if (g_vk.dev && g_vk.pcache && vkGetPipelineCacheData(g_vk.dev, g_vk.pcache, &n, NULL) == VK_SUCCESS) sz = n;
+    return sz;
+}
+
 // true: written. Android: never above VK_BACKEND_PIPELINE_CACHE_MAX (the load refuses it too) - said once in the log,
 // since every pipeline built after that is compiled again on the next start.
 bool vk_pipeline_cache_save(void) {
