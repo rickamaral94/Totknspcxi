@@ -3340,7 +3340,12 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         // depth pre-pass + EQUAL test needs identical positions from different shaders: invariant, and precise so no
         // compiler fuses or reorders the math feeding it (MSL gets this from preserveInvariance; without it foliage
         // drawn twice flickered black)
-        sp(&s, "invariant gl_Position;\nprecise gl_Position;\n");
+        // LARECOMP_VK_NO_INVARIANT=1 (A/B of its GPU cost, after UltraTears 6465cb3: ~10% of a PC's GPU time in the
+        // world): `invariant` left out, `precise` and shaders.c's NoContraction kept - those keep the pre-pass and the
+        // EQUAL pass computing the same position. The source changes, so the SPIR-V cache keys it apart. Off: as always.
+        static int no_invariant = -1;
+        if (no_invariant < 0) no_invariant = getenv("LARECOMP_VK_NO_INVARIANT") && atoi(getenv("LARECOMP_VK_NO_INVARIANT"));
+        sp(&s, no_invariant ? "precise gl_Position;\n" : "invariant gl_Position;\nprecise gl_Position;\n");
         for (int i = 0; i < 32; i++)
             if (c->out_attr_mask & (1u << i)) sp(&s, "layout(location = %d) out vec4 v%d;\n", i, i);
     } else if (stage == STAGE_FRAGMENT) {
