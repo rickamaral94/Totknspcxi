@@ -63,3 +63,31 @@ As decisões de desempenho e correção gráfica dependem dos resultados no Odin
 - Arquivo `Totknspcxi-0.2.2-beta-amaral.22-v142-pipeline.apk` (93.156.709 bytes).
   SHA-256 `69b6082c2644a31d88b15e8c98a13a3666485982746bdcf3297303850f9e5142`.
 - O aparelho e a validação Vulkan em hardware estão pendentes.
+
+## Ajustes após a revisão cruzada (12/11/2026)
+
+Revisão do `claude` no canal (`T-upstream-022-recomps`), aprovada pelo Rick. Sem
+nova versão: entram na próxima candidata depois da rodada no Odin.
+
+- **Limite do cache de pipelines.** Acima de 64 MB
+  (`VK_BACKEND_PIPELINE_CACHE_MAX`) o cache não era salvo nem carregado, em
+  silêncio. Agora o log diz `[vk-cache] pipeline cache N MB is over the 64 MB
+  limit` (uma vez), o tamanho carregado no início (`pipeline cache loaded: N KB`)
+  e só registra "saved" quando o arquivo foi de fato gravado. Na rodada no Odin,
+  anotar o tamanho depois de uma sessão longa para decidir se o limite precisa
+  subir.
+- **Log do driver sem ADB.** Nova opção na tela de início, junto de "Salvar
+  arquivo de log": **Mensagens do driver no log** (`driver_logcat`, desligada por
+  padrão). Liga e desliga sem reiniciar; `LARECOMP_DRIVER_LOGCAT=1` continua
+  forçando.
+- **Reprodutibilidade do APK.** `tools/apk_manifest.py` lista o SHA-256 de cada
+  `.so` e do `assets/gen.id`; com `--diff` mostra o que mudou e o que foi
+  reaproveitado de outro APK. **Pendente (`chatgpt`, que tem os APKs):** rodar
+  `python3 tools/apk_manifest.py Totknspcxi-0.2.2-beta-amaral.22-v142-pipeline.apk
+  --diff Totknspcxi-0.2.2-beta-amaral.21-v142-upstream.apk` e colar a tabela aqui.
+- **Histórico de testes no branch de trabalho.** `codex/totk-test-logs`
+  (`docs/logs/`, regras de `AGENTS.md`/`CLAUDE.md`) mesclado sem conflito.
+
+Verificação: `aarch64-linux-android35-clang -fsyntax-only -Wall` sem erros nem
+avisos em `platform/android.c`, `settings.c`, `vulkan/device.c` e `ui/launcher.mm`.
+APK não compilado nesta etapa.

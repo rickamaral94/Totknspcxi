@@ -163,12 +163,16 @@ static void *log_pump(void *arg) {
 // Exclude our own relay tag to avoid a feedback loop. -d exits after each snapshot,
 // so this diagnostic collector cannot leave a persistent logcat child behind. It is deliberately opt-in: even though
 // each child exits, starting logcat and reading its buffer once a second is diagnostic work that can perturb frametime
-// tails. LARECOMP_DRIVER_LOGCAT=1 enables it for a driver investigation; the runtime's own logcat relay and crash
-// reports stay on either way.
-static bool driver_log_capture_enabled(void) {
+// tails. The start screen's "Driver messages in the log" (settings.h driver_logcat) turns it on for a driver
+// investigation without adb; LARECOMP_DRIVER_LOGCAT=1 forces it. The runtime's own logcat relay and crash reports stay
+// on either way. Turned off again, the thread stays but starts no logcat.
+static atomic_bool g_driver_logcat_on;
+static bool driver_log_env(void) {
     const char *e = getenv("LARECOMP_DRIVER_LOGCAT");
     return e && atoi(e) != 0;
 }
+
+void android_driver_logcat(bool on);
 
 static void *driver_log_pump(void *unused) {
     (void)unused;
@@ -179,6 +183,11 @@ static void *driver_log_pump(void *unused) {
     snprintf(cmd, sizeof cmd, "/system/bin/logcat -d -t 128 --pid=%d -v threadtime '*:V' 'TOTKRecompAndroid:S' 2>/dev/null", getpid());
     log_file_line("[driver-diag] Android driver/libc log capture started (this PID only; availability depends on Android)");
     for (;;) {
+        if (!atomic_load(&g_driver_logcat_on)) {
+            struct timespec idle = {1, 0};
+            nanosleep(&idle, NULL);
+            continue;
+        }
         FILE *f = popen(cmd, "r");
         if (f) {
             while (fgets(line, sizeof line, f)) {
@@ -219,11 +228,22 @@ static void log_to_logcat(void) {
     close(p[1]);
     pthread_t t;
     if (pthread_create(&t, NULL, log_pump, (void *)(intptr_t)p[0]) == 0) pthread_detach(t);
-    if (driver_log_capture_enabled()) {
-        if (pthread_create(&t, NULL, driver_log_pump, NULL) == 0) pthread_detach(t);
-    } else {
-        log_file_line("[driver-diag] Android driver/libc log capture off (LARECOMP_DRIVER_LOGCAT=1 enables it)");
+    if (driver_log_env()) android_driver_logcat(true);
+}
+
+// (settings.h driver_logcat, read when the app starts and changed on the start screen)
+void android_driver_logcat(bool on) {
+    static bool started, reported;
+    if (driver_log_env()) on = true;
+    bool was = atomic_exchange(&g_driver_logcat_on, on);
+    if (on && !started) {
+        pthread_t t;
+        if (pthread_create(&t, NULL, driver_log_pump, NULL) == 0) { pthread_detach(t); started = true; }
     }
+    if (was == on && reported) return;
+    reported = true;
+        log_file_line(on ? "[driver-diag] Android driver/libc log capture on"
+                         : "[driver-diag] Android driver/libc log capture off (start screen: Driver messages in the log)");
 }
 
 // ---- guest address space

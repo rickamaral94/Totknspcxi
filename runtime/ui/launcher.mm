@@ -543,6 +543,7 @@ extern "C" void launcher_pick_lossless_dll(void) { android_call("pickLosslessDll
 // The log file (Driver compatibility; runtime/platform/android.c): written to a folder the player picks
 // (TOTKRecompAndroidActivity pickLogFolder / openLog), where a file manager can open it - Android/data/ is out of its reach
 extern "C" void android_log_file(bool on);
+extern "C" void android_driver_logcat(bool on);
 extern "C" bool vk_adreno_8xx(const char *name);  // (Driver compatibility's Automatic: runtime/nvn/vulkan/device.c)
 extern "C" bool vk_lrz_auto(const char *name);    // (the LRZ's Automatic: the Adreno 8xx and the 740)
 extern "C" bool vk_lrz_at_start(void);
@@ -1716,6 +1717,13 @@ static void prelaunch_tab(float sc) {
                                   "choose (create one, e.g. Download/TOTKRecomp), to open on the phone and send with a "
                                   "bug report. Turn it on and play until the problem shows; after a crash, the run "
                                   "before is kept as totkrecomp-log-previous.txt."));
+        if (ImGui::Checkbox(tr("Driver messages in the log"), &g_settings.driver_logcat)) {
+            changed = true;
+            android_driver_logcat(g_settings.driver_logcat);
+        }
+        ImGui::TextDisabled("%s", tr("Also copies what the GPU driver and Android report about this app (Mesa, Adreno, "
+                                  "crashes inside the driver) into the log, once a second. Only for a driver problem: "
+                                  "it can make the frame rate less steady. Off by default."));
         if (folder.empty()) ImGui::TextDisabled("%s", tr("No folder chosen: the log stays in the app's own folder, which "
                                                          "Android only lets a computer (adb) read."));
         else ImGui::Text(tr("Log folder: %s"), folder.c_str());

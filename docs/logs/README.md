@@ -35,7 +35,13 @@ passo. Os relatórios detalhados de cada build continuam em `docs/`.
    do mesmo APK, variando uma opção por vez. Anotar configuração e estado
    efetivo no log quando a opção estiver em Automático.
 
-4. Registrar clocks, temperatura e cache em cada braço. Com a linha de base
+4. No APK `.22`, com a Compatibilidade do driver toda em Automático: conferir no
+   log `guest heap ... is GPU memory`, `sampled by it: in place (automatic)` e
+   `Turnip LRZ on (automatic: ...)` (validação do Automático da `.20`). Depois,
+   resolução interna 1× → 0,8× → 1× para medir a sensibilidade da GPU à
+   resolução (`T-perf-dynres-16ms`: queda menor que ~2 ms a 0,8× tira a
+   resolução dinâmica da frente).
+5. Registrar clocks, temperatura e cache em cada braço. Com a linha de base
    da `.21` estabelecida, comparar o Turnip atual com a próxima candidata
    mantendo o APK fixo. Ver [matriz de testes do driver](TURNIP.md#matriz-de-testes).
 

@@ -898,8 +898,12 @@ static void create_device(void) {
             if (data && fread(data, 1, (size_t)length, fp) == (size_t)length &&
                 vk_backend_cache_compatible(data, (size_t)length, &g_vk.props)) sz = (size_t)length;
         }
-        if (!sz) { LOG("[vk-cache] ignoring unreadable, malformed or incompatible pipeline cache; starting empty\n");
-            free(data); data = NULL; }
+        if (length > (long)VK_BACKEND_PIPELINE_CACHE_MAX)
+            LOG("[vk-cache] pipeline cache %ld MB is over the %u MB limit: not loaded, starting empty\n", length >> 20,
+                VK_BACKEND_PIPELINE_CACHE_MAX >> 20);
+        else if (!sz) LOG("[vk-cache] ignoring unreadable, malformed or incompatible pipeline cache; starting empty\n");
+        else LOG("[vk-cache] pipeline cache loaded: %zu KB\n", sz >> 10);
+        if (!sz) { free(data); data = NULL; }
 #else
         fseek(fp, 0, SEEK_END);
         sz = (size_t)ftell(fp);
@@ -922,15 +926,26 @@ static void create_device(void) {
     free(data);
 }
 
-void vk_pipeline_cache_save(void) {
-    if (getenv("LARECOMP_VK_NO_PIPELINE_CACHE")) return;
+// true: written. Android: never above VK_BACKEND_PIPELINE_CACHE_MAX (the load refuses it too) - said once in the log,
+// since every pipeline built after that is compiled again on the next start.
+bool vk_pipeline_cache_save(void) {
+    if (getenv("LARECOMP_VK_NO_PIPELINE_CACHE")) return false;
     size_t sz = 0;
-    if (vkGetPipelineCacheData(g_vk.dev, g_vk.pcache, &sz, NULL) != VK_SUCCESS || !sz) return;
+    if (vkGetPipelineCacheData(g_vk.dev, g_vk.pcache, &sz, NULL) != VK_SUCCESS || !sz) return false;
 #ifdef __ANDROID__
-    if (sz > VK_BACKEND_PIPELINE_CACHE_MAX) return;
+    if (sz > VK_BACKEND_PIPELINE_CACHE_MAX) {
+        static bool said;
+        if (!said) {
+            said = true;
+            LOG("[vk-cache] pipeline cache %zu MB is over the %u MB limit: not saved; pipelines built from now on will "
+                "be compiled again on the next start\n", sz >> 20, VK_BACKEND_PIPELINE_CACHE_MAX >> 20);
+        }
+        return false;
+    }
 #endif
     void *data = malloc(sz);
-    if (!data) return;
+    if (!data) return false;
+    bool written = false;
     if (vkGetPipelineCacheData(g_vk.dev, g_vk.pcache, &sz, data) == VK_SUCCESS) {
         mkdir("cache", 0755);
 #ifdef __ANDROID__
@@ -944,6 +959,7 @@ void vk_pipeline_cache_save(void) {
             bool ok = fwrite(data, 1, sz, f) == sz;
             if (fclose(f) != 0) ok = false;
             if (!ok || rename(temp, "cache/vk_pipelines.bin") != 0) remove(temp);
+            else written = true;
         }
         pthread_mutex_unlock(&cache_write_lock);
 #else
@@ -951,11 +967,12 @@ void vk_pipeline_cache_save(void) {
         if (f) {
             bool ok = fwrite(data, 1, sz, f) == sz;
             fclose(f);
-            if (ok) { remove("cache/vk_pipelines.bin"); rename("cache/vk_pipelines.bin.tmp", "cache/vk_pipelines.bin"); }
+            if (ok) { remove("cache/vk_pipelines.bin"); written = rename("cache/vk_pipelines.bin.tmp", "cache/vk_pipelines.bin") == 0; }
         }
 #endif
     }
     free(data);
+    return written;
 }
 
 // ================================================================== swapchain
@@ -1957,6 +1974,8 @@ void ui_window_init(void) {
     {   // Driver compatibility (the start screen's Settings > Prelaunch): applied before the driver loads
         extern void android_log_file(bool on);
         android_log_file(g_settings.log_file);
+        extern void android_driver_logcat(bool on);
+        android_driver_logcat(g_settings.driver_logcat);
         // Turnip reads TU_DEBUG once, when it starts: low-resolution Z off (it can drop draws on some Adreno GPUs).
         // Automatic needs the GPU before Vulkan names it: the kernel's (the GPU driver reads it from the app too), else
         // the last start's; unknown: on.
@@ -2184,9 +2203,8 @@ int ui_run(void) {
                 last = now;
                 size_t sz = 0;
                 if (vkGetPipelineCacheData(g_vk.dev, g_vk.pcache, &sz, NULL) == VK_SUCCESS && sz > saved + 65536) {
-                    vk_pipeline_cache_save();
-                    saved = sz;
-                    LOG("[vk] pipeline cache saved (%zu KB)\n", sz >> 10);
+                    saved = sz;  // (also when not written: tried again only after it grows)
+                    if (vk_pipeline_cache_save()) LOG("[vk] pipeline cache saved (%zu KB)\n", sz >> 10);
                 }
             }
         }
