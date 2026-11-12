@@ -26,3 +26,8 @@ dependentes do driver, atualize [Turnip no TOTK](docs/logs/TURNIP.md) com o
 checkpoint, o APK, o Mesa/patchset, os hashes e a evidência de cada braço.
 Quando houver um resultado reproduzível, deixe a referência cruzada com o
 registro no Amaral Adreno Tools e o próximo teste para a revisão do driver.
+## Pendências dos ports de PC
+
+Use o [roteiro de implementação e build](docs/PORTS-PC-PENDENCIAS.md) ao preparar
+uma candidata Android com ajustes dos ports de PC. O roteiro indica a base
+amaral.22, as hipóteses em aberto e as verificações para entregar o APK.
