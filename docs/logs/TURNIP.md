@@ -71,6 +71,8 @@ guardar os contadores de residência separadamente.
 
 ## Encaminhamento ao Amaral Adreno Tools
 
+Para encaminhar, use a [campainha do agente Turnip](CAMPAINHA-TURNIP.md).
+
 Abrir investigação de driver quando houver diferença reproduzível com o
 mesmo APK e mudança do ELF, ou quando uma opção do Turnip isolar um caminho
 e houver captura que indique o mecanismo. Anexar o resumo acima, o resultado
