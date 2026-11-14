@@ -19,6 +19,8 @@ passo. Os relatórios detalhados de cada build continuam em `docs/`.
 
 - [Radar de ports — 11/11/2026](2026-11-11-radar-ports.md) reúne commits
   avaliados, o que já temos no fork e os próximos testes por prioridade.
+- [Campainha do agente Turnip](CAMPAINHA-TURNIP.md): como pedir ajuste ou análise
+  do driver ao Amaral Adreno Tools.
 - [Turnip no TOTK](TURNIP.md) concentra hipóteses, medições e critérios de
   encaminhamento ao Amaral Adreno Tools. Consulte este tópico quando o driver
   receber uma candidata ou surgir uma regressão reproduzível.
