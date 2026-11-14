@@ -7,6 +7,11 @@
 #include <SDL3/SDL.h>
 #include <android/log.h>
 #include <dlfcn.h>
+#include <elf.h>
+#include <link.h>
+#include <sys/ioctl.h>
+#include <sys/system_properties.h>
+#include <sys/utsname.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <jni.h>
@@ -507,6 +512,7 @@ void plat_fatal_notice(void) {
 
 const char *rt_host_fn_name(uint64_t pc, uint64_t *offset);  // runtime/dispatch.c
 
+const char *plat_build_id_at(uintptr_t base, char out[41]);
 typedef struct { void **pcs; int n, max; } Trace;
 static _Unwind_Reason_Code trace_step(struct _Unwind_Context *ctx, void *arg) {
     Trace *t = arg;
@@ -533,6 +539,21 @@ void plat_print_backtrace(void) {
         if (s) fprintf(stderr, "  #%-2d %016llx %s+%llx (%s+%llx)\n", i, (unsigned long long)pc, s, (unsigned long long)off,
                        mod, (unsigned long long)moff);
         else fprintf(stderr, "  #%-2d %016llx %s+%llx\n", i, (unsigned long long)pc, mod, (unsigned long long)moff);
+    }
+    // each module of the trace once, with its build-id: the frames above symbolized offline against that exact binary
+    // (the driver's above all: Amaral Adreno Tools, docs/PORTS-EVIDENCIA.md M7)
+    uintptr_t seen[16];
+    int ns = 0;
+    for (int i = 0; i < t.n && ns < 16; i++) {
+        Dl_info di = {0};
+        if (!dladdr(bt[i], &di) || !di.dli_fbase) continue;
+        bool dup = false;
+        for (int k = 0; k < ns; k++) dup |= seen[k] == (uintptr_t)di.dli_fbase;
+        if (dup) continue;
+        seen[ns++] = (uintptr_t)di.dli_fbase;
+        char id[41];
+        plat_build_id_at((uintptr_t)di.dli_fbase, id);
+        fprintf(stderr, "  module %s build-id %s\n", di.dli_fname ? di.dli_fname : "?", id[0] ? id : "none");
     }
 }
 
@@ -731,6 +752,196 @@ void plat_device_stats(PlatDeviceStats *out) {
         }
     }
     plat_mem_stats(&out->rss_mb, &out->avail_mb);
+}
+
+// ---- evidence for driver work (Amaral Adreno Tools, docs/PORTS-EVIDENCIA.md M1, M2, M4, M7): what the driver agent
+// needs in every log to tie a result to the exact driver binary, GPU and system.
+
+// SHA-256 (FIPS 180-4), for the loaded driver's file: no library of the app's has one it exports
+typedef struct { uint32_t h[8]; uint64_t len; uint8_t buf[64]; size_t n; } Sha256;
+static const uint32_t sha_k[64] = {
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01,
+    0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
+    0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147,
+    0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116, 0x1e376c08,
+    0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+    0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2};
+#define SHA_ROR(x, n) (((x) >> (n)) | ((x) << (32 - (n))))
+static void sha256_block(Sha256 *c, const uint8_t *p) {
+    uint32_t w[64], a, b, d, e, f, g, h, cc, t1, t2;
+    for (int i = 0; i < 16; i++) w[i] = (uint32_t)p[4 * i] << 24 | (uint32_t)p[4 * i + 1] << 16 | (uint32_t)p[4 * i + 2] << 8 | p[4 * i + 3];
+    for (int i = 16; i < 64; i++) {
+        uint32_t s0 = SHA_ROR(w[i - 15], 7) ^ SHA_ROR(w[i - 15], 18) ^ (w[i - 15] >> 3);
+        uint32_t s1 = SHA_ROR(w[i - 2], 17) ^ SHA_ROR(w[i - 2], 19) ^ (w[i - 2] >> 10);
+        w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+    }
+    a = c->h[0], b = c->h[1], cc = c->h[2], d = c->h[3], e = c->h[4], f = c->h[5], g = c->h[6], h = c->h[7];
+    for (int i = 0; i < 64; i++) {
+        t1 = h + (SHA_ROR(e, 6) ^ SHA_ROR(e, 11) ^ SHA_ROR(e, 25)) + ((e & f) ^ (~e & g)) + sha_k[i] + w[i];
+        t2 = (SHA_ROR(a, 2) ^ SHA_ROR(a, 13) ^ SHA_ROR(a, 22)) + ((a & b) ^ (a & cc) ^ (b & cc));
+        h = g, g = f, f = e, e = d + t1, d = cc, cc = b, b = a, a = t1 + t2;
+    }
+    c->h[0] += a, c->h[1] += b, c->h[2] += cc, c->h[3] += d, c->h[4] += e, c->h[5] += f, c->h[6] += g, c->h[7] += h;
+}
+static void sha256_init(Sha256 *c) {
+    static const uint32_t iv[8] = {0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19};
+    memcpy(c->h, iv, sizeof iv);
+    c->len = 0, c->n = 0;
+}
+static void sha256_update(Sha256 *c, const uint8_t *p, size_t n) {
+    c->len += n;
+    while (n) {
+        size_t k = 64 - c->n < n ? 64 - c->n : n;
+        memcpy(c->buf + c->n, p, k);
+        c->n += k, p += k, n -= k;
+        if (c->n == 64) sha256_block(c, c->buf), c->n = 0;
+    }
+}
+static void sha256_hex(Sha256 *c, char out[65]) {
+    uint64_t bits = c->len * 8;
+    uint8_t pad = 0x80, z = 0, l[8];
+    sha256_update(c, &pad, 1);
+    while (c->n != 56) sha256_update(c, &z, 1);
+    for (int i = 0; i < 8; i++) l[i] = (uint8_t)(bits >> (56 - 8 * i));
+    sha256_update(c, l, 8);
+    for (int i = 0; i < 8; i++) snprintf(out + 8 * i, 9, "%08x", c->h[i]);
+}
+static bool sha256_file(const char *path, char out[65], uint64_t *size) {
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return false;
+    Sha256 c;
+    sha256_init(&c);
+    static uint8_t buf[1 << 16];
+    ssize_t n;
+    *size = 0;
+    while ((n = read(fd, buf, sizeof buf)) > 0) sha256_update(&c, buf, (size_t)n), *size += (uint64_t)n;
+    close(fd);
+    if (n < 0) return false;
+    sha256_hex(&c, out);
+    return true;
+}
+
+// a loaded object's GNU build-id, from its PT_NOTE in memory (as the linker mapped it): hex, or "" if it has none
+typedef struct { uintptr_t base; const char *name; char id[41]; } BuildIdQuery;
+static int build_id_cb(struct dl_phdr_info *info, size_t size, void *arg) {
+    (void)size;
+    BuildIdQuery *q = arg;
+    if (q->base ? info->dlpi_addr != q->base : !(info->dlpi_name && strstr(info->dlpi_name, q->name))) return 0;
+    q->base = info->dlpi_addr;
+    q->name = info->dlpi_name;
+    for (int i = 0; i < info->dlpi_phnum; i++) {
+        const ElfW(Phdr) *ph = &info->dlpi_phdr[i];
+        if (ph->p_type != PT_NOTE) continue;
+        const uint8_t *p = (const uint8_t *)(info->dlpi_addr + ph->p_vaddr), *end = p + ph->p_memsz;
+        while (p + sizeof(ElfW(Nhdr)) <= end) {
+            const ElfW(Nhdr) *nh = (const ElfW(Nhdr) *)p;
+            const uint8_t *desc = p + sizeof *nh + ((nh->n_namesz + 3) & ~3u);
+            if (nh->n_type == NT_GNU_BUILD_ID && nh->n_namesz == 4 && !memcmp(p + sizeof *nh, "GNU", 4)) {
+                uint32_t n = nh->n_descsz > 20 ? 20 : nh->n_descsz;
+                for (uint32_t k = 0; k < n; k++) snprintf(q->id + 2 * k, 3, "%02x", desc[k]);
+                return 1;
+            }
+            p = desc + ((nh->n_descsz + 3) & ~3u);
+        }
+    }
+    return 1;
+}
+const char *plat_build_id_at(uintptr_t base, char out[41]) {
+    BuildIdQuery q = {.base = base};
+    dl_iterate_phdr(build_id_cb, &q);
+    memcpy(out, q.id, sizeof q.id);
+    return out;
+}
+
+// every loaded Vulkan driver object (the custom driver adrenotools loaded, or the system's): path, size, SHA-256 and
+// build-id. Hashing reads the whole file (~30 MB): on its own thread, after the device exists.
+typedef struct { char path[512]; uintptr_t base; } DriverObj;
+static int driver_obj_cb(struct dl_phdr_info *info, size_t size, void *arg) {
+    (void)size;
+    DriverObj *list = arg;
+    const char *n = info->dlpi_name;
+    if (!n || !*n) return 0;
+    const char *b = strrchr(n, '/') ? strrchr(n, '/') + 1 : n;
+    if (!(strstr(b, "vulkan") || strstr(b, "freedreno") || strstr(b, "adreno")) || strstr(b, "lsfg")) return 0;
+    for (int i = 0; i < 8; i++)
+        if (!list[i].path[0]) { snprintf(list[i].path, sizeof list[i].path, "%s", n); list[i].base = info->dlpi_addr; break; }
+    return 0;
+}
+static void *driver_evidence_main(void *arg) {
+    (void)arg;
+    DriverObj list[8];
+    memset(list, 0, sizeof list);
+    dl_iterate_phdr(driver_obj_cb, list);
+    if (!list[0].path[0]) LOG("[evidence] driver: no Vulkan driver object found among the loaded libraries\n");
+    for (int i = 0; i < 8 && list[i].path[0]; i++) {
+        char sha[65] = "?", id[41];
+        uint64_t size = 0;
+        if (!sha256_file(list[i].path, sha, &size)) snprintf(sha, sizeof sha, "unreadable (%s)", strerror(errno));
+        plat_build_id_at(list[i].base, id);
+        LOG("[evidence] driver object %s: %llu bytes, sha256 %s, build-id %s\n", list[i].path, (unsigned long long)size, sha,
+            id[0] ? id : "none");
+    }
+    return NULL;
+}
+
+// KGSL's device info (chip id, GPU id, GMEM): the ioctl every Adreno driver asks first
+struct evidence_kgsl_devinfo { unsigned int device_id, chip_id, mmu_enabled; unsigned long gmem_gpubaseaddr; unsigned int gpu_id; size_t gmem_sizebytes; };
+struct evidence_kgsl_getprop { unsigned int type; void *value; unsigned int sizebytes; };
+#define EVIDENCE_KGSL_GETPROP _IOWR(0x09, 0x2, struct evidence_kgsl_getprop)
+
+void plat_evidence_report(void) {
+    static bool done;
+    if (done) return;
+    done = true;
+    char rel[PROP_VALUE_MAX] = "", sdk[PROP_VALUE_MAX] = "", fp[PROP_VALUE_MAX] = "", model[PROP_VALUE_MAX] = "", soc[PROP_VALUE_MAX] = "";
+    __system_property_get("ro.build.version.release", rel);
+    __system_property_get("ro.build.version.sdk", sdk);
+    __system_property_get("ro.build.fingerprint", fp);
+    __system_property_get("ro.product.model", model);
+    __system_property_get("ro.soc.model", soc);
+    struct utsname u;
+    if (uname(&u) != 0) memset(&u, 0, sizeof u);
+    LOG("[evidence] system: Android %s (API %s), device %s, SoC %s, kernel %s %s, build %s\n", rel, sdk, model, soc,
+        u.release, u.version, fp);
+    char gm[96] = "";
+    FILE *f = fopen("/sys/class/kgsl/kgsl-3d0/gpu_model", "re");
+    if (f) { if (!fgets(gm, sizeof gm, f)) gm[0] = 0; fclose(f); gm[strcspn(gm, "\r\n")] = 0; }
+    struct evidence_kgsl_devinfo di;
+    memset(&di, 0, sizeof di);
+    struct evidence_kgsl_getprop gp = {.type = 1 /* KGSL_PROP_DEVICE_INFO */, .value = &di, .sizebytes = sizeof di};
+    int fd = open("/dev/kgsl-3d0", O_RDWR | O_CLOEXEC);
+    bool ok = fd >= 0 && ioctl(fd, EVIDENCE_KGSL_GETPROP, &gp) == 0;
+    int err = errno;
+    if (fd >= 0) close(fd);
+    if (ok)
+        LOG("[evidence] gpu: kgsl model %s, chip_id 0x%08x, gpu_id %u, gmem %zu KB\n", gm[0] ? gm : "?", di.chip_id, di.gpu_id,
+            di.gmem_sizebytes >> 10);
+    else LOG("[evidence] gpu: kgsl model %s, chip_id unavailable (%s)\n", gm[0] ? gm : "?", strerror(err));
+    pthread_t t;
+    if (pthread_create(&t, NULL, driver_evidence_main, NULL) == 0) pthread_detach(t);
+}
+
+// GPU time at each frequency since boot, from devfreq's trans_stat (its last column, ms): n entries, false if unreadable.
+// The diagnosis subtracts two readings to weigh the clock by residence (M4), not by 2 s snapshots.
+bool plat_gpu_time_in_state(uint64_t *hz, uint64_t *ms, int *n, int max) {
+    FILE *f = fopen("/sys/class/kgsl/kgsl-3d0/devfreq/trans_stat", "re");
+    if (!f) return false;
+    char line[1024];
+    *n = 0;
+    while (fgets(line, sizeof line, f) && *n < max) {
+        char *p = line;
+        while (*p == ' ' || *p == '*') p++;
+        char *colon = strchr(p, ':');
+        if (!colon || *p < '0' || *p > '9') continue;
+        uint64_t freq = strtoull(p, NULL, 10);
+        char *last = NULL, *tok = colon + 1, *save = NULL;
+        for (char *w = strtok_r(tok, " \t\r\n", &save); w; w = strtok_r(NULL, " \t\r\n", &save)) last = w;
+        if (!freq || !last) continue;
+        hz[*n] = freq, ms[*n] = strtoull(last, NULL, 10), (*n)++;
+    }
+    fclose(f);
+    return *n > 0;
 }
 
 // memory: this process's resident set, and what the system has available

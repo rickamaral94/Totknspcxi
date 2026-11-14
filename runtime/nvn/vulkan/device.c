@@ -426,7 +426,10 @@ static bool g_fault_ext;
 // After VK_ERROR_DEVICE_LOST: what the driver says faulted (VK_EXT_device_fault), into the log.
 void vk_device_fault_report(void) {
     static int once;
-    if (once++ || !g_fault_ext) return;
+    if (once++) return;
+    extern void vk_devlost_dump(void);
+    vk_devlost_dump();  // (the last marker, exec.c: even without the extension)
+    if (!g_fault_ext) { LOG("[vk] device fault: VK_EXT_device_fault not enabled on this driver\n"); return; }
     PFN_vkGetDeviceFaultInfoEXT get = (PFN_vkGetDeviceFaultInfoEXT)vkGetDeviceProcAddr(g_vk.dev, "vkGetDeviceFaultInfoEXT");
     if (!get) return;
     VkDeviceFaultCountsEXT c = {.sType = VK_STRUCTURE_TYPE_DEVICE_FAULT_COUNTS_EXT};
@@ -653,6 +656,12 @@ static void create_device(void) {
         g_vk.props.deviceName, g_vk.props.vendorID, g_vk.props.deviceID, VK_API_VERSION_MAJOR(g_vk.props.apiVersion),
         VK_API_VERSION_MINOR(g_vk.props.apiVersion), VK_API_VERSION_PATCH(g_vk.props.apiVersion),
         (unsigned)driver.driverID, driver.driverName, driver.driverInfo);
+#ifdef __ANDROID__
+    {   // (system, KGSL chip id and the loaded driver binary's SHA-256 / build-id: platform/android.c)
+        extern void plat_evidence_report(void);
+        plat_evidence_report();
+    }
+#endif
     LOG("[vk-cap] storage16 %u timeline %u mirror-clamp %u scalar %u dynamic-rendering %u sync2 %u demote %u terminate %u maintenance4 %u int64 %u int8 %u storage8 %u uniform-storage8 %u BC %u ASTC %u timestamps %u\n",
         h11.storageBuffer16BitAccess, h12.timelineSemaphore, h12.samplerMirrorClampToEdge, h12.scalarBlockLayout,
         h13.dynamicRendering, h13.synchronization2, h13.shaderDemoteToHelperInvocation, h13.shaderTerminateInvocation,

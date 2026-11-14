@@ -273,6 +273,10 @@ static uint32_t cl_min[CL], cl_max[CL];
 static uint64_t cl_sum[CL];
 static int cl_n, cl_samples;
 #ifdef __ANDROID__
+// GPU time at each frequency (devfreq trans_stat) at the window's start: the report weighs the clock by residence
+#define GPU_RES_MAX 32
+static uint64_t gpu_res_hz[GPU_RES_MAX], gpu_res_ms0[GPU_RES_MAX];
+static int gpu_res_n = -1;
 static uint32_t gpu_clock_min, gpu_clock_max;
 static uint64_t gpu_clock_sum;
 static unsigned gpu_clock_samples;
@@ -457,6 +461,10 @@ void diag_request(int seconds) {
 #ifdef __ANDROID__
     gpu_clock_min = gpu_clock_max = 0;
     gpu_clock_sum = gpu_clock_samples = 0;
+    {
+        extern bool plat_gpu_time_in_state(uint64_t *hz, uint64_t *ms, int *n, int max);
+        if (!plat_gpu_time_in_state(gpu_res_hz, gpu_res_ms0, &gpu_res_n, GPU_RES_MAX)) gpu_res_n = -1;
+    }
 #endif
     memset(cl_min, 0, sizeof cl_min), memset(cl_max, 0, sizeof cl_max), memset(cl_sum, 0, sizeof cl_sum);
     temp_min = 1e9f, temp_max = -1e9f, headroom_min = 1e9f, thermal_max = -1;
@@ -941,6 +949,27 @@ static void *report_main(void *arg) {
         out("GPU clock MHz (gameplay snapshots, min / mean / max): %u / %.1f / %u (%u samples)",
             gpu_clock_min, (double)gpu_clock_sum / gpu_clock_samples, gpu_clock_max, gpu_clock_samples);
     else out("GPU clock: n/a (KGSL clock unavailable or no gameplay samples)");
+    {   // residence: the window's time at each GPU frequency (whole window, menus included), and the mean it gives
+        extern bool plat_gpu_time_in_state(uint64_t *hz, uint64_t *ms, int *n, int max);
+        uint64_t hz[GPU_RES_MAX], ms[GPU_RES_MAX];
+        int n = 0;
+        if (gpu_res_n > 0 && plat_gpu_time_in_state(hz, ms, &n, GPU_RES_MAX) && n == gpu_res_n) {
+            uint64_t total = 0;
+            double weighted = 0;
+            char line[1024];
+            int at = 0;
+            for (int k = 0; k < n; k++) total += ms[k] - gpu_res_ms0[k];
+            for (int k = 0; k < n && total; k++) {
+                uint64_t d = ms[k] - gpu_res_ms0[k];
+                weighted += (double)hz[k] / 1e6 * (double)d;
+                if (d && at < (int)sizeof line - 32)
+                    at += snprintf(line + at, sizeof line - at, " %llu:%.1f%%", (unsigned long long)(hz[k] / 1000000), 100.0 * d / total);
+            }
+            if (total) out("GPU clock by residence (devfreq trans_stat, %llu ms): mean %.0f MHz; MHz:share%s",
+                           (unsigned long long)total, weighted / total, at ? line : "");
+            else out("GPU clock by residence: n/a (trans_stat did not advance)");
+        } else out("GPU clock by residence: n/a (devfreq trans_stat unreadable)");
+    }
 #endif
     if (temp_max > -1e8f) out("SoC temperature %.0f-%.0f C", temp_min, temp_max); else out("SoC temperature: n/a");
     if (thermal_max >= 0) out("Android thermal status (max): %d", thermal_max); else out("Android thermal status: n/a");

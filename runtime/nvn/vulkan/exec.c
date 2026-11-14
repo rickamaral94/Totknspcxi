@@ -891,7 +891,17 @@ static void dl_note(const char *fmt, ...) {
     va_end(ap);
 }
 void vk_dl_note_upload(void *img, uint32_t w, uint32_t h, uint32_t lv) { dl_note("  upload %p %ux%u lv%u", img, w, h, lv); }
+// Always on, unlike the ring (docs/PORTS-EVIDENCIA.md M7): the last submission handed to the queue and the last pass and
+// dispatch recorded into a command list - plain stores, no formatting - for the device-loss report.
+static struct { uint64_t submit, submit_ns; uint32_t pass_w, pass_h, pass_fmt, pass_ncolor; uint64_t pass_n, cs, dispatch_n; } g_last;
 void vk_devlost_dump(void) {
+    static int once;
+    if (once++) return;
+    LOG("[vk] last marker: submission %llu (%.1f ms before this report), last recorded pass #%llu %u color %ux%u fmt %#x, "
+        "last dispatch #%llu cs %llx; LARECOMP_VK_DEVLOST_TRACE=1 keeps the last 64 operations\n",
+        (unsigned long long)g_last.submit, g_last.submit_ns ? (plat_now_ns() - g_last.submit_ns) / 1e6 : -1.0,
+        (unsigned long long)g_last.pass_n, g_last.pass_ncolor, g_last.pass_w, g_last.pass_h, g_last.pass_fmt,
+        (unsigned long long)g_last.dispatch_n, (unsigned long long)g_last.cs);
     if (!dl_on) return;
     LOG("[vk] last GPU operations before the device loss (oldest first):\n");
     for (unsigned i = dl_n > 64 ? dl_n - 64 : 0; i < dl_n; i++) LOG("[vk]   %s\n", dl_ring[i & 63]);
@@ -985,6 +995,7 @@ void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra
     {
         PROF_T0();
         dl_note("submit %llu", (unsigned long long)submit_seq + 1);
+        g_last.submit = submit_seq + 1, g_last.submit_ns = plat_now_ns();
 #ifdef __ANDROID__
         uint64_t trace_start = vk_timing_trace_on() ? SDL_GetTicksNS() : 0;
 #endif
@@ -2321,6 +2332,8 @@ static void begin_pass(void) {
     if (!no_barrier && AB("nobarrier") != 1) vk_full_barrier(cb);  // passes, copies and dispatches see each other's results
     {
         NvnTexture *t0n = st.rt.ncolor ? st.rt.color[0] : NULL;
+        g_last.pass_n++, g_last.pass_ncolor = st.rt.ncolor, g_last.pass_w = t0n ? t0n->width : 0, g_last.pass_h = t0n ? t0n->height : 0,
+            g_last.pass_fmt = t0n ? t0n->format : 0;
         dl_note("pass %d color %ux%u fmt %#x depth %p", st.rt.ncolor, t0n ? t0n->width : 0, t0n ? t0n->height : 0, t0n ? t0n->format : 0,
                 (void *)st.rt.depth);
     }
@@ -6507,6 +6520,7 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
     dchain_after = false;
     gp_mark(cb, "dispatch %ux%ux%u (local %ux%ux%u) cs %llx gmem %d", gx, gy, gz, cp->local[0], cp->local[1], cp->local[2],
             (unsigned long long)st.program->stages[5].code_addr, cp->si->uses_gmem);
+    g_last.dispatch_n++, g_last.cs = st.program->stages[5].code_addr;
     dl_note("dispatch %ux%ux%u cs %llx gmem %d", gx, gy, gz, (unsigned long long)st.program->stages[5].code_addr, cp->si->uses_gmem);
     nfeedback = 0;
     if (ct_on()) {
