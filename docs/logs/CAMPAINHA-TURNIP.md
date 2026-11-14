@@ -67,12 +67,13 @@ Levantado entre 06 e 07/11/2026. Detalhes em
 
 - **Driver publicado.** Amaral `mesa-27.0.0-devel-v5.8.17.1` (Latest), Mesa `fd8ef2b`. ELF Standard:
   `e64f5306c5c8f52f013f01f3d2627a81704f07ba71ab9518c27be2b209863a96`.
-- **Os três caminhos "só Adreno 8xx".** No Automatic, `turnip_lrz` e `inplace_reads` só ligam em Adreno 8xx
-  (`vk_adreno_8xx` e `vk_turnip_path_on`, `runtime/nvn/vulkan/device.c`). No A740, o app exporta `TU_DEBUG=nolrz` e
-  copia o alvo a cada barreira. A auditoria TOTK contou 50–70 cópias de feedback por quadro real.
-
-  O ganho de 29,2 para 41,4 FPS reais registrado na `.19`, com as três opções ligadas juntas, é coerente com isso.
-  Isolar cada opção, como a matriz de testes já pede, diz quanto é de cada uma.
+- **Os três caminhos no Automatic.** Corrigido em 14/11 pelo agente do TOTK e conferido no código. Desde a
+  `.20` (`fec6ad9`), o Automatic de `gpu_heap`, `inplace_reads` e LRZ liga em Adreno 8xx **e no 740** (`vk_lrz_auto`
+  e `vk_turnip_path_on`, `runtime/nvn/vulkan/device.c`).
+  - O upstream TOTKDroid restringe heap e in-place ao 8xx; o fork não.
+  - O `TU_DEBUG=nolrz` da coleta da `.19` veio de `turnip_lrz=0` forçado nas configurações, não do Automatic.
+  - O ganho de 29,2 para 41,4 FPS reais da `.19` foi medido com as três opções ligadas juntas. Isolar cada opção,
+    como a matriz já pede, diz quanto é de cada uma.
 - **Leitura do próprio alvo sem a extensão.** O port não usa `VK_EXT_attachment_feedback_loop_layout`. O Turnip a
   expõe e, com ela, tira o passe de GMEM. Se `inplace_reads=on` mostrar listras ou piscadas que somem com
   `TU_DEBUG=sysmem`, a causa provável é a leitura em GMEM. A correção portável é o port declarar o feedback loop com
