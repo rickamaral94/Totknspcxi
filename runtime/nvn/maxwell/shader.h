@@ -39,7 +39,8 @@ enum { TEXTYPE_1D, TEXTYPE_2D, TEXTYPE_3D, TEXTYPE_CUBE, TEXTYPE_2D_ARRAY, TEXTY
 
 typedef struct {
     uint8_t attr_kind[32];  // vertex inputs: 0 float, 1 signed int, 2 unsigned int
-    uint8_t rt_kind[8];     // fragment outputs: 0 float, 1 signed int, 2 unsigned int
+    uint8_t rt_kind[8];     // fragment outputs: 0 float, 1 signed int, 2 unsigned int; 5 / 6 uint 16 / 8-bit, 7 / 8 sint
+                            // 16 / 8-bit: the register's low bits (Mali only: vulkan/exec.c rt_kind_key)
     bool depth_minus_one;   // NVN depth mode [-1,1]: remap clip z
     bool flip_y;            // lower-left window origin
     bool flip_x;            // mirror the image left to right (mirror mode's scene composite). (In the padding
@@ -104,8 +105,16 @@ extern bool maxwell_gmem_map_all;
 // GMem storage buffer, whose range a driver may cap far below the heap (Turnip on Adreno 7xx: 128 MB). Binding
 // GMEM_BUFFER_INDEX then holds the heap's device address: `readonly buffer GHeapAddr { uvec2 a; }`.
 extern bool maxwell_gmem_bda;
+// (with maxwell_gmem_bda) the heap in blocks of 4 << maxwell_gmem_chunk_shift bytes, each its own GPU memory (an Android
+// hardware buffer per block: the Mali's gralloc takes no 2 GB one), 0: one block. GHeapAddr is then `uvec2 a[16]`, block
+// k's device address less k blocks, so every access keeps its heap-relative word index: gmem_w(i) picks a[i >> shift].
+extern int maxwell_gmem_chunk_shift;
 // Vulkan drivers without shaderInt64: preserve address/carry semantics using 32-bit words.
 extern bool maxwell_no_int64;
+// (GLSL) the stages (1 << STAGE_*) where VOTE, SHFL and the lane ids use subgroup operations; elsewhere, as in vertex
+// shaders, each invocation is one lane by itself. The driver's VkPhysicalDeviceSubgroupProperties: Turnip on Adreno
+// 6xx has them in compute only (#8). Default: all.
+extern unsigned maxwell_subgroup_stages;
 // (diagnostics, Android copy mode) a mapped access outside the table records its heap offset at the end of the gfast_
 // buffer (the arena: exec.c) instead of reading the heap binding, which isn't there
 extern bool maxwell_gmem_miss_log;

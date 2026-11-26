@@ -61,6 +61,7 @@ Android.
 - Taxa de quadros: Vídeo > Taxa de quadros tem 30, Auto (prefere 60, cutscenes em 30) e 60. A resolução dinâmica do
   jogo fica desligada; a cena é 1600x896, escalada para a saída (FSR 1, GSR, SMAA / FXAA).
 - Vídeo > Proporção > Desbloqueado: o mundo e os menus ocupam a tela larga (o HUD fica nos 16:9 do meio).
+- Vídeo > Geração de quadros (LSFG), experimental: quadros criados entre os do jogo (2x, 3x, 4x). É a do Lossless Scaling, portada do Eden pelo Swap2-Native, e precisa da sua própria `Lossless.dll` do Lossless Scaling na pasta `LSFG` ou `Download` do armazenamento do celular. A DLL nunca vem junto. Esse código é GPL-3.0-or-later, e por isso o APK feito com ele também é ([NOTICE.md](NOTICE.md)).
 - Falta: a maior parte do mapa, 60 fps sustentados com o celular quente, o HUD nas bordas da tela no modo largo.
 
 > [!IMPORTANT]
@@ -111,11 +112,21 @@ android/run_boot.sh 120                                      # inicia o jogo, lo
 ## Apoie o projeto
 
 O TOTKDroid é um projeto gratuito e independente. Se você gosta dele e quer apoiar seu desenvolvimento, pode me
-patrocinar pelo GitHub. Esse apoio me ajuda a dedicar tempo à correção de bugs, à melhoria do desempenho e da
-compatibilidade e às próximas versões. O patrocínio é totalmente opcional: não libera recursos exclusivos nem garante
-correções específicas. Relatos de bugs, testes em outros aparelhos e contribuições também ajudam muito.
+apoiar pelo GitHub, pelo Ko-fi, pelo Buy Me a Coffee ou via **Pix**. Esse apoio me ajuda a dedicar tempo à correção de bugs, à
+melhoria do desempenho e da compatibilidade e às próximas versões. O patrocínio é totalmente opcional: não libera
+recursos exclusivos nem garante correções específicas. Relatos de bugs, testes em outros aparelhos e contribuições
+também ajudam muito.
+
+A meta atual do projeto é adquirir um **POCO X7 Pro (US$ 455)**, um celular de teste equipado com processador MediaTek Dimensity e GPU Mali para facilitar testes locais e otimizar o desempenho dos ports (BOTWRecompAndroid, TOTKDroid, LASRecompAndroid e Swap2-Native). O selo abaixo mostra o total arrecadado somando todas as plataformas; eu atualizo à mão.
+
+[![Meta POCO X7 Pro](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2Fmamcjr%2FBOTWRecompAndroid%2Fmain%2F.github%2Fdonation-goal.json&query=%24.raised&prefix=%24&color=2EA043&logo=xiaomi&logoColor=white&label=Meta%20POCO%20X7%20Pro&suffix=%20%2F%20%24455)](https://github.com/mamcjr/BOTWRecompAndroid/blob/main/.github/donation-goal.json)
 
 [![Patrocine no GitHub](https://img.shields.io/badge/Patrocine-no%20GitHub-EA4AAA?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/mamcjr)
+[![Ko-fi](https://img.shields.io/badge/Ko--fi-mamcjr-FF5E5B?logo=kofi&logoColor=white)](https://ko-fi.com/mamcjr)
+[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-mamcjr-FFDD00?logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/mamcjr)
+[![Pix](https://img.shields.io/badge/Pix-Chave%20Aleat%C3%B3ria-32BCAD?logo=pix&logoColor=white)](#apoie-o-projeto)
+
+> **Chave Pix (chave aleatória):** `6c326b56-6caf-4c3a-bcf7-1fa8ad2abd16`
 
 ## Créditos
 
@@ -139,6 +150,7 @@ correções específicas. Relatos de bugs, testes em outros aparelhos e contribu
 - [Revivedx](https://github.com/Revivedx) pelo [SavageWindRecomp](https://github.com/Revivedx/SavageWindRecomp) (MIT):
   as correções de kernel do SDK 20, o setjmp, o NVN 55.
 - [Nycolazs](https://github.com/Nycolazs) pelo LASRecomp-Android-Plus (MIT): compatibilidade de drivers Vulkan.
+- [Eden](https://git.eden-emu.dev/eden-emu/eden) e [lsfg-vk](https://github.com/PancakeTAS/lsfg-vk) (GPL-3.0-or-later): a geração de quadros do Lossless Scaling, pelo port em C do Swap2-Native (runtime/nvn/vulkan/lsfg, NOTICE.md).
 - A decompilação [zeldaret/botw](https://github.com/zeldaret/botw) e o [open-ead/sead](https://github.com/open-ead/sead),
   pelo que se sabe do motor de onde o TOTK veio.
 - [Mbed TLS](https://github.com/Mbed-TLS/mbedtls) (Apache 2.0, AES e SHA-256 da importação de NSP/XCI) e

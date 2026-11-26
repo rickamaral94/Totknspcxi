@@ -6,6 +6,7 @@
 #include <SDL3/SDL.h>
 #include <ctype.h>
 #include <math.h>
+#include <pthread.h>
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
@@ -81,8 +82,10 @@ static void recompute_pad(void) {
         for (int i = 0; i < 4; i++) if (abs(v[i]) > abs(ax[i])) ax[i] = v[i];
     }
     // Settings > Controls' dead zone: each stick's position inside it is centre, and past it the travel is stretched
-    // back to full (round: a diagonal keeps its angle), so a worn stick's drift doesn't walk Link or turn the camera
-    float dz = g_settings.stick_deadzone;
+    // back to full (round: a diagonal keeps its angle), so a worn stick's drift doesn't walk Link or turn the camera.
+    // Never under 8%, as the Switch's own sticks report a centred one as exactly 0: a stick resting a step off centre
+    // (GameSir X4: 128 of 0-255) read as a held right stick, and the game turned the motion aim off (#149 #175 #78)
+    float dz = fmaxf(g_settings.stick_deadzone, 0.08f);
     for (int s = 0; dz > 0 && s < 2; s++) {
         float x = ax[2 * s] / 32767.0f, y = ax[2 * s + 1] / 32767.0f, m = sqrtf(x * x + y * y);
         float k = m <= dz ? 0 : fminf((m - dz) / (1 - dz), 1) / m;
@@ -166,9 +169,46 @@ int input_pad_family(void) {
     return env >= 0 ? env : pad_family;
 }
 
+// A gamepad with no axis at all isn't a controller to play with: a phone's fingerprint sensor can register one (the
+// OnePlus 7 Pro's "gf_input": navigation keys and a BTN_EAST, so Android and SDL call it a gamepad, and the touch
+// controls never showed, #477). Such a device is left out wherever the app asks whether a controller is connected.
+// LARECOMP_PAD_ANY=1: every gamepad counts, as before. The answer is kept per id (SDL gives a reconnected device a
+// new one). (from BOTWRecomp 0ea51bb)
+bool input_pad_usable(uint32_t id) {
+    static int any = -1;
+    if (any < 0) any = getenv("LARECOMP_PAD_ANY") && atoi(getenv("LARECOMP_PAD_ANY"));
+    if (any) return true;
+    static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+    static struct { uint32_t id; bool usable; } seen[16];
+    static unsigned nseen;
+    pthread_mutex_lock(&lock);
+    for (unsigned i = 0; i < nseen && i < 16; i++)
+        if (seen[i].id == id) { bool u = seen[i].usable; pthread_mutex_unlock(&lock); return u; }
+    pthread_mutex_unlock(&lock);
+    SDL_Gamepad *g = SDL_OpenGamepad((SDL_JoystickID)id);  // (counted: closing it leaves another opener's open)
+    int axes = g ? SDL_GetNumJoystickAxes(SDL_GetGamepadJoystick(g)) : -1;
+    bool usable = axes != 0;  // (one that can't be opened: as before)
+    if (!usable) LOG("[input] gamepad %u: %s has no axes - not a controller, left out (LARECOMP_PAD_ANY=1: counted)\n",
+                     (unsigned)id, SDL_GetGamepadName(g) ? SDL_GetGamepadName(g) : "(unnamed)");
+    if (g) SDL_CloseGamepad(g);
+    pthread_mutex_lock(&lock);
+    seen[nseen++ % 16].id = id, seen[(nseen - 1) % 16].usable = usable;
+    pthread_mutex_unlock(&lock);
+    return usable;
+}
+uint32_t input_pad_first(void) {
+    int n = 0;
+    SDL_JoystickID *ids = SDL_GetGamepads(&n);
+    uint32_t first = 0;
+    for (int i = 0; ids && i < n && !first; i++) if (input_pad_usable(ids[i])) first = ids[i];
+    SDL_free(ids);
+    return first;
+}
+bool input_pad_present(void) { return input_pad_first() != 0; }
+
 static void pad_open(SDL_JoystickID id) {
     for (int p = 0; p < npads; p++) if (SDL_GetGamepadID(pads[p]) == id) return;
-    if (npads == MAX_PADS) return;
+    if (npads == MAX_PADS || !input_pad_usable(id)) return;
     SDL_Gamepad *g = SDL_OpenGamepad(id);
     if (!g) { LOG("[input] gamepad %u: %s\n", (unsigned)id, SDL_GetError()); return; }
     pads[npads++] = g;
@@ -357,6 +397,7 @@ static void host_test_frame(uint64_t frame) {
     }
 }
 
+static void input_latch_frame(void);  // (below fill_state's TOUCH_* definitions)
 static uint64_t g_pad_obj;
 volatile int g_inject_plus;  // frames to hold Plus for the game (movie.c: A/B skip a skippable movie)
 RT_ON_RESET(input_reboot_reset) { g_pad_obj = 0; g_inject_plus = 0; }  // (reboot: the controller object was guest memory)
@@ -377,6 +418,7 @@ void input_frame(uint64_t frame) {
     extern void watch_arm(void);
     watch_arm();
     host_test_frame(frame);
+    input_latch_frame();
     const char *spec = getenv("LARECOMP_INPUT");
     if (!spec) return;
     static const char *const names[] = {"A", "B", "X", "Y", "LSTICK", "RSTICK", "L", "R", "ZL", "ZR", "PLUS",
@@ -435,6 +477,24 @@ static int32_t clamp_axis(int32_t v) { return v > 32767 ? 32767 : v < -32767 ? -
 
 // NpadFullKeyState / NpadHandheldState / NpadJoy*State share this layout (0x28 bytes):
 // {int64 sampling, u64 buttons, AnalogStick L {x,y}, AnalogStick R {x,y}, u32 attributes}
+// The host's input (keys, controllers, the on-screen controls) as the game's polls see it: read once a presented frame
+// (input_frame), so every poll of a frame - TOTK polls several times a frame - sees the same buttons, as the scripted
+// input always was. Read live, a touch landing mid-frame was "no menu" to the part of the frame that draws the world and
+// "menu" to the part that captures it for the menu's blurred background: the weapon wheel opened over black (#76, only
+// with a player's touch, never with LARECOMP_INPUT) - or so it seemed: latched, 3 of 11 openings were still black
+// (2026-11-23), so it is off by default. LARECOMP_INPUT_LATCH=1: latched.
+static _Atomic uint64_t latch_b;
+static _Atomic int32_t latch_lx, latch_ly, latch_rx, latch_ry;
+static void input_latch_frame(void) {  // (input_frame: once a presented frame, on the game's thread)
+    latch_b = key_buttons | pad_buttons | TOUCH_BUTTONS;
+    latch_lx = key_lx + pad_lx + TOUCH_LX, latch_ly = key_ly + pad_ly + TOUCH_LY;
+    latch_rx = key_rx + pad_rx + TOUCH_RX, latch_ry = key_ry + pad_ry + TOUCH_RY;
+}
+static bool input_latch_on(void) {
+    static int on = -1;
+    if (on < 0) on = getenv("LARECOMP_INPUT_LATCH") && atoi(getenv("LARECOMP_INPUT_LATCH")) != 0;
+    return on;
+}
 static void fill_state(Cpu *c) {
     uint8_t *s = (uint8_t *)(uintptr_t)c->x[0];
     uint32_t id = *(uint32_t *)(uintptr_t)c->x[1];
@@ -453,15 +513,18 @@ static void fill_state(Cpu *c) {
         LOG("[input] watching controller object %llx\n", c->x[1] - 8);
     }
     bool menu = menu_input_captured();  // the overlay menu / name entry has the controls (typing there isn't for the game)
-    uint64_t b = menu ? script_buttons : key_buttons | pad_buttons | TOUCH_BUTTONS | script_buttons;
+    bool latch = input_latch_on();
+    uint64_t b = menu ? script_buttons : (latch ? latch_b : key_buttons | pad_buttons | TOUCH_BUTTONS) | script_buttons;
     {   // injected Plus: held for ~10 presented frames (the game polls several times per frame)
         extern uint64_t renderer_present_count(void);
         static uint64_t until;
         if (g_inject_plus > 0) { until = renderer_present_count() + 10; g_inject_plus = 0; }
         if (renderer_present_count() < until) b |= 1ull << BTN_PLUS;
     }
-    int32_t lx = clamp_axis((menu ? 0 : key_lx + pad_lx + TOUCH_LX) + script_lx), ly = clamp_axis((menu ? 0 : key_ly + pad_ly + TOUCH_LY) + script_ly);
-    int32_t rx = clamp_axis((menu ? 0 : key_rx + pad_rx + TOUCH_RX) + script_rx), ry = clamp_axis((menu ? 0 : key_ry + pad_ry + TOUCH_RY) + script_ry);
+    int32_t lx = clamp_axis((menu ? 0 : latch ? latch_lx : key_lx + pad_lx + TOUCH_LX) + script_lx);
+    int32_t ly = clamp_axis((menu ? 0 : latch ? latch_ly : key_ly + pad_ly + TOUCH_LY) + script_ly);
+    int32_t rx = clamp_axis((menu ? 0 : latch ? latch_rx : key_rx + pad_rx + TOUCH_RX) + script_rx);
+    int32_t ry = clamp_axis((menu ? 0 : latch ? latch_ry : key_ry + pad_ry + TOUCH_RY) + script_ry);
     // stick directions also appear as buttons (bits 16-23)
     if (lx < -16000) b |= 1ull << 16;
     if (ly > 16000) b |= 1ull << 17;
@@ -549,4 +612,110 @@ HLE_FUNC("_ZN2nn3hid22GetVibrationDeviceInfoEPNS0_19VibrationDeviceInfoERKNS0_21
     uint32_t h = *(uint32_t *)(uintptr_t)c->x[1];
     info[0] = 1;        // VibrationDeviceType_LinearResonantActuator
     info[1] = h & 1;    // position: left / right
+}
+
+// ---- HD rumble: the game's vibration values (services/hid_set.c, IPC SendVibrationValue / SendVibrationValues) on
+// the controllers' motors, or the phone's vibrator when none is connected. Inert until 2026-11-14: the game sent its
+// rumble and nothing moved. As in totk-android (AurelioB, MIT: runtime/hid_feedback.c, rumble_mix.h,
+// feedback_android.c): a value {low band amplitude, frequency, high band amplitude, frequency} becomes one strength,
+// sqrt(low^2 + high^2) x the setting, silence under 2 % and for a side the game hasn't repeated in 250 ms (a paused or
+// frozen game never leaves a motor on); a change of 8 / 255 or more, or every 200 ms while it lasts, goes to the
+// motors. Left Joy-Con -> the controller's low-frequency (left) motor, right -> the high-frequency one. Driven from the
+// main thread's loop (input_rumble_tick), which owns the open controllers. Settings > Controls > Vibration
+// (g_settings.rumble, %); LARECOMP_RUMBLE_LOG=1: each strength sent. Scripted test runs (LARECOMP_INPUT) don't move
+// the motors unless LARECOMP_RUMBLE=1.
+#include <pthread.h>
+static pthread_mutex_t rum_mu = PTHREAD_MUTEX_INITIALIZER;
+static float rum_v[2][4];
+static uint64_t rum_at[2];
+void input_rumble_value(unsigned side, const float v[4]) {
+    if (side > 1) return;
+    pthread_mutex_lock(&rum_mu);
+    memcpy(rum_v[side], v, sizeof rum_v[side]);
+    rum_at[side] = SDL_GetTicksNS();
+    pthread_mutex_unlock(&rum_mu);
+    static _Atomic int first;
+    if (!atomic_exchange(&first, 1))
+        LOG("[rumble] the game's first vibration: %s %.2f@%.0f Hz %.2f@%.0f Hz\n", side ? "right" : "left", v[0], v[1], v[2], v[3]);
+}
+static int rum_amp(const float v[4], uint64_t at, uint64_t now, float gain) {
+    if (!at || now - at >= 250000000ull) return 0;
+    float lo = v[0], hi = v[2];
+    if (!(lo == lo) || !(hi == hi)) return 0;
+    float a = sqrtf(lo * lo + hi * hi) * gain;
+    if (!(a >= 0.02f)) return 0;
+    if (a > 1.0f) a = 1.0f;
+    int r = (int)lroundf(a * 255.0f);
+    return r < 1 ? 1 : r;
+}
+#ifdef __ANDROID__
+// The phone's own vibrator through the activity (TOTKRecompAndroidActivity.rumble): amplitude 1..255 for ms, 0 stops.
+// SDL's haptic path vibrates with no attributes, and the POCO's HyperOS let none of them through - SDL said "sent" for a
+// full-strength second and nothing moved (2026-11-14); ours marks them as a game's (media) vibration.
+#include <jni.h>
+static void phone_rumble(int amplitude, int ms) {
+    JNIEnv *env = (JNIEnv *)SDL_GetAndroidJNIEnv();
+    jobject act = (jobject)SDL_GetAndroidActivity();
+    if (!env || !act) return;
+    jclass c = (*env)->GetObjectClass(env, act);
+    jmethodID m = c ? (*env)->GetStaticMethodID(env, c, "rumble", "(II)V") : NULL;
+    if (m) (*env)->CallStaticVoidMethod(env, c, m, (jint)amplitude, (jint)ms);
+    if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+    if (c) (*env)->DeleteLocalRef(env, c);
+    (*env)->DeleteLocalRef(env, act);
+}
+#endif
+void input_rumble_tick(void) {
+    static int sent[2], on = -1, log = -1;
+    static uint64_t sent_at;
+    if (on < 0) on = !getenv("LARECOMP_INPUT") || (getenv("LARECOMP_RUMBLE") && atoi(getenv("LARECOMP_RUMBLE")));
+    if (log < 0) log = getenv("LARECOMP_RUMBLE_LOG") != NULL;
+    uint64_t now = SDL_GetTicksNS();
+#ifdef __ANDROID__
+    static int test = -1;  // LARECOMP_RUMBLE_TEST=1: one second at full strength on the phone at the start (is the motor reached?)
+    if (test < 0) test = getenv("LARECOMP_RUMBLE_TEST") != NULL;
+    if (test == 1) {
+        test = 2;
+        phone_rumble(255, 1000);
+        LOG("[rumble] test: one second at full strength on the phone's vibrator\n");
+    }
+#endif
+    float gain = (g_settings.rumble < 0 ? 0 : g_settings.rumble > 300 ? 300 : g_settings.rumble) / 100.0f;  // (up to 3x: the game's rumble is soft, 4-10 % on the POCO, weak on a phone's motor)
+    int amp[2];
+    pthread_mutex_lock(&rum_mu);
+    for (int s = 0; s < 2; s++) amp[s] = rum_amp(rum_v[s], rum_at[s], now, gain);
+    pthread_mutex_unlock(&rum_mu);
+    bool changed = false;
+    for (int s = 0; s < 2; s++) changed |= (!amp[s] != !sent[s]) || abs(amp[s] - sent[s]) >= 8;
+    bool renew = (amp[0] || amp[1]) && now - sent_at >= 200000000ull;
+    if (!changed && !renew) return;
+    sent[0] = amp[0], sent[1] = amp[1], sent_at = now;
+    if (log) LOG("[rumble] left %d right %d of 255 (%s)\n", amp[0], amp[1], npads ? "controller" : "phone");
+    if (!on) return;
+    uint32_t ms = amp[0] || amp[1] ? 300 : 0;
+    if (npads) {
+        for (int p = 0; p < npads; p++) SDL_RumbleGamepad(pads[p], (uint16_t)(amp[0] * 257), (uint16_t)(amp[1] * 257), ms);
+        return;
+    }
+    int m = amp[0] > amp[1] ? amp[0] : amp[1];
+#ifdef __ANDROID__
+    phone_rumble(m, (int)ms);
+#else
+    static SDL_Haptic *haptic;  // (a computer's own haptic device, if SDL lists one)
+    static bool tried;
+    if (!tried) {
+        tried = true;
+        int n = 0;
+        SDL_HapticID *ids = SDL_GetHaptics(&n);
+        for (int i = 0; ids && i < n && !haptic; i++) {
+            SDL_Haptic *h = SDL_OpenHaptic(ids[i]);
+            if (h && SDL_InitHapticRumble(h)) haptic = h;
+            else if (h) SDL_CloseHaptic(h);
+        }
+        SDL_free(ids);
+    }
+    if (!haptic) return;
+    if (m) SDL_PlayHapticRumble(haptic, m / 255.0f, ms);
+    else SDL_StopHapticRumble(haptic);
+#endif
 }

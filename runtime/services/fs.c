@@ -458,6 +458,25 @@ const char *romfs_file_at(uint64_t off) {
     return NULL;
 }
 
+// A file of the game's RomFS (its path as the index has it: "UI/Tex/Icon/Weapon_Sword_001.bntx.zs"), whole, in a
+// malloc'd buffer - mods included. For the app's own use (ui/touch_controls.mm: the touch controls' item icons). NULL
+// until the game has opened its RomFS, or when the path isn't there.
+uint8_t *fs_romfs_read(const char *path, size_t *size) {
+    if (romfs_fd == -1) return NULL;
+    RomImage *was = R;
+    R = &img_game;
+    uint8_t *out = NULL;
+    for (int i = 0; i < rom_nfiles; i++) {
+        if (strcmp(rom_files[i].path, path)) continue;
+        out = malloc(rom_files[i].size ? rom_files[i].size : 1);
+        if (romfs_read(romfs_fd, out, rom_files[i].size, rom_files[i].off) != (ssize_t)rom_files[i].size) free(out), out = NULL;
+        else *size = rom_files[i].size;
+        break;
+    }
+    R = was;
+    return out;
+}
+
 // ------------------------------------------------------------------ IStorage (raw RomFS image)
 typedef struct { int fd; uint64_t size; bool plain; RomImage *img; } Storage;  // plain: no mod overlay; img: the game's or the DLC's
 
@@ -533,8 +552,18 @@ static Service *open_romfs_storage(void) {
 }
 
 // ------------------------------------------------------------------ host-directory filesystem
-typedef struct { char root[1024]; } HostFs;
-typedef struct { int fd; char path[1100]; } HostFile;
+typedef struct { char root[1024]; bool save; } HostFs;  // save: a save data's (not the SD card's)
+typedef struct { int fd; char path[1100]; bool save; } HostFile;
+
+// A save being written: the game's changes to a save since its last Commit (0: none). The app in the background holds
+// the game at its next present only once that save is committed (nvn/objects.c nvn_background), so Android killing
+// the app in the background doesn't cut a save in half. A save not committed within 20 s doesn't hold it up longer.
+static uint64_t save_dirty_ns;  // (__atomic_*)
+static void save_dirty(bool save) { if (save) __atomic_store_n(&save_dirty_ns, plat_now_ns() | 1, __ATOMIC_RELAXED); }
+bool fs_save_pending(void) {
+    uint64_t t = __atomic_load_n(&save_dirty_ns, __ATOMIC_RELAXED);
+    return t && plat_now_ns() - t < 20000000000ull;
+}
 typedef struct { DIR *d; char path[1024]; int mode; } HostDir;
 
 static const char *in_path(IpcReq *req, int i) {
@@ -575,11 +604,12 @@ static void file(Service *s, IpcReq *req, IpcResp *resp) {
         IpcBuf *a = in_buf(req, 0);
         if (strstr(f->path, "savedata"))
             LOG("[save] write %s off %lld size %lld <- guest %llx\n", f->path, (long long)off, (long long)size, (unsigned long long)a->addr);
+        save_dirty(f->save);
         if (pwrite(f->fd, (void *)(uintptr_t)a->addr, (size_t)size, off) < 0) resp->result = errno_result();
         break;
     }
     case 2: fsync(f->fd); break;
-    case 3: if (ftruncate(f->fd, IN(int64_t, 0))) resp->result = errno_result(); break;
+    case 3: save_dirty(f->save); if (ftruncate(f->fd, IN(int64_t, 0))) resp->result = errno_result(); break;
     case 4: {
         struct stat sb;
         fstat(f->fd, &sb);
@@ -659,6 +689,7 @@ static void filesystem(Service *s, IpcReq *req, IpcResp *resp) {
     HostFs *fs = s->state;
     char p[2048], p2[2048];
     host_path(fs, in_path(req, 0), p, sizeof p);
+    if (req->cmd <= 6 || req->cmd == 13) save_dirty(fs->save);  // (create, delete, rename, clean: the save changes)
     switch (req->cmd) {
     case 0: {  // CreateFile(option, size)
         int fd = open(p, O_CREAT | O_EXCL | O_RDWR, 0644);
@@ -688,6 +719,7 @@ static void filesystem(Service *s, IpcReq *req, IpcResp *resp) {
         if (fd < 0) { resp->result = errno_result(); break; }
         HostFile *f = calloc(1, sizeof *f);
         f->fd = fd;
+        f->save = fs->save;
         strlcpy(f->path, p, sizeof f->path);
         ipc_return_object(resp, service_new("IFile", file, f));
         break;
@@ -702,7 +734,7 @@ static void filesystem(Service *s, IpcReq *req, IpcResp *resp) {
         ipc_return_object(resp, service_new("IDirectory", directory, hd));
         break;
     }
-    case 10: break;  // Commit
+    case 10: if (fs->save) __atomic_store_n(&save_dirty_ns, 0, __ATOMIC_RELAXED); break;  // Commit
     case 11: case 12: OUT(int64_t, 0) = 0x40000000; resp_size(resp, 8); break;
     case 13: rm_rf(p, true); break;
     case 14: memset(resp->data, 0, 0x20); resp_size(resp, 0x20); break;
@@ -786,6 +818,7 @@ static Service *open_host_fs(const char *sub) {
     HostFs *fs = calloc(1, sizeof *fs);
     if (getenv("LARECOMP_SAVE_DIR")) g_save_dir = getenv("LARECOMP_SAVE_DIR");  // test runs use a scratch copy
     snprintf(fs->root, sizeof fs->root, "%s/%s", g_save_dir, sub);
+    fs->save = strcmp(sub, "sdcard") != 0;
     {   // LARECOMP_SAVE_SEED=<save folder>: a save that doesn't exist yet starts as a copy of that one's (another game
         // version's data root starting from the player's saves - android/run_ver.sh)
         const char *seed = getenv("LARECOMP_SAVE_SEED");

@@ -32,7 +32,28 @@ SERVICE("hid", hid) {
     case 101: OUT(uint32_t, 0) = 0x1F; resp_size(resp, 4); break;  // GetSupportedNpadStyleSet
     case 121: OUT(int64_t, 0) = 0; resp_size(resp, 8); break;      // GetNpadJoyHoldType
     case 129: OUT(int64_t, 0) = 0; resp_size(resp, 8); break;      // GetNpadHandheldActivationMode
-    case 201: case 202: case 203: case 206: case 207: case 208: case 209: break;  // vibration
+    case 201: {  // SendVibrationValue(handle, VibrationValue at +4): HD rumble (hle/input.c input_rumble_value)
+        extern void input_rumble_value(unsigned side, const float v[4]);
+        uint32_t h = IN(uint32_t, 0);
+        float v[4];
+        memcpy(v, req->data + 4, sizeof v);
+        input_rumble_value((h & 0xFF) < 2 ? h & 0xFF : (h >> 16) & 0xFF, v);  // (ours: hle/input.c; the SDK's: byte 2)
+        break;
+    }
+    case 206: {  // SendVibrationValues: the handles in buffer 0, the values in buffer 1
+        extern void input_rumble_value(unsigned side, const float v[4]);
+        IpcBuf *hb = in_buf(req, 0), *vb = in_buf(req, 1);
+        if (!hb || !vb || !hb->addr || !vb->addr) break;
+        uint64_t n = hb->size / 4 < vb->size / 16 ? hb->size / 4 : vb->size / 16;
+        for (uint64_t i = 0; i < n; i++) {
+            uint32_t h = ((const uint32_t *)(uintptr_t)hb->addr)[i];
+            float v[4];
+            memcpy(v, (const uint8_t *)(uintptr_t)vb->addr + i * 16, sizeof v);
+            input_rumble_value((h & 0xFF) < 2 ? h & 0xFF : (h >> 16) & 0xFF, v);
+        }
+        break;
+    }
+    case 202: case 203: case 207: case 208: case 209: break;  // vibration (actual value, permission, GC)
     case 200: memset(resp->data, 0, 0x10); OUT(uint32_t, 0) = 1; resp_size(resp, 0x10); break;
     default: break;  // Activate*/Set*: accept
     }

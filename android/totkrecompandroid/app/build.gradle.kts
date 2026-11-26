@@ -24,14 +24,18 @@ android {
         applicationId = "com.totkrecompandroid"
         minSdk = 30
         targetSdk = 36
-        versionCode = 27
-        versionName = "0.2.2-beta-amaral.24"
+        versionCode = 28
+        versionName = "0.4.0-beta-amaral.25"
         ndk {
             abiFilters += "arm64-v8a"
         }
         externalNativeBuild {
             cmake {
                 arguments += "-DTOTK_GEN_DIR=${gen.get().asFile.resolve("inc").absolutePath.replace('\\', '/')}"
+                // Lossless Scaling frame generation (runtime/nvn/vulkan/lsfg, GPL-3.0-or-later): in by default, which makes the
+                // APK GPL-3.0-or-later (NOTICE.md); -PtotkLsfg=false builds without it
+                val lsfg = providers.gradleProperty("totkLsfg").getOrElse("true") != "false"
+                arguments += "-DTOTK_LSFG=${if (lsfg) "ON" else "OFF"}"
             }
         }
     }
@@ -96,10 +100,11 @@ val prepareTotkRecompAndroid by tasks.registering {
     val icon = repo.resolve("assets/artwork/totk-zonai-icon-v1.png")
     val background = repo.resolve("assets/artwork/hyrule-sky-islands-background-v1.png")
     val touchSkin = repo.resolve("assets/artwork/zonai-touch-atlas-v1.png")
+    val touchActions = repo.resolve("assets/artwork/zonai-touch-actions-v1.png")
     val logo = repo.resolve("assets/artwork/totkdroid-logo-v1.png")
     val libs = listOf("libSDL3.so", "libshaderc_shared.so", "libavcodec.so", "libavformat.so", "libavutil.so", "libswscale.so",
                       "libswresample.so")  // (libavcodec's Opus decoder needs libswresample)
-    inputs.files(smaa, font, icon, background, touchSkin, logo)
+    inputs.files(smaa, font, icon, background, touchSkin, touchActions, logo)
     inputs.files(libs.map { depLib(it) }.filter { it.exists() })
     if (deps.resolve("gen").exists()) inputs.dir(deps.resolve("gen"))  // (the game code's builder, below)
     inputs.property("gameBuilder", project.findProperty("totk.gameBuilder")?.toString() ?: "true")
@@ -124,6 +129,7 @@ val prepareTotkRecompAndroid by tasks.registering {
         icon.copyTo(out.resolve("assets/res/icon.png"), overwrite = true)
         background.copyTo(out.resolve("assets/res/launcher-background.png"), overwrite = true)
         touchSkin.copyTo(out.resolve("assets/res/zonai-touch-atlas.png"), overwrite = true)
+        touchActions.copyTo(out.resolve("assets/res/zonai-touch-actions.png"), overwrite = true)
         logo.copyTo(out.resolve("assets/res/launcher-logo.png"), overwrite = true)
         icon.copyTo(out.resolve("res/mipmap-xxxhdpi/ic_launcher.png"), overwrite = true)
         // the game code's builder (docs/las/ANDROID-PORT.md, Fase 6; android/deps/build_gen_deps.sh): its programs and

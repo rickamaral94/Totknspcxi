@@ -22,10 +22,16 @@
 
 #include "shader.h"
 
+// fragment output kinds (ShaderKey rt_kind): 1 / 2 signed / unsigned integer; 5 / 6 unsigned 16 / 8-bit, 7 / 8 signed
+#define RT_SINT(k) ((k) == 1 || (k) == 7 || (k) == 8)
+#define RT_UINT(k) ((k) == 2 || (k) == 5 || (k) == 6)
+
 uint64_t maxwell_gmem_base, maxwell_gmem_size;
 bool maxwell_gmem_map_all;
 bool maxwell_gmem_bda;
+int maxwell_gmem_chunk_shift;
 bool maxwell_no_int64;
+unsigned maxwell_subgroup_stages = ~0u;
 bool maxwell_gmem_miss_log;
 unsigned maxwell_gmem_miss_stages = ~0u;
 #define GMISS_ON(st) (maxwell_gmem_miss_log && (maxwell_gmem_miss_stages >> (st) & 1u))
@@ -106,6 +112,12 @@ typedef struct {
     bool lmem_dynamic;          // an LDL / STL at a register's address
     uint32_t lmem_sph_bytes;    // the SPH's local memory size (graphics stages; 0: none given)
 } Ctx;
+
+// Whether this shader's VOTE / SHFL / lane ids use the subgroup (a warp of lanes) or each invocation is one lane by
+// itself: GLSL stages other than the vertex one, where the driver has subgroup operations (maxwell_subgroup_stages)
+static bool has_lanes(const Ctx *c) {
+    return c->glsl && c->stage != STAGE_VERTEX && (maxwell_subgroup_stages >> c->stage & 1u);
+}
 
 // The local memory array's size in words, a power of two (its index is masked to it: lmask_). Every invocation zeroes
 // it, and an array that big lives in scratch memory: TOTK's material shaders spill one register (STL / LDL [0x0]) and
@@ -995,12 +1007,58 @@ static void emit_txd(Ctx *c, uint64_t w) {
     else if (!array) snprintf(P, sizeof P, "vec2(as_type<float>(r%d), as_type<float>(r%d))", a, a + 1);
     else snprintf(P, sizeof P, "vec3(as_type<float>(r%d), as_type<float>(r%d), float(min(r%d & 0xffffu, uint(tsize%d(0).z) - 1u)))",
                   a, a + 1, a + 2, slot);
+    // (tests: LARECOMP_TXD_ORDER=1 the derivatives as du/dx, dv/dx, du/dy, dv/dy instead; LARECOMP_NO_TXD=1 untranslated,
+    // the draws skipped as before 14e824e - the Depths' ceiling drew as streaks, #37 #52)
+    static int order = -1, off = -1;
+    if (order < 0) order = getenv("LARECOMP_TXD_ORDER") ? atoi(getenv("LARECOMP_TXD_ORDER")) : 0;
+    if (off < 0) off = getenv("LARECOMP_NO_TXD") != NULL;
+    if (off) { fail(c, "TXD (LARECOMP_NO_TXD)"); return; }
     if (n == 1) { snprintf(dx, sizeof dx, "as_type<float>(r%d)", b); snprintf(dy, sizeof dy, "as_type<float>(r%d)", b + 1); }
-    else {
+    else if (order == 1) {
+        snprintf(dx, sizeof dx, "vec2(as_type<float>(r%d), as_type<float>(r%d))", b, b + 1);
+        snprintf(dy, sizeof dy, "vec2(as_type<float>(r%d), as_type<float>(r%d))", b + 2, b + 3);
+    } else {
         snprintf(dx, sizeof dx, "vec2(as_type<float>(r%d), as_type<float>(r%d))", b, b + 2);
         snprintf(dy, sizeof dy, "vec2(as_type<float>(r%d), as_type<float>(r%d))", b + 1, b + 3);
     }
     snprintf(call, sizeof call, "textureGrad(t%d, %s, %s, %s)", slot, P, dx, dy);
+    write_tex_result(c, slot, call, mask, d, RZ, false, false);
+}
+
+// TLD (0xdc38, full-form texel fetch): the type in bits 28-30 (1D, 1D array, 2D, 2D array, 3D), the mask in 31-34;
+// coordinates from gpr8 - an array's layer first (its low 16 bits), then x, y, z; from gpr20 in order the level (bit 55,
+// else level 0), the offsets (bit 35: 4-bit signed x, y, z) and the sample (bit 50, multisample: not here). Layout from
+// yuzu's TranslatorVisitor::TLD and Ryujinx's InstTld; the code is ours. Untranslated, a TOTK Depths fragment shader
+// failed and its draws were skipped (2026-11-13, #37 #52).
+static void emit_tld(Ctx *c, uint64_t w) {
+    int d = (int)bits(w, 0, 8), a = (int)bits(w, 8, 8), b = (int)bits(w, 20, 8);
+    uint32_t index = (uint32_t)bits(w, 36, 13), mask = (uint32_t)bits(w, 31, 4);
+    int type = (int)bits(w, 28, 3);
+    bool lod = bits(w, 55, 1), aoffi = bits(w, 35, 1), ms = bits(w, 50, 1), clamp = bits(w, 54, 1);
+    if (!c->glsl) { fail(c, "TLD (MSL)"); return; }
+    if (ms || clamp || type > 4) { fail(c, "TLD %s", ms ? "multisample" : clamp ? "clamp" : "cube / 3d array"); return; }
+    bool array = type == 1 || type == 3;
+    int n = type <= 1 ? 1 : type <= 3 ? 2 : 3;
+    int tt = type == 0 ? TEXTYPE_1D : type == 1 ? TEXTYPE_1D_ARRAY : type == 2 ? TEXTYPE_2D : type == 3 ? TEXTYPE_2D_ARRAY : TEXTYPE_3D;
+    int slot = tex_slot(c, index, tt, false, array);
+    if (c->fail) return;
+    for (int i = 0; i < n + array; i++) c->reg_used[a + i] = 1;
+    int ca = a + array, p = b;
+    char L[64] = "0", O[128] = "", ly[96] = "", co[512], call[1024];
+    if (lod) { c->reg_used[p] = 1; snprintf(L, sizeof L, "int(r%d)", p); p++; }
+    if (aoffi) {
+        c->reg_used[p] = 1;
+        if (n == 1) snprintf(O, sizeof O, " + (int(r%d << 28) >> 28)", p);
+        else if (n == 2) snprintf(O, sizeof O, " + int2(int(r%d << 28) >> 28, int(r%d << 24) >> 28)", p, p);
+        else snprintf(O, sizeof O, " + int3(int(r%d << 28) >> 28, int(r%d << 24) >> 28, int(r%d << 20) >> 28)", p, p, p);
+        p++;
+    }
+    if (array) snprintf(ly, sizeof ly, "int(min(r%d & 0xffffu, uint(tsize%d(0).z) - 1u))", a, slot);
+    if (n == 1) snprintf(co, sizeof co, "int(r%d)%s", ca, O);
+    else if (n == 2) snprintf(co, sizeof co, "ivec2(%s)", RSC2(c, slot, "uint2(int2(int(r%d), int(r%d))%s)", ca, ca + 1, O));
+    else snprintf(co, sizeof co, "ivec3(int(r%d), int(r%d), int(r%d))%s", ca, ca + 1, ca + 2, O);
+    if (array) snprintf(call, sizeof call, "texelFetch(t%d, %s(%s, %s), %s)", slot, n == 1 ? "ivec2" : "ivec3", co, ly, L);
+    else snprintf(call, sizeof call, "texelFetch(t%d, %s, %s)", slot, co, L);
     write_tex_result(c, slot, call, mask, d, RZ, false, false);
 }
 
@@ -1480,6 +1538,8 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         emit_tex(c, w, true);
     } else if (OPM(0xde38000000000000ull, 0xfff8000000000000ull)) {  // TXD
         emit_txd(c, w);
+    } else if (OPM(0xdc38000000000000ull, 0xfff8000000000000ull)) {  // TLD
+        emit_tld(c, w);
     } else if (OPM(0xc838000000000000ull, 0xfc38000000000000ull)) {  // TLD4
         emit_tld4(c, w);
     } else if (OPM(0xdf00000000000000ull, 0xff40000000000000ull)) {  // TLD4S
@@ -1935,7 +1995,7 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         // shaders), each 32 lanes of the subgroup are one (Adreno's is 64 or 128 wide); elsewhere one lane by itself -
         // lane 0, its own bit (the masks were 0: a leader picked by ballot & EQMASK never counted)
         case 0x00: case 0x38: case 0x39: case 0x3a: case 0x3b: case 0x3c: {
-            bool lanes = c->glsl && c->stage != STAGE_VERTEX;
+            bool lanes = has_lanes(c);
             static const char *const one[] = {"0u", "1u", "0u", "1u", "0xFFFFFFFEu", "0xFFFFFFFFu"};
             static const char *const many[] = {"(gl_SubgroupInvocationID & 31u)", "(1u << (gl_SubgroupInvocationID & 31u))",
                                                "((1u << (gl_SubgroupInvocationID & 31u)) - 1u)",
@@ -2212,7 +2272,7 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         // and the MSL path: one lane by itself (TOTK's visibility counter: each passing vertex counts itself, the
         // reduction MacNativeGames lowers it to).
         int pa = (int)bits(w, 39, 3), pb = (int)bits(w, 45, 3), mode = (int)bits(w, 48, 2);
-        bool lanes = c->glsl && c->stage != STAGE_VERTEX;
+        bool lanes = has_lanes(c);
         static const char *const fn[] = {"subgroupAll", "subgroupAny", "subgroupAllEqual", "subgroupAll"};
         if (lanes) c->uses_vote = true;
         sp(&c->body, "    { bool vp_ = %s;\n", P(pa, bits(w, 42, 1)));
@@ -2400,8 +2460,8 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         char bb[32];
         const char *bv = bits(w, 28, 1) ? (sprintf(bb, "%uu", (unsigned)bits(w, 20, 5)), bb) : R((int)bits(w, 20, 8));
         int pd = (int)bits(w, 48, 3);
-        if (c->stage == STAGE_VERTEX) {
-            set_reg(c, d, R(a));  // no SIMD-group functions in vertex functions: lane-local value
+        if (c->stage == STAGE_VERTEX || (c->glsl && !has_lanes(c))) {
+            set_reg(c, d, R(a));  // no SIMD-group functions in vertex functions (or the driver's stage: has_lanes): lane-local value
         } else if (c->glsl) {  // a quad xor (lane mask < 4) is the subgroup xor within the quad
             static const char *const fn[] = {"subgroupShuffle", "subgroupShuffleUp", "subgroupShuffleDown", "subgroupShuffleXor"};
             sprintf(t, "%s(%s, uint(%s))", fn[mode], R(a), bv);
@@ -2418,9 +2478,15 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         if (pd != PT) { c->pred_used[pd] = 1; sp(&c->body, "    p%d = true;\n", pd); }
     } else if (OPM(0x38f0000000000000ull, 0xfef8000000000000ull) || OPM(0x5cf0000000000000ull, 0xfff8000000000000ull) ||
                OPM(0x4cf0000000000000ull, 0xfff8000000000000ull)) {  // R2P
-        if (bits(w, 40, 1)) { fail(c, "r2p cc"); }
         int shift = (int)bits(w, 41, 2) * 8;
         const char *mask = B(false);
+        if (bits(w, 40, 1)) {  // .CC: bits 0-3 into the flags Z, S, C, O, as P2R.CC reads them (overflow isn't tracked)
+            c->uses_cc = true;  // (#20: a Mali-G57's log, "FS translate failed: r2p cc")
+            sp(&c->body, "    { uint rm = %s, rv = %s >> %du;\n", mask, R(a), shift);
+            sp(&c->body, "      if ((rm & 1u) != 0u) ccz = (rv & 1u) != 0u;\n");
+            sp(&c->body, "      if ((rm & 2u) != 0u) ccs = (rv & 2u) != 0u;\n");
+            sp(&c->body, "      if ((rm & 4u) != 0u) cc = (cc & ~1u) | ((rv >> 2) & 1u); }\n");
+        } else
         for (int i = 0; i < 7; i++) {
             c->pred_used[i] = 1;
             sp(&c->body, c->glsl ? "    if (((%s >> %du) & 1u) != 0u) p%d = ((%s >> %du) & 1u) != 0u;\n"
@@ -3217,6 +3283,28 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     if (maxwell_cb_window && (stage == STAGE_VERTEX || stage == STAGE_FRAGMENT))
         info->cbwin_mask = info->cbuf_dynamic & info->cbuf_mask & 0x1FFF8u;  // (the game's: 3..16)
     glsl_rewrite(c, &body, c->body.buf ? c->body.buf : "");
+    if (info->uses_gmem && maxwell_gmem_bda && maxwell_gmem_chunk_shift && body.buf) {
+        // (the heap in blocks: maxwell_gmem_chunk_shift) every gmem_.w[i] the emitters wrote becomes gmem_w(i), the
+        // block's pointer picked by i - here, after the fact, so the one-block text stays as it was (and the shader
+        // caches made from it with it)
+        Str nb = {0};
+        const char *p = body.buf, *q;
+        while ((q = strstr(p, "gmem_.w["))) {
+            sp(&nb, "%.*sgmem_w(", (int)(q - p), p);
+            const char *e = q + 8;
+            int depth = 1;
+            for (; *e && depth; e++) {
+                if (*e == '[') depth++;
+                else if (*e == ']' && !--depth) break;
+            }
+            if (!*e) { fail(c, "unbalanced gmem_.w["); break; }
+            sp(&nb, "%.*s)", (int)(e - (q + 8)), q + 8);
+            p = e + 1;
+        }
+        sp(&nb, "%s", p);
+        free(body.buf);
+        body = nb;
+    }
     if (info->uses_gmem && (info->cbuf_mask & (1u << GMEM_BUFFER_INDEX))) fail(c, "cbuf %d clashes with gmem", GMEM_BUFFER_INDEX);
     if (info->cbuf_mask >> 18) fail(c, "cbuf index out of range");
     for (int i = 0; i < info->ntex; i++)
@@ -3268,9 +3356,15 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         info->gmem_bda = true;
         sp(&s, "layout(buffer_reference, std430, buffer_reference_align = 4) %sbuffer GHeap { uint w[]; };\n",
            c->uses_gmem_store ? "" : "readonly ");
-        sp(&s, "layout(std430, set = %d, binding = %d) readonly buffer GHeapAddr { uvec2 a; } gheap_;\n", set,
-           GMEM_BUFFER_INDEX);
-        sp(&s, "#define gmem_ GHeap(gheap_.a)\n");
+        if (maxwell_gmem_chunk_shift) {  // (the heap in blocks, each block's address less its start: maxwell_gmem_chunk_shift)
+            sp(&s, "layout(std430, set = %d, binding = %d) readonly buffer GHeapAddr { uvec2 a[16]; } gheap_;\n", set,
+               GMEM_BUFFER_INDEX);
+            sp(&s, "#define gmem_w(i) GHeap(gheap_.a[min((i) >> %du, 15u)]).w[i]\n", maxwell_gmem_chunk_shift);
+        } else {
+            sp(&s, "layout(std430, set = %d, binding = %d) readonly buffer GHeapAddr { uvec2 a; } gheap_;\n", set,
+               GMEM_BUFFER_INDEX);
+            sp(&s, "#define gmem_ GHeap(gheap_.a)\n");
+        }
     } else if (info->uses_gmem)
         sp(&s, "layout(std430, set = %d, binding = %d) %sbuffer GMem { uint w[]; } gmem_;\n", set, GMEM_BUFFER_INDEX,
            c->uses_gmem_store ? "" : "readonly ");
@@ -3357,7 +3451,7 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         for (int rt = 0; rt < 8; rt++) {
             if (!((c->omap_target >> (rt * 4)) & 0xF)) continue;
             int kind = key ? key->rt_kind[rt] : 0;
-            sp(&s, "layout(location = %d) out %s c%d;\n", rt, kind == 1 ? "ivec4" : kind == 2 ? "uvec4" : "vec4", rt);
+            sp(&s, "layout(location = %d) out %s c%d;\n", rt, RT_SINT(kind) ? "ivec4" : RT_UINT(kind) ? "uvec4" : "vec4", rt);
         }
         // a written depth is compared EQUAL against other shaders' positions too - TOTK's light classifier writes a
         // material id as depth, its lighting passes draw quads at that z: precise, as gl_Position, so the driver keeps
@@ -3421,7 +3515,7 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
             uint32_t m = (c->omap_target >> (rt * 4)) & 0xF;
             if (!m) continue;
             int kind = key ? key->rt_kind[rt] : 0;
-            const char *cv = kind == 1 ? "int" : kind == 2 ? "uint" : "";
+            const char *cv = RT_SINT(kind) ? "int" : RT_UINT(kind) ? "uint" : "";
             for (int comp = 0; comp < 4; comp++) {
                 if (!(m & (1u << comp))) continue;
                 if (dbg) {
@@ -3429,6 +3523,12 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
                     else sp(&s, "  c%d[%d] = %s(dbgv);\n", rt, comp, cv);
                 } else if (r < 256 && c->reg_used[r]) {
                     if (kind == 0) sp(&s, "  c%d[%d] = as_f(r%d);\n", rt, comp, r);
+                    // (narrow integer targets: the register's low bits, as NVIDIA's hardware stores them; Mali
+                    // saturates wider values - the BC4 blocks drawn through RGBA16_UINT, SavageWindRecomp 9950b9e)
+                    else if (kind == 5) sp(&s, "  c%d[%d] = r%d & 0xFFFFu;\n", rt, comp, r);
+                    else if (kind == 6) sp(&s, "  c%d[%d] = r%d & 0xFFu;\n", rt, comp, r);
+                    else if (kind == 7) sp(&s, "  c%d[%d] = int(r%d << 16) >> 16;\n", rt, comp, r);
+                    else if (kind == 8) sp(&s, "  c%d[%d] = int(r%d << 24) >> 24;\n", rt, comp, r);
                     else sp(&s, "  c%d[%d] = %s(r%d);\n", rt, comp, cv, r);
                 } else {
                     sp(&s, "  c%d[%d] = 0;\n", rt, comp);
@@ -3624,7 +3724,7 @@ ShaderInfo *maxwell_translate_bounded(const uint8_t *blob, size_t max_size, size
         for (int rt = 0; rt < 8; rt++) {
             if (!((c->omap_target >> (rt * 4)) & 0xF)) continue;
             int kind = key ? key->rt_kind[rt] : 0;
-            sp(&s, "  %s4 c%d [[color(%d)]];\n", kind == 1 ? "int" : kind == 2 ? "uint" : "float", rt, rt);
+            sp(&s, "  %s4 c%d [[color(%d)]];\n", RT_SINT(kind) ? "int" : RT_UINT(kind) ? "uint" : "float", rt, rt);
         }
         if (c->omap_depth) { sp(&s, "  float depth [[depth(any)]];\n"); info->writes_depth = true; }
         sp(&s, "};\n");

@@ -115,6 +115,7 @@ uint32_t ipc_connect_named_port(const char *name);
 enum { RT_REBOOT_NONE, RT_REBOOT_GAME, RT_REBOOT_TITLE };  // GAME: boot again at once; TITLE: start screen
 void rt_request_reboot(int kind);  // any thread; the window loop (ui_run) returns it and main() carries it out
 int rt_reboot_requested(void);
+unsigned rt_reboot_count(void);
 extern volatile int g_rt_unwind;   // set while guest threads are being stopped (kernel.c)
 void rt_unwind_point(void);        // guest threads: unwind to thread_main if a reboot is stopping them
 

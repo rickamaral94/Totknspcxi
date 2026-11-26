@@ -163,6 +163,54 @@ static uint64_t stub_tls(uint32_t *s, uint64_t at, uint64_t site, int n, int off
     return 80;
 }
 
+// ---- the Switch's tick rate. The game counts the system counter at 19.2 MHz (the sdk reads it inline, svc
+// GetSystemTick answers it: rt_ticks). Snapdragon's counter runs at that rate, MediaTek's at 13 MHz (POCO X8 Pro Max's
+// Dimensity, 2026-11-13 log): read as they are, every span the game measured came out 0.68 of its length. Where the
+// counter's rate differs, each read is scaled to 19.2 MHz (counter x g_tick_mul >> 32) and cntfrq_el0 answers 19.2 MHz,
+// as MKWDroid's guest_ticks does on its own clock. LARECOMP_TICK_HZ=<Hz> (a test): take the counter for that rate and
+// scale with it, 19200000 included (the scaling path, with no change of rate).
+#define SWITCH_HZ 19200000ull
+#define MRS_CNTFRQ 0xD53BE000u
+static uint64_t g_tick_mul;  // (0: read as they are)
+static void tick_init(void) {
+    uint64_t f;
+    __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(f));
+    const char *e = getenv("LARECOMP_TICK_HZ");
+    bool forced = e && strtoull(e, NULL, 0) > 0;
+    if (forced) f = strtoull(e, NULL, 0);
+    g_tick_mul = forced || (f && f != SWITCH_HZ) ? (uint64_t)(((__uint128_t)SWITCH_HZ << 32) / (f ? f : SWITCH_HZ)) : 0;
+    LOG("[native] the game's code runs on the CPU (counter %llu Hz%s%s)\n", (unsigned long long)f,
+        f == SWITCH_HZ ? ", as the Switch's" : ": not the Switch's 19.2 MHz - its reads are scaled to it",
+        forced ? ", LARECOMP_TICK_HZ" : "");
+}
+// mrs xN, cntpct_el0 / cntvct_el0 -> the counter scaled: xN = (cntvct x mul) >> 32 (three temporaries, none of them xN)
+static uint64_t stub_cnt(uint32_t *s, uint64_t at, uint64_t site, int n) {
+    int t[3], k = 0;
+    for (int r = 14; r <= 17 && k < 3; r++)
+        if (r != n) t[k++] = r;
+    int a = t[0], b = t[1], c = t[2];
+    s[0] = enc_stp_pre(a, b, SP, -32);
+    s[1] = enc_str(c, SP, 16);
+    s[2] = MRS_CNTVCT | a;                                       // mrs xa, cntvct_el0
+    s[3] = enc_ldr_lit(b, at + 12, at + 40);                     // ldr xb, =mul
+    s[4] = 0x9BC07C00u | (b << 16) | (a << 5) | c;               // umulh xc, xa, xb
+    s[5] = 0x9B007C00u | (b << 16) | (a << 5) | a;               // mul xa, xa, xb
+    s[6] = 0x93C00000u | (a << 16) | (32 << 10) | (c << 5) | n;  // extr xN, xc, xa, #32
+    s[7] = enc_ldr(c, SP, 16);
+    s[8] = enc_ldp_post(a, b, SP, 32);
+    s[9] = enc_b(at + 36, site + 4);
+    memcpy(&s[10], &g_tick_mul, 8);
+    return 48;
+}
+// mrs xN, cntfrq_el0 -> xN = 19200000 (the rate the scaled reads count at)
+static uint64_t stub_frq(uint32_t *s, uint64_t at, uint64_t site, int n) {
+    s[0] = 0xD2800000u | ((uint32_t)(SWITCH_HZ & 0xFFFF) << 5) | n;          // movz xN, #0xf800
+    s[1] = 0xF2A00000u | ((uint32_t)(SWITCH_HZ >> 16) << 5) | n;             // movk xN, #0x124, lsl #16
+    s[2] = enc_b(at + 8, site + 4);
+    s[3] = 0xD503201Fu;
+    return 16;
+}
+
 // ---- the game's fixes (tools/patches.py, the same ones at the same addresses: there they are C in place of one
 // instruction of the generated code). Here a stub calls native_patch_gate with the fix's number; its handler works on
 // the Cpu and says how to go on: 0 run the original instruction (from the stub) and go on after it, 1 the fix's
@@ -240,7 +288,32 @@ void rt_cutscene_tick(int which);  // nvn/objects.c: a cutscene function's entry
 static int fix_cutscene0(Cpu *c) { (void)c; rt_cutscene_tick(0); return 0; }
 static int fix_cutscene1(Cpu *c) { (void)c; rt_cutscene_tick(1); return 0; }
 static int fix_cutscene2(Cpu *c) { (void)c; rt_cutscene_tick(2); return 0; }
-static int fix_cutscene3(Cpu *c) { (void)c; rt_cutscene_tick(3); return 0; }
+// Mark 3 is the update of the scripted camera animation action (ExecuteCameraMoveCameraAnimationInstructions, x0):
+// it counts only while the action has instructions ([x0 + 0x20]) and isn't done yet ([x0 + 0x18] bit 31), and the
+// store that marks it done (main+0xa5a670, str w10, [x19, #0x18]) ends the 30 fps hold right away instead of 200 ms
+// later - totk-android's admission and completion rule (MacNativeGames' FPS60 hardening, MIT).
+// LARECOMP_CUTSCENE_EXIT=0: every mark 3 call counts, and the hold ends 200 ms after the last, as before.
+void rt_cutscene_done(void);  // nvn/objects.c
+static int cutscene_exit_on(void) {
+    static int on = -1;
+    if (on < 0) on = !getenv("LARECOMP_CUTSCENE_EXIT") || atoi(getenv("LARECOMP_CUTSCENE_EXIT"));
+    return on;
+}
+static int fix_cutscene3(Cpu *c) {  // ldr x8, [x0, #0x20]
+    if (cutscene_exit_on()) {
+        uint64_t a = c->x[0], instr;
+        uint32_t flags;
+        memcpy(&instr, (const void *)(uintptr_t)(a + 0x20), 8);
+        memcpy(&flags, (const void *)(uintptr_t)(a + 0x18), 4);
+        if (!instr || (flags & 0x80000000u)) return 0;
+    }
+    rt_cutscene_tick(3);
+    return 0;
+}
+static int fix_camera_done(Cpu *c) {  // str w10, [x19, #0x18] (bit 31 set: the action is over)
+    if (cutscene_exit_on() && ((uint32_t)c->x[10] & 0x80000000u)) rt_cutscene_done();
+    return 0;
+}
 uint32_t rt_interval_pick(uint32_t game);
 static int fix_interval_pick(Cpu *c) { c->x[21] = rt_interval_pick((uint32_t)c->x[21]); return 0; }  // mov w8, #0x3c
 // Free aspect: the four places 1.4.3 hands an aspect ratio to a camera's perspective projection (sead's +0xb0), the
@@ -256,6 +329,132 @@ static int fix_aspect_load(Cpu *c, int rn, uint32_t off) {  // ldr s0, [x<rn>, #
 static int fix_aspect_cam(Cpu *c) { return fix_aspect_load(c, 19, 0x140); }
 static int fix_aspect_setup(Cpu *c) { return fix_aspect_load(c, 22, 0x68); }
 static int fix_aspect_view(Cpu *c) { vset(c, 0, rt_widen_aspect(vget(c, 0) / vget(c, 1))); return 3; }  // fdiv s0, s0, s1
+// Equipment-switch cooldown: the threshold the player update steps its countdown down to, FLT_EPSILON in the game, 0 on
+// real time - a measured step's remainder in (0, FLT_EPSILON] kept weapon, shield and bow changes locked until a load.
+bool rt_realtime(void);  // nvn/objects.c
+static int fix_cooldown(Cpu *c) { if (!rt_realtime()) return 0; c->v[1] = 0; return 3; }  // movi v1.2s, #0x34, lsl #24
+// Optional rendering reductions, after totk-android's "opt-in game rendering reductions" (games/totk/runtime/
+// game_patches_v143.c, MIT, Copyright (c) 2026 MacNativeGames contributors; NOTICE.md) - the same sites, as hooks here:
+//  - the shadow map's size: main+0x6835a4 (fcvtzs w11, s18: the size from the distance) takes a fixed one, and its width
+//    modulation (+0x6835a8 ..) is skipped to +0x683604, where the original rounding and packing go on;
+//  - the game's own FXAA: its effective flag's store (main+0x586944, strb w9, [x0, #0x18c]) stores 0;
+//  - the render camera's far plane: main+0x628c30 (ldr s0, [x19, #0x138]) loads min(far, cap) and keeps it there.
+// rt_render_opts (nvn/objects.c: the settings, LARECOMP_SHADOW_RES / LARECOMP_GAME_FXAA / LARECOMP_FAR_CLAMP) says which.
+void rt_render_opts(int *shadow, int *fxaa, float *far_cap);
+static int fix_shadow_size(Cpu *c) {  // fcvtzs w11, s18
+    int shadow, fxaa;
+    float far_cap;
+    rt_render_opts(&shadow, &fxaa, &far_cap);
+    if (!shadow) return 0;
+    static int n;
+    if (n < 4) n++, LOG("[totk] shadow map %d instead of the game's %d\n", shadow, (int)vget(c, 18));
+    c->x[11] = (uint32_t)shadow;
+    return 1;  // (on at +0x683604)
+}
+static int fix_game_fxaa(Cpu *c) {  // strb w9, [x0, #0x18c]
+    int shadow, fxaa;
+    float far_cap;
+    rt_render_opts(&shadow, &fxaa, &far_cap);
+    if (fxaa) return 0;
+    *(uint8_t *)(uintptr_t)(c->x[0] + 0x18c) = 0;
+    return 3;
+}
+static int fix_far_clamp(Cpu *c) {  // ldr s0, [x19, #0x138]
+    int shadow, fxaa;
+    float far_cap, far;
+    rt_render_opts(&shadow, &fxaa, &far_cap);
+    if (far_cap <= 0) return 0;
+    memcpy(&far, (const void *)(uintptr_t)(c->x[19] + 0x138), 4);
+    if (far > far_cap) {
+        static int n;
+        if (n < 4) n++, LOG("[totk] far plane %.0f m capped at %.0f\n", far, far_cap);
+        far = far_cap, memcpy((void *)(uintptr_t)(c->x[19] + 0x138), &far, 4);
+    }
+    vset(c, 0, far);
+    return 3;
+}
+// Frame controller hysteresis (totk-android's patch_fps60_hysteresis, MIT, MacNativeGames' controller analysis; its
+// TOTK_FPS60_HYSTERESIS): the game's frame-interval controller (main+0x2db174) counts the over-budget frames in a row in
+// [x20 + 0x48] and raises the interval (60 -> 30) once the count reaches its limit [x20 + 0x10] (2 in the game: the third
+// late frame in a row); then a cooldown [x20 + 0x14] (6) must pass before it tries to lower it again. Three loads of
+// those words become constants: the limit 6 (the interval goes up on the seventh late frame in a row) at +0x2db2b8, and the
+// cooldown 2 at +0x2db354 / +0x2db3f0. None of these sites is one of the 60 fps fixes' (+0x2db204 / 22c / 238 / 340 / 34c): the
+// lowest interval (w8 = 1) and the pick are theirs and aren't read here, so both go together. Where the game's pick matters:
+// whenever the 60 fps fixes are on (rt_fps60: Frame rate Auto, 60, 40 / 45). Video > "Hold 60 fps through short dips", off
+// by default (LARECOMP_FPS60_HYSTERESIS=0 / 1 overrides it): totk-android found it neutral to better on an 8 Elite but
+// worse on another chip (p95 +4-5 ms).
+static int hysteresis_on(void) {
+    static int env = -2;
+    if (env == -2) {
+        const char *e = getenv("LARECOMP_FPS60_HYSTERESIS");
+        env = e && *e ? atoi(e) != 0 : -1;
+        if (env >= 0) LOG("[totk] LARECOMP_FPS60_HYSTERESIS=%d\n", env);
+    }
+    return (env >= 0 ? env > 0 : g_settings.fps60_hysteresis) && rt_fps60();  // (read each time: the menu's switch applies at once)
+}
+static int fix_hyst_limit(Cpu *c) {  // ldr w12, [x20, #0x10]
+    if (!hysteresis_on()) return 0;
+    c->x[12] = 6;
+    return 3;
+}
+static int fix_hyst_cooldown12(Cpu *c) {  // ldr w12, [x20, #0x14]
+    if (!hysteresis_on()) return 0;
+    c->x[12] = 2;
+    return 3;
+}
+static int fix_hyst_cooldown9(Cpu *c) {  // ldr w9, [x20, #0x14]
+    if (!hysteresis_on()) return 0;
+    c->x[9] = 2;
+    return 3;
+}
+// Shadow caps, opt-in (totk-android's patch_shadow_cascades / patch_point_shadows, MIT, MacNativeGames; its
+// TOTK_SHADOW_CASCADES / TOTK_POINT_SHADOWS): each directional cascade and each shadowed point light is a set of caster
+// passes the drawing thread records, so fewer take CPU off it, at a cost in shadow coverage / pop.
+//  - cascades: the game's shadow update has the configured count in w15 and the active one in w16 when every path has
+//    joined at main+0x6834fc; main+0x683500 (mov w6, #0xbb0, run after the hook) is where both go down to N (1..3), before they
+//    are published (+0x683504 .., the descriptor count at +0x68362c, the split loop). w16 is the stub's (x16 / x17 come back
+//    from its frame, [guest sp - 48]), so its new value goes there as well. Read every time (applies at once);
+//    LARECOMP_SHADOW_CASCADES=<0..3> over the Video tab's choice.
+//  - point shadows: the light system sizes its pool of point shadows with the setting's budget (main+0xb866b4, ldr w1, [x0]:
+//    the accessor's result, the game's own count): min(budget, N) there, never more than the game's. Read when the pool is made
+//    (the game's lights set up): a change comes with the next one. LARECOMP_POINT_SHADOWS=<0..64>: N (0: the game's).
+static int shadow_cap_env(const char *name, int *cache) {
+    if (*cache == -2) {
+        const char *e = getenv(name);
+        *cache = e && *e ? atoi(e) : -1;
+    }
+    return *cache;
+}
+static int fix_shadow_cascades(Cpu *c) {  // mov w6, #0xbb0
+    static int env = -2;
+    int e = shadow_cap_env("LARECOMP_SHADOW_CASCADES", &env);
+    int n = e >= 0 ? e : g_settings.shadow_cascades;
+    if (n < 1 || n > 3) return 0;
+    int32_t w15 = (int32_t)c->x[15], w16 = (int32_t)c->x[16];
+    if (w15 <= n && w16 <= n) return 0;
+    static int logged;
+    if (logged < 4) logged++, LOG("[totk] shadow cascades %d / %d capped at %d\n", (int)w15, (int)w16, n);
+    if (w15 > n) c->x[15] = (uint32_t)n;
+    if (w16 > n) {
+        uint64_t v = (uint32_t)n;
+        c->x[16] = v;
+        memcpy((void *)(uintptr_t)(c->sp - 48), &v, 8);  // (the stub gives x16 back from its frame)
+    }
+    return 0;
+}
+static int fix_point_shadows(Cpu *c) {  // ldr w1, [x0]
+    static int env = -2;
+    int e = shadow_cap_env("LARECOMP_POINT_SHADOWS", &env);
+    int n = e >= 0 ? e : g_settings.point_shadows;
+    if (n < 1 || n > 64) return 0;
+    int32_t budget;
+    memcpy(&budget, (const void *)(uintptr_t)c->x[0], 4);
+    if (budget <= n) return 0;
+    static int logged;
+    if (logged < 4) logged++, LOG("[totk] point light shadows %d capped at %d\n", (int)budget, n);
+    c->x[1] = (uint32_t)n;
+    return 3;
+}
 static int fix_fade_w8(Cpu *c) { return fade_step(c, 8); }
 static int fix_fade_w10(Cpu *c) { return fade_step(c, 10); }
 // PC timing follow-up (MIT, valentderah/totk-pc-recomp recomp/patches-v143.txt).
@@ -301,11 +500,30 @@ static const Fix fixes[] = {  // (canonical addresses, 0x7000000000 + the offset
     {143, 0x7002b23c7c, 0, 0xd100c3ff, fix_cutscene1, "cutscene mark"},
     {143, 0x700042c3bc, 0, 0xd10283ff, fix_cutscene2, "cutscene mark"},
     {143, 0x7000a5a188, 0, 0xf9401008, fix_cutscene3, "cutscene mark"},
+    {143, 0x7000a5a670, 0, 0xb9001a6a, fix_camera_done, "camera animation done"},
     {143, 0x70002db238, 0, 0x52800788, fix_interval_pick, "the interval picked (2 in cutscenes)"},
     {143, 0x7000628c74, 0, 0xbd414260, fix_aspect_cam, "camera aspect (update)"},
     {143, 0x7000b43460, 0, 0xbd406ac0, fix_aspect_setup, "camera aspect (setup)"},
     {143, 0x7001ff04f4, 0, 0x1e211800, fix_aspect_view, "camera aspect (viewport)"},
     {143, 0x700253fbb0, 0, 0x1e211800, fix_aspect_view, "camera aspect (viewport)"},
+    {143, 0x70002b036c, 0, 0x0f016681, fix_cooldown, "equipment-switch cooldown"},
+    {143, 0x70006835a4, 0x7000683604, 0x1e38024b, fix_shadow_size, "shadow map size"},
+    {143, 0x7000586944, 0, 0x39063009, fix_game_fxaa, "the game's FXAA"},
+    {143, 0x7000628c30, 0, 0xbd413a60, fix_far_clamp, "render far plane"},
+    {143, 0x70002db2b8, 0, 0xb940128c, fix_hyst_limit, "frame controller over-budget limit"},
+    {143, 0x70002db354, 0, 0xb940168c, fix_hyst_cooldown12, "frame controller cooldown"},
+    {143, 0x70002db3f0, 0, 0xb9401689, fix_hyst_cooldown9, "frame controller cooldown"},
+    {143, 0x7000683500, 0, 0x52817606, fix_shadow_cascades, "shadow cascade count"},
+    {143, 0x7000b866b4, 0, 0xb9400001, fix_point_shadows, "point light shadow budget"},
+};
+// The words around the shadow cap hooks, only checked (a different build stops the start, as a changed fix word does):
+// the cascade update's loads and stores of w15 / w16, and the point shadow pool's call.
+typedef struct { uint64_t addr; uint32_t word; } Guard;
+static const Guard guards[] = {
+    {0x7000683418, 0xb940fc0f}, {0x70006834f8, 0x2a0f03f0}, {0x70006834fc, 0xaa0903f1}, {0x7000683504, 0x3800ce30},
+    {0x7000683518, 0x6b01009f}, {0x700068351c, 0x1a9f8024}, {0x700068362c, 0xb904da0f},
+    {0x7000b866b0, 0x940003a8}, {0x7000b866b8, 0xaa1703e0}, {0x7000b866bc, 0xaa1403e2}, {0x7000b866c0, 0xaa1303e3},
+    {0x7000b866c4, 0x94000c6d}, {0x7000b87574, 0x91013260},
 };
 int native_patch_c(Cpu *c, uint32_t i) { return fixes[i].fn(c); }
 
@@ -342,6 +560,8 @@ static void prepare_module(Module *m) {
         uint32_t w = text[i];
         if ((w & 0xFFE0001Fu) == 0xD4000001u || (w & ~31u) == MRS_TPIDR || (w & ~31u) == MRS_TPIDRRO || (w & ~31u) == MSR_TPIDR)
             nsites++;
+        else if (g_tick_mul && ((w & ~31u) == MRS_CNTPCT || (w & ~31u) == MRS_CNTVCT || (w & ~31u) == MRS_CNTFRQ))
+            nsites++;
     }
     bool is_main = m->base == MAIN_BASE;
     uint64_t nfix = sizeof fixes / sizeof *fixes;
@@ -349,7 +569,7 @@ static void prepare_module(Module *m) {
     if (!asize) asize = 0x4000;
     plat_commit(area, asize);
     uint64_t at = area;
-    unsigned nsvc = 0, ntls = 0, ncnt = 0;
+    unsigned nsvc = 0, ntls = 0, ncnt = 0, nfrq = 0;
     for (uint64_t i = 0; i < nw; i++) {
         uint32_t w = text[i];
         uint64_t site = (uint64_t)(uintptr_t)&text[i];
@@ -358,12 +578,20 @@ static void prepare_module(Module *m) {
         else if ((w & ~31u) == MRS_TPIDRRO) len = stub_tls((uint32_t *)(uintptr_t)at, at, site, w & 31, 288, false), ntls++;
         else if ((w & ~31u) == MRS_TPIDR) len = stub_tls((uint32_t *)(uintptr_t)at, at, site, w & 31, 280, false), ntls++;
         else if ((w & ~31u) == MSR_TPIDR) len = stub_tls((uint32_t *)(uintptr_t)at, at, site, w & 31, 280, true), ntls++;
+        else if (g_tick_mul && ((w & ~31u) == MRS_CNTPCT || (w & ~31u) == MRS_CNTVCT))
+            len = stub_cnt((uint32_t *)(uintptr_t)at, at, site, w & 31), ncnt++;
+        else if (g_tick_mul && (w & ~31u) == MRS_CNTFRQ) len = stub_frq((uint32_t *)(uintptr_t)at, at, site, w & 31), nfrq++;
         else if ((w & ~31u) == MRS_CNTPCT) { text[i] = MRS_CNTVCT | (w & 31); ncnt++; continue; }
         if (!len) continue;
         text[i] = enc_b(site, at);
         at += len;
     }
     unsigned nfixed = 0;
+    for (uint32_t f = 0; is_main && g_game_version == 143 && f < sizeof guards / sizeof *guards; f++) {
+        uint32_t gw = *(const uint32_t *)(uintptr_t)(MAIN_BASE + (guards[f].addr - 0x7000000000ull));
+        if (gw != guards[f].word) FATAL("[native] main+%llx: %08x, not %08x\n",
+                                        (unsigned long long)(guards[f].addr - 0x7000000000ull), gw, guards[f].word);
+    }
     for (uint32_t f = 0; is_main && f < nfix; f++) {
         if (fixes[f].version != g_game_version) continue;
         uint64_t site = MAIN_BASE + (fixes[f].addr - 0x7000000000ull);
@@ -380,8 +608,9 @@ static void prepare_module(Module *m) {
     __builtin___clear_cache((char *)(uintptr_t)area, (char *)(uintptr_t)(area + asize));
     if (mprotect((void *)(uintptr_t)t0, tsz, PROT_READ | PROT_EXEC) || mprotect((void *)(uintptr_t)area, asize, PROT_READ | PROT_EXEC))
         FATAL("[native] %s: the code can't be made executable (errno %d)\n", m->name, errno);
-    LOG("[native] %s: %u svc, %u TLS, %u counter reads rewritten, %u fixes; stubs at %llx (%llu KB)\n", m->name, nsvc,
-        ntls, ncnt, nfixed, (unsigned long long)area, (unsigned long long)(asize >> 10));
+    LOG("[native] %s: %u svc, %u TLS, %u counter reads rewritten%s, %u rate reads, %u fixes; stubs at %llx (%llu KB)\n", m->name,
+        nsvc, ntls, ncnt, g_tick_mul ? " (scaled to 19.2 MHz)" : "", nfrq, nfixed, (unsigned long long)area,
+        (unsigned long long)(asize >> 10));
 }
 
 // The HLE slots as code: slot i = movz x17, #i; b trampoline (-> native_hle_gate)
@@ -405,17 +634,18 @@ static void prepare_hle(void) {
 
 void native_prepare(void) {
     if (!native_on()) return;
-    uint64_t f;
-    __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(f));
-    LOG("[native] the game's code runs on the CPU (counter %llu Hz%s)\n", (unsigned long long)f,
-        f == 19200000 ? ", as the Switch's" : ": NOT the Switch's 19.2 MHz - the game's timing will be off");
+    tick_init();
     memset(g_native_tab, 0, sizeof g_native_tab);
     for (int i = 0; i < g_nmodules; i++) prepare_module(&g_modules[i]);
     prepare_hle();
 }
 
 // The Switch's tick: the counter the rewritten reads see (rt_ticks, kernel.c)
-uint64_t native_ticks(void) { uint64_t v; __asm__ volatile("mrs %0, cntvct_el0" : "=r"(v)); return v; }
+uint64_t native_ticks(void) {
+    uint64_t v;
+    __asm__ volatile("mrs %0, cntvct_el0" : "=r"(v));
+    return g_tick_mul ? (uint64_t)(((__uint128_t)v * g_tick_mul) >> 32) : v;
+}
 #else
 #include "rt.h"
 bool native_wanted_for_version(int version) { (void)version; return false; }

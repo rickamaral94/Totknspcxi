@@ -109,11 +109,14 @@ __attribute__((constructor(101))) static void reserve_guest_space(void) {
 // wait), resets the renderer (textures, address-keyed caches) and all per-boot host state (RT_ON_RESET hooks:
 // services, HLE features, audio), empties the kernel, wipes guest memory, and boots again.
 static _Atomic int g_reboot;
+static _Atomic unsigned g_reboots;  // (requests so far)
 void rt_request_reboot(int kind) {
     LOG("[reboot] requested (%s)\n", kind == RT_REBOOT_TITLE ? "start screen" : "boot");
     g_reboot = kind;
+    g_reboots++;
 }
 int rt_reboot_requested(void) { return g_reboot; }
+unsigned rt_reboot_count(void) { return g_reboots; }  // (the watchdog: a reboot between two of its looks, vulkan/watchdog.c)
 
 // LARECOMP_REBOOT_AT=<frame>:<game | title>[,...] (test): at that presented frame, restart the game in place, or go
 // back to the start screen (with LARECOMP_LAUNCHER_AUTOPLAY it plays again).
@@ -149,7 +152,11 @@ void audio_stop(void);                // services/audio.c: its threads read gues
 static void reboot_idle(void) {  // (main thread, while guest threads stop) keep the window alive
     SDL_Event e;
     while (SDL_PollEvent(&e))
+#ifdef __ANDROID__
+        if (e.type == SDL_EVENT_QUIT) { extern void rt_window_closed(void); rt_window_closed(); }  // (vulkan/device.c)
+#else
         if (e.type == SDL_EVENT_QUIT) { LOG("window closed\n"); exit(0); }
+#endif
 }
 
 static void teardown(void) {

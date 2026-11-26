@@ -59,6 +59,10 @@ Android only (arm64, Vulkan). Windows, Linux or macOS may be used as development
 - Frame rate: Video > Frame rate has 30, Auto (prefers 60, cutscenes held at 30) and 60. The game's own dynamic
   resolution is off; the scene is 1600x896, scaled to the output (FSR 1, GSR, SMAA / FXAA).
 - Video > Aspect ratio > Unlocked: the world and the menus fill a wide screen (the HUD stays in the middle 16:9).
+- Video > Frame generation (LSFG), experimental: frames made between the game's own (2x, 3x, 4x). It is Lossless Scaling's,
+  ported from Eden through Swap2-Native, and needs your own `Lossless.dll` from Lossless Scaling in the `LSFG` or
+  `Download` folder of the phone's storage. The DLL is never included. This code is GPL-3.0-or-later, so the APK built
+  with it is too ([NOTICE.md](NOTICE.md)).
 - Not done yet: most of the map, sustained 60 fps on a hot phone, the HUD at the screen's edges in wide mode.
 
 > [!IMPORTANT]
@@ -108,11 +112,20 @@ android/run_boot.sh 120                                      # start the game, l
 ## Support the project
 
 TOTKDroid is a free, independent project. If you enjoy it and would like to support its development, you can sponsor
-me on GitHub. Your support helps me dedicate time to fixing bugs, improving performance and compatibility, and working
-on future releases. Sponsorship is entirely optional: it does not unlock features or guarantee specific fixes. Bug
-reports, device tests, and contributions are also greatly appreciated.
+me on GitHub, Ko-fi, Buy Me a Coffee or via **Pix**. Your support helps me dedicate time to fixing bugs, improving performance and
+compatibility, and working on future releases. Sponsorship is entirely optional: it does not unlock features or
+guarantee specific fixes. Bug reports, device tests, and contributions are also greatly appreciated.
+
+Current goal: buy a **POCO X7 Pro ($455)**, a test device equipped with a MediaTek Dimensity SoC and Mali GPU to improve testing and optimize performance across all our ports (BOTWRecompAndroid, TOTKDroid, LASRecompAndroid, and Swap2-Native). The badge below shows total donations received across all platforms; I update it by hand.
+
+[![POCO X7 Pro goal](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2Fmamcjr%2FBOTWRecompAndroid%2Fmain%2F.github%2Fdonation-goal.json&query=%24.raised&prefix=%24&color=2EA043&logo=xiaomi&logoColor=white&label=POCO%20X7%20Pro%20goal&suffix=%20%2F%20%24455)](https://github.com/mamcjr/BOTWRecompAndroid/blob/main/.github/donation-goal.json)
 
 [![Sponsor on GitHub](https://img.shields.io/badge/Sponsor-on%20GitHub-EA4AAA?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/mamcjr)
+[![Ko-fi](https://img.shields.io/badge/Ko--fi-mamcjr-FF5E5B?logo=kofi&logoColor=white)](https://ko-fi.com/mamcjr)
+[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-mamcjr-FFDD00?logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/mamcjr)
+[![Pix](https://img.shields.io/badge/Pix-Random%20Key-32BCAD?logo=pix&logoColor=white)](#support-the-project)
+
+> **Pix (Brazil only — random key):** `6c326b56-6caf-4c3a-bcf7-1fa8ad2abd16`
 
 ## Credits
 
@@ -136,6 +149,7 @@ reports, device tests, and contributions are also greatly appreciated.
 - [Revivedx](https://github.com/Revivedx) for [SavageWindRecomp](https://github.com/Revivedx/SavageWindRecomp) (MIT):
   the SDK 20 kernel fixes, setjmp, NVN 55.
 - [Nycolazs](https://github.com/Nycolazs) for LASRecomp-Android-Plus (MIT): Vulkan driver compatibility.
+- [Eden](https://git.eden-emu.dev/eden-emu/eden) and [lsfg-vk](https://github.com/PancakeTAS/lsfg-vk) (GPL-3.0-or-later): Lossless Scaling frame generation, through Swap2-Native's C port (runtime/nvn/vulkan/lsfg, NOTICE.md).
 - The [zeldaret/botw](https://github.com/zeldaret/botw) decompilation and [open-ead/sead](https://github.com/open-ead/sead),
   for what is known about the engine TOTK grew from.
 - [Mbed TLS](https://github.com/Mbed-TLS/mbedtls) (Apache 2.0, AES and SHA-256 for the NSP/XCI import) and

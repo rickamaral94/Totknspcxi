@@ -10,7 +10,8 @@
 //   .75x / .50x / .25x  of Match display
 //   Dynamic        Match display, lowered in steps while the GPU can't hold the frame rate and raised again when it
 //                  can (each change reallocates the render targets: a short hitch, so it changes rarely, with hysteresis)
-// Test overrides: LARECOMP_SCALE=<f> (the scene's height = 900 x f), LARECOMP_WIDE_TEST=<f> (forced shape).
+// Test overrides: LARECOMP_SCALE=<f> (the scene's height = 900 x f), LARECOMP_WIDE_TEST=<f> (a window of that shape -
+// its aspect over 16:9 - in the middle of the real one, as if the screen were that).
 #include <math.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -59,10 +60,9 @@ static void dyn_update(double now, double gpu_ms) {
     double want = framepace_on() && framepace_target() > 0 ? 1000.0 / framepace_target()
                 : g_present_vsyncs > 0 ? 1000.0 / 60 * g_present_vsyncs : 1000.0 / 30;
 #ifdef __ANDROID__
-    // Frame generation holds the real game at its own base rate, independently of the NVN interval.
-    extern int fg_base_fps(void);
-    int base = fg_base_fps();
-    if (base > 0) want = 1000.0 / base;
+    if (g_settings.fps_mode == 3) want = 50.0;
+    else if (g_settings.fps_mode == 4) { extern int vk_between_fps(void); want = 1000.0 / vk_between_fps(); }
+    else if (g_settings.fps_mode == 5) { extern int vk_unlocked_fps(void); want = 1000.0 / vk_unlocked_fps(); }
 #endif
     g_dyn_dt_sum += dt;
     g_dyn_n++;
@@ -85,13 +85,6 @@ static void dyn_update(double now, double gpu_ms) {
     // comes out of the frame's budget too - the real frame has to leave it room, or it misses its slot and the screen
     // shows an image twice (vulkan/framegen.c)
     double want_gpu = want;
-#ifdef __ANDROID__
-    {
-        extern double fg_gpu_ms_per_real(void);
-        double fg = fg_gpu_ms_per_real();
-        if (fg > 0) want_gpu = fmax(want * 0.5, want - fg);
-    }
-#endif
     // With the GPU's time: slow frames lower the scale only while the GPU is busy most of them - else the CPU holds
     // them, and a smaller image doesn't help (on BOTW's POCO 36 ms frames with 25 ms of GPU kept lowering it; TOTK's
     // render thread is its limit, docs/TOTK-PORT.md)
@@ -124,8 +117,18 @@ void output_scale(double dw, double dh, bool reshape_allowed, double now, double
     static double forced = -1, wide_test = -1;
     if (forced < 0) forced = getenv("LARECOMP_SCALE") ? atof(getenv("LARECOMP_SCALE")) : 0;
     if (wide_test < 0) wide_test = getenv("LARECOMP_WIDE_TEST") ? atof(getenv("LARECOMP_WIDE_TEST")) : 0;
-    double shape = wide_test > 0 ? wide_test : (dw / dh) / (16.0 / 9.0);
-    bool reshape = reshape_allowed && fabs(shape - 1.0) > 0.005;
+    double ox = 0, oy = 0;  // (LARECOMP_WIDE_TEST: a window of that shape in the middle of the real one, as a screen)
+    if (wide_test > 0) {
+        double ww = fmin(dw, dh * 16.0 / 9.0 * wide_test), wh = ww / (16.0 / 9.0 * wide_test);
+        ox = (dw - ww) / 2, oy = (dh - wh) / 2, dw = ww, dh = wh;
+        fit = fmin(dw / 1920.0, dh / 1080.0);
+    }
+    double shape = (dw / dh) / (16.0 / 9.0);
+    // Only wider than 16:9: the game's cameras widen to the window (hle/widescreen.c rt_persp_update), and its HUD and
+    // menus move out to the sides. Narrower (4:3, 16:10), nothing narrows them: the 16:9 view went into a narrower
+    // image, squeezed from the sides (an Anbernic RG477M, 4:3). There the 16:9 image fits the window with bars above
+    // and below, as with Original.
+    bool reshape = reshape_allowed && shape > 1.005;
     if (!reshape) shape = 1.0;
     // the final image: the window's resolution, in units of the Switch's 1080 lines
     double h = fmax(reshape ? dh / 1080.0 : fit, 0.1);
@@ -137,7 +140,12 @@ void output_scale(double dw, double dh, bool reshape_allowed, double now, double
         static double env_lines = -1;
         if (env_lines < 0) env_lines = getenv("LARECOMP_OUT_LINES") ? atof(getenv("LARECOMP_OUT_LINES")) : 0;
         out_auto = env_lines <= 0 && g_settings.out_lines == OUT_AUTO;  // (Auto: 1080 lines at most)
-        double out_lines = env_lines > 0 ? env_lines : out_auto ? 1080 : g_settings.out_lines;
+        // Auto with RAM saving on (vulkan/exec.c vk_low_ram - the weak devices): 720. On a Galaxy Tab A9+ (Adreno 619,
+        // 1920x1200) the scene's upscale and the final image's passes at 1080 lines took ~23 of the frame's ~74 ms of
+        // GPU; 720 lines: 13.2 -> 14.7 fps in the world (2026-11-14)
+        extern bool vk_low_ram(void);
+        double auto_lines = vk_low_ram() ? 720 : 1080;
+        double out_lines = env_lines > 0 ? env_lines : out_auto ? auto_lines : g_settings.out_lines;
         if (out_lines > 0 && sy * 1080.0 > out_lines) { double k = out_lines / (sy * 1080.0); sx *= k; sy *= k; }
     }
     h = sy;  // (Match display below: the final image's size, which is the screen's unless Output resolution is lower)
@@ -166,11 +174,8 @@ void output_scale(double dw, double dh, bool reshape_allowed, double now, double
     double scap = fmin(MAX_TEX / (1920.0 * o->scene_sx), MAX_TEX / (1080.0 * o->scene_sy));
     if (scap < 1.0) { o->scene_sx *= scap; o->scene_sy *= scap; }
     // where the image goes in the window: fills it when reshaped, else a fitted 16:9 box
-    if (reshape) { o->vw = dw; o->vh = dh; }
+    // (Stretched, #59: the 16:9 image over the whole window - on a 4:3 screen, no bars above and below)
+    if (reshape || g_settings.aspect == ASPECT_STRETCH) { o->vw = dw; o->vh = dh; }
     else { o->vw = 1920.0 * fit; o->vh = 1080.0 * fit; }
-    if (wide_test > 0) {
-        double f2 = fmin(dw / (1920.0 * wide_test), dh / 1080.0);
-        o->vw = 1920.0 * wide_test * f2; o->vh = 1080.0 * f2;
-    }
-    o->vx = (dw - o->vw) / 2; o->vy = (dh - o->vh) / 2;
+    o->vx = ox + (dw - o->vw) / 2; o->vy = oy + (dh - o->vh) / 2;
 }

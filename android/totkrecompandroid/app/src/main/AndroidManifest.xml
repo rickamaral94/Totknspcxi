@@ -10,6 +10,8 @@
     <uses-feature android:name="android.hardware.usb.host" android:required="false" />
 
     <uses-permission android:name="android.permission.VIBRATE" />
+    <!-- The start screen's banner: banner/banner.json and its picture from the repository's main (ui/launcher.mm) -->
+    <uses-permission android:name="android.permission.INTERNET" />
     <!-- The game code build in the foreground with the screen off (BuildService) -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />

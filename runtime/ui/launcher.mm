@@ -292,7 +292,7 @@ static void set_failure(int k) {
         "",
         "Choose the folder that holds the game files.",
         "Choose the folder that holds the game files.",
-        "Make sure there's about 40 GB free and try again.",
+        "Make sure there's about 17 GB free and try again.",
         "TOTKDroid runs The Legend of Zelda: Tears of the Kingdom 1.4.3, 1.4.2 or 1.0.0.",
         "Some files are missing. Choose the folder again; if it happens again, dump the game again.",
         "Try again: the build goes on where it stopped. If it keeps failing, report it on GitHub with the log."};
@@ -506,9 +506,9 @@ done:
 // no copy of its ~15 GB first; only the movies, opened by path, stay loose - LASRecompAndroid's), then the setup goes
 // on as on the desktop with the game code (runtime/gamebuild.c, on the phone itself). The Vulkan driver is
 // picked the same way (a Turnip .zip, copied to the drivers folder the activity loads from at start).
+#include <fcntl.h>
 #include <jni.h>
 #include "package_import.h"  // (android/totkrecompandroid/app/src/main/cpp: Import from NSP/XCI)
-#include "lsfg_extract.h"     // (the same: frame generation's shaders from Lossless.dll)
 std::atomic<bool> g_android_imported{false};
 static std::string g_driver_msg;
 static bool g_driver_restart;  // (the message asks for a restart: a Restart now button beside it)
@@ -525,6 +525,39 @@ static void android_call(const char *method) {  // a static method of the activi
     env->DeleteLocalRef(act);
 }
 
+// The app closed and opened again, the settings saved first (the menu's options read once as it starts: menu.mm)
+void launcher_restart_app(void) {
+    settings_save();
+    android_call("restartApp");
+}
+
+// Video > Frame generation > Import Lossless.dll: the system's file picker, a copy into the app's files
+// (TOTKRecompAndroidActivity importLsfgDll), then nativeLsfgImported - the result for the menu (BOTWRecomp e3ccd7a)
+extern "C" void vk_fg_dll_imported(void);  // (nvn/vulkan/framegen.c)
+static std::string g_lsfg_msg;  // (g_lock)
+void launcher_pick_lsfg_dll(void) { android_call("pickLsfgDll"); }
+std::string launcher_lsfg_import_msg(void) {
+    pthread_mutex_lock(&g_lock);
+    std::string m = g_lsfg_msg;
+    pthread_mutex_unlock(&g_lock);
+    return m;
+}
+extern "C" JNIEXPORT void JNICALL Java_com_totkrecompandroid_TOTKRecompAndroidActivity_nativeLsfgImported(JNIEnv *env, jclass,
+                                                                                                        jint result, jstring detail) {
+    const char *t = env->GetStringUTFChars(detail, NULL);
+    std::string d = t ? t : "";
+    if (t) env->ReleaseStringUTFChars(detail, t);
+    char msg[700];
+    if (result == 0) snprintf(msg, sizeof msg, tr("Lossless.dll imported: %s"), d.c_str());
+    else if (result == 1) msg[0] = 0;
+    else snprintf(msg, sizeof msg, tr("That didn't work: %s"), d.c_str());
+    fprintf(stderr, "[lsfg] import: %s\n", result == 0 ? d.c_str() : result == 1 ? "cancelled" : msg);
+    if (result == 0) vk_fg_dll_imported();
+    pthread_mutex_lock(&g_lock);
+    g_lsfg_msg = msg;
+    pthread_mutex_unlock(&g_lock);
+}
+
 static void android_call_int(const char *method, int v) {  // (one int argument)
     JNIEnv *env = (JNIEnv *)SDL_GetAndroidJNIEnv();
     jobject act = (jobject)SDL_GetAndroidActivity();
@@ -537,17 +570,57 @@ static void android_call_int(const char *method, int v) {  // (one int argument)
     env->DeleteLocalRef(act);
 }
 
-// (menu.mm, Video > Frame generation) the system's file picker for the user's Lossless.dll
-extern "C" void launcher_pick_lossless_dll(void) { android_call("pickLosslessDll"); }
+// A content:// URI the SDL dialog picked (Import fonts): its name, and a copy of it at an absolute path
+// (BOTWRecompAndroidActivity documentName / copyDocument)
+static std::string android_document_name(const std::string &uri) {
+    std::string v;
+    JNIEnv *env = (JNIEnv *)SDL_GetAndroidJNIEnv();
+    jobject act = (jobject)SDL_GetAndroidActivity();
+    if (!env || !act) return v;
+    jclass c = env->GetObjectClass(act);
+    jmethodID m = env->GetStaticMethodID(c, "documentName", "(Ljava/lang/String;)Ljava/lang/String;");
+    jstring u = env->NewStringUTF(uri.c_str());
+    jstring s = m ? (jstring)env->CallStaticObjectMethod(c, m, u) : NULL;
+    if (env->ExceptionCheck()) { env->ExceptionClear(); s = NULL; }
+    if (s) {
+        const char *t = env->GetStringUTFChars(s, NULL);
+        if (t) v = t, env->ReleaseStringUTFChars(s, t);
+        env->DeleteLocalRef(s);
+    }
+    env->DeleteLocalRef(u);
+    env->DeleteLocalRef(c);
+    env->DeleteLocalRef(act);
+    return v;
+}
+
+static bool android_copy_document(const std::string &uri, const std::string &dst) {
+    JNIEnv *env = (JNIEnv *)SDL_GetAndroidJNIEnv();
+    jobject act = (jobject)SDL_GetAndroidActivity();
+    if (!env || !act) return false;
+    jclass c = env->GetObjectClass(act);
+    jmethodID m = env->GetStaticMethodID(c, "copyDocument", "(Ljava/lang/String;Ljava/lang/String;)Z");
+    jstring u = env->NewStringUTF(uri.c_str()), d = env->NewStringUTF(dst.c_str());
+    bool ok = m && env->CallStaticBooleanMethod(c, m, u, d);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); ok = false; }
+    env->DeleteLocalRef(u);
+    env->DeleteLocalRef(d);
+    env->DeleteLocalRef(c);
+    env->DeleteLocalRef(act);
+    return ok;
+}
 
 // The log file (Driver compatibility; runtime/platform/android.c): written to a folder the player picks
 // (TOTKRecompAndroidActivity pickLogFolder / openLog), where a file manager can open it - Android/data/ is out of its reach
 extern "C" void android_log_file(bool on);
+extern "C" bool vk_adreno_8xx(const char *name);
+extern "C" bool vk_adreno_7xx_8xx(const char *name);  // (Driver compatibility's Automatic: runtime/nvn/vulkan/device.c)
+extern "C" const char *vk_driver_env_at_start(void);
 extern "C" void android_driver_logcat(bool on);
-extern "C" bool vk_adreno_8xx(const char *name);  // (Driver compatibility's Automatic: runtime/nvn/vulkan/device.c)
-extern "C" bool vk_lrz_auto(const char *name);    // (the LRZ's Automatic: the Adreno 8xx and the 740)
+extern "C" bool vk_lrz_auto(const char *name);    // (heap and LRZ Automatic: the Adreno 8xx and the 740, device.c)
 extern "C" bool vk_lrz_at_start(void);
+extern "C" bool vk_heap_file_possible(void);
 extern "C" const char *vk_gpu_name(void);
+extern "C" bool vk_inplace_auto(void);  // (in-place reads' Automatic: Adreno 7xx / 8xx and Mali - device.c)
 extern "C" const char *vk_driver_rejected(void);  // (runtime/nvn/vulkan/android_driver.c)
 extern "C" const char *vk_driver_desc(void);      // (its own name and version: runtime/nvn/vulkan/device.c)
 extern "C" bool vk_driver_is_turnip(void);
@@ -802,6 +875,57 @@ extern "C" JNIEXPORT jstring JNICALL Java_com_totkrecompandroid_TOTKRecompAndroi
 }
 
 // The import thread's cause of a failure (an exception: "IOException: ..."), ahead of nativeImportDone
+// nativeBuildRomfs for a romfs/ read by its path (the access to all files): its files listed and opened here, not one
+// by one through the file provider - that took hours at "Searching files... 0%" and then for the copy (#21, #16).
+static void list_romfs(const std::string &dir, const std::string &rel, std::vector<std::string> &paths, std::vector<uint64_t> &sizes) {
+    DIR *d = opendir(dir.c_str());
+    if (!d) return;
+    struct dirent *e;
+    while ((e = readdir(d))) {
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        std::string p = dir + "/" + e->d_name, r = rel.empty() ? e->d_name : rel + "/" + e->d_name;
+        struct stat st;
+        if (stat(p.c_str(), &st) != 0) continue;
+        if (S_ISDIR(st.st_mode)) list_romfs(p, r, paths, sizes);
+        else if (S_ISREG(st.st_mode)) paths.push_back(r), sizes.push_back((uint64_t)st.st_size);
+    }
+    closedir(d);
+}
+struct RomfsDir { const std::string *dir; const std::vector<std::string> *paths; };
+static int romfs_dir_open(void *ctx, int index) {
+    RomfsDir *r = (RomfsDir *)ctx;
+    return open((*r->dir + "/" + (*r->paths)[index]).c_str(), O_RDONLY | O_CLOEXEC);
+}
+extern "C" JNIEXPORT jstring JNICALL Java_com_totkrecompandroid_TOTKRecompAndroidActivity_nativeBuildRomfsDir(JNIEnv *env, jclass,
+                                                                                                           jstring dir) {
+    const char *c = env->GetStringUTFChars(dir, NULL);
+    std::string src = c ? c : "";
+    if (c) env->ReleaseStringUTFChars(dir, c);
+    set_job("Building the game data image...");
+    std::vector<std::string> paths;
+    std::vector<uint64_t> sizes;
+    list_romfs(src, "", paths, sizes);
+    std::vector<RomfsEntry> entries(paths.size());
+    uint64_t bytes = 0;
+    for (size_t i = 0; i < paths.size(); i++) entries[i] = {paths[i].c_str(), sizes[i]}, bytes += sizes[i];
+    fprintf(stderr, "[launcher] romfs/ read by its path: %zu files, %.1f GB (%s)\n", paths.size(), bytes / 1e9, src.c_str());
+    g_phase_base = g_done;  // (exefs/ copied: the image's bytes follow)
+    g_total = g_done + bytes;
+    char why[256] = "";
+    std::string dest = setup_dest(), romfs = dest + "/romfs";
+    mkdir(romfs.c_str(), 0755);
+    RomfsDir r = {&src, &paths};
+    bool ok = romfs_build_entries(entries.data(), (int)entries.size(), romfs_dir_open, &r, (dest + "/romfs.bin").c_str(),
+                                  romfs.c_str(), keep_loose, setup_progress, why, sizeof why);
+    if (ok) return NULL;
+    fprintf(stderr, "[launcher] romfs image: %s\n", why);
+    const char *what = why[0] ? why : "Could not build the game data image. Check free storage and try again.";
+    pthread_mutex_lock(&g_lock);
+    g_fail_detail = what;  // (nativeImportDone(5) follows)
+    pthread_mutex_unlock(&g_lock);
+    return env->NewStringUTF(what);
+}
+
 extern "C" JNIEXPORT void JNICALL Java_com_totkrecompandroid_TOTKRecompAndroidActivity_nativeImportDetail(JNIEnv *env, jclass,
                                                                                                          jstring what) {
     const char *c = what ? env->GetStringUTFChars(what, NULL) : NULL;
@@ -870,16 +994,6 @@ extern "C" JNIEXPORT void JNICALL Java_com_totkrecompandroid_TOTKRecompAndroidAc
     else if (result == 5 && detail.find("can't be used in place") != std::string::npos)  // (nothing copied: not the space, #16)
         set_job("Setup didn't finish", true, "These files can't be read where they are. Choose Copy them, or a folder on the phone's storage.");
     set_job_detail(detail);
-}
-
-// The user's Lossless.dll, picked under Video > Frame generation (TOTKRecompAndroidActivity importLosslessDll): its shaders
-// into filesDir/lsfg/spirv (lsfg_extract.cpp), read through the descriptor - the DLL itself is never stored. The
-// descriptor is owned from here on. Returns "<lsfg::Result>|<detail>"; the menu shows the state (lsfg_state).
-extern "C" JNIEXPORT jstring JNICALL Java_com_totkrecompandroid_TOTKRecompAndroidActivity_nativeLsfgImport(JNIEnv *env, jclass,
-                                                                                                         jint fd) {
-    char detail[512] = "";
-    int r = lsfg_import_fd(fd, detail, sizeof detail);
-    return env->NewStringUTF((std::to_string(r) + "|" + detail).c_str());
 }
 
 // ------------------------------------------------------------------ Android: Import from NSP/XCI
@@ -1063,6 +1177,10 @@ static void SDLCALL picked(void *, const char *const *files, int) {
 static const char *FONT_STD[] = {"nintendo_udsg-r_std_003.bfttf", "nintendo_udsg-r_std_003.ttf",
                                  "nintendo_udsgr_std_003.ttf", "nintendo_udsgr_std_003.bfttf"};
 static const char *FONT_EXT[] = {"nintendo_ext_003.bfttf", "nintendo_ext_003.ttf"};
+static const char *FONT_CJK[] = {"nintendo_udsg-r_org_zh-cn_003.bfttf", "nintendo_udsg-r_org_zh-cn_003.ttf",  // (pl.c)
+                                 "nintendo_udsg-r_ext_zh-cn_003.bfttf", "nintendo_udsg-r_ext_zh-cn_003.ttf",
+                                 "nintendo_udjxh-db_zh-tw_003.bfttf",   "nintendo_udjxh-db_zh-tw_003.ttf",
+                                 "nintendo_udsg-r_ko_003.bfttf",        "nintendo_udsg-r_ko_003.ttf"};
 static std::vector<std::string> g_font_picks;
 static std::string g_font_msg;
 
@@ -1088,12 +1206,27 @@ static void import_fonts() {
     mkdir("fonts", 0755);
     int ok = 0, skipped = 0;
     for (auto &src : picks) {
-        std::string base = src.substr(src.find_last_of('/') + 1), low = base;
+        std::string base = src.substr(src.find_last_of('/') + 1), low;
+#ifdef __ANDROID__
+        // Android's dialog hands back content:// URIs, which end in a document id ("primary%3ADownload%2F..." or a
+        // number) and which fopen can't open: the name and the copy come through the activity (issue #122)
+        bool uri = !src.compare(0, 10, "content://");
+        if (uri) base = android_document_name(src);
+#endif
+        low = base;
         for (auto &c : low) c = (char)tolower(c);
         bool known = false;
         for (auto n : FONT_STD) known |= low == n;
         for (auto n : FONT_EXT) known |= low == n;
+        for (auto n : FONT_CJK) known |= low == n;
         if (!known) { skipped++; continue; }
+#ifdef __ANDROID__
+        if (uri) {
+            char cwd[1024];
+            if (getcwd(cwd, sizeof cwd) && android_copy_document(src, std::string(cwd) + "/fonts/" + low)) ok++;
+            continue;
+        }
+#endif
         FILE *in = fopen(src.c_str(), "rb"), *out = fopen(("fonts/" + low).c_str(), "wb");
         if (in && out) {
             char buf[65536];
@@ -1111,6 +1244,7 @@ static void import_fonts() {
 static void remove_fonts() {
     for (auto n : FONT_STD) unlink((std::string("fonts/") + n).c_str());
     for (auto n : FONT_EXT) unlink((std::string("fonts/") + n).c_str());
+    for (auto n : FONT_CJK) unlink((std::string("fonts/") + n).c_str());
     g_font_msg = "Imported fonts removed: the substitute font is used.";
 }
 
@@ -1159,6 +1293,177 @@ static void load_logo(GpuDevice dev) {
 #endif
     g_logo_w = rgba->w, g_logo_h = rgba->h;
     SDL_DestroySurface(rgba);
+}
+
+// ------------------------------------------------------------------ banner (banner/README.md)
+// A picture above the version (lower right), put up or taken down without a new release: banner/banner.json in the
+// repository's main branch, read once per launch on a background thread - the start screen never waits for it, the
+// banner appears when it's ready. Offline, no manifest, switched off, outside its dates or a bad image: nothing shown.
+// The image is kept in <data>/cache/banner/ and downloaded again only when its name changes.
+#define BANNER_URL "https://raw.githubusercontent.com/mamcjr/TOTKDroid/main/banner/banner.json"
+static pthread_mutex_t g_banner_lock = PTHREAD_MUTEX_INITIALIZER;
+static std::vector<uint8_t> g_banner_px;  // decoded RGBA for the UI thread to upload, kept for a later start screen
+static int g_banner_w, g_banner_h;        // (g_banner_lock until g_banner_ready)
+static std::string g_banner_link;         // https:// page opened on a tap, "" for none
+static std::atomic<bool> g_banner_ready;
+#ifdef __APPLE__
+static id<MTLTexture> g_banner;
+#define BANNER_TEXID ((ImTextureID)(__bridge void *)g_banner)
+#else
+static uint64_t g_banner;
+#define BANNER_TEXID ((ImTextureID)g_banner)
+#endif
+
+// url (https, or file:// for tests) saved to dst, at most max_bytes; false on any failure, dst left as it was
+static bool banner_fetch(const std::string &url, const std::string &dst, int max_bytes) {
+#ifdef __ANDROID__
+    JNIEnv *env = (JNIEnv *)SDL_GetAndroidJNIEnv();  // (attaches this thread)
+    jobject act = (jobject)SDL_GetAndroidActivity();
+    if (!env || !act) return false;
+    jclass c = env->GetObjectClass(act);
+    jmethodID m = env->GetStaticMethodID(c, "download", "(Ljava/lang/String;Ljava/lang/String;I)Z");  // (the activity)
+    bool ok = false;
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    else if (m) {
+        jstring ju = env->NewStringUTF(url.c_str()), jd = env->NewStringUTF(dst.c_str());
+        ok = env->CallStaticBooleanMethod(c, m, ju, jd, (jint)max_bytes);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); ok = false; }
+        env->DeleteLocalRef(ju);
+        env->DeleteLocalRef(jd);
+    }
+    env->DeleteLocalRef(c);
+    env->DeleteLocalRef(act);
+    return ok;
+#else
+#ifdef _WIN32
+    const char *sr = getenv("SystemRoot");
+    std::string curl = std::string(sr ? sr : "C:\\Windows") + "\\System32\\curl.exe";
+#else
+    std::string curl = "/usr/bin/curl";
+#endif
+    std::string part = dst + ".part", max = std::to_string(max_bytes);
+    const char *av[] = {curl.c_str(), "-fsSL", "--max-time", "15", "--max-filesize", max.c_str(),
+                        "-A", "TOTKDroid/" LARECOMP_VERSION, url.c_str(), NULL};
+    PlatProc p = plat_spawn(av, part.c_str(), false);
+    if (!p || plat_proc_wait(p, true) != 0) { remove(part.c_str()); return false; }
+    remove(dst.c_str());
+    return rename(part.c_str(), dst.c_str()) == 0;
+#endif
+}
+
+// A field of the manifest's one flat object: a string's contents, or a bare value (true / false); "" when absent
+static std::string banner_field(const std::string &j, const char *key) {
+    std::string k = std::string("\"") + key + "\"";
+    size_t at = j.find(k);
+    if (at == std::string::npos || (at = j.find(':', at + k.size())) == std::string::npos) return "";
+    if ((at = j.find_first_not_of(" \t\r\n", at + 1)) == std::string::npos) return "";
+    if (j[at] == '"') {
+        size_t e = j.find('"', at + 1);
+        return e == std::string::npos ? "" : j.substr(at + 1, e - at - 1);
+    }
+    return j.substr(at, j.find_first_of(",} \t\r\n", at) - at);
+}
+
+static std::string read_small_file(const std::string &path) {
+    std::string s;
+    if (FILE *f = fopen(path.c_str(), "rb")) {
+        char buf[4096];
+        size_t n;
+        while ((n = fread(buf, 1, sizeof buf, f)) > 0 && s.size() < (64u << 10)) s.append(buf, n);
+        fclose(f);
+    }
+    return s;
+}
+
+static void *banner_thread(void *) {
+    const char *u = getenv("LARECOMP_BANNER_URL");  // (test) another manifest, e.g. file:///sdcard/.../banner.json
+    std::string url = u && *u ? u : BANNER_URL;
+    std::string dir = std::string(rt_data_root()) + "/cache";
+    mkdir(dir.c_str(), 0755);
+    dir += "/banner";
+    mkdir(dir.c_str(), 0755);
+    std::string manifest = dir + "/banner.json";
+    if (!banner_fetch(url, manifest, 64 << 10)) {
+        fprintf(stderr, "[launcher] banner: no manifest at %s\n", url.c_str());
+        return NULL;
+    }
+    std::string j = read_small_file(manifest);
+    remove(manifest.c_str());
+    std::string image = banner_field(j, "image"), link = banner_field(j, "link");
+    std::string start = banner_field(j, "start"), end = banner_field(j, "end");
+    char today[16] = "";
+    time_t now = time(NULL);
+    struct tm tm;
+#ifdef _WIN32
+    localtime_s(&tm, &now);
+#else
+    localtime_r(&now, &tm);
+#endif
+    strftime(today, sizeof today, "%Y-%m-%d", &tm);
+    if (banner_field(j, "enabled") != "true" || image.empty() || (!start.empty() && today < start) ||
+        (!end.empty() && today > end)) {
+        fprintf(stderr, "[launcher] banner: off (enabled %s, %s to %s, today %s)\n", banner_field(j, "enabled").c_str(),
+                start.c_str(), end.c_str(), today);
+        return NULL;
+    }
+    // the image: a name beside the manifest, or a full https:// URL; kept under its name (image.name says which)
+    std::string name = image.substr(image.rfind('/') + 1), img_url = image;
+    if (image.find("://") == std::string::npos) img_url = url.substr(0, url.rfind('/') + 1) + image;
+    bool name_ok = !name.empty() && name.size() < 100;
+    for (char ch : name) name_ok &= isalnum((unsigned char)ch) || ch == '.' || ch == '-' || ch == '_';
+    if (!name_ok || (image.find("://") != std::string::npos && image.compare(0, 8, "https://") != 0)) {
+        fprintf(stderr, "[launcher] banner: bad image name %s\n", image.c_str());
+        return NULL;
+    }
+    std::string png = dir + "/image.png", tag = dir + "/image.name";
+    if (read_small_file(tag) != name || !file_exists(png)) {
+        remove(tag.c_str());
+        if (!banner_fetch(img_url, png, 4 << 20)) {
+            fprintf(stderr, "[launcher] banner: can't download %s\n", img_url.c_str());
+            return NULL;
+        }
+        if (FILE *f = fopen(tag.c_str(), "wb")) fputs(name.c_str(), f), fclose(f);
+    }
+    SDL_Surface *src = SDL_LoadPNG(png.c_str());
+    SDL_Surface *rgba = src ? SDL_ConvertSurface(src, SDL_PIXELFORMAT_RGBA32) : NULL;
+    if (src) SDL_DestroySurface(src);
+    if (!rgba || rgba->w < 16 || rgba->h < 16 || rgba->w > 4096 || rgba->h > 4096) {
+        fprintf(stderr, "[launcher] banner: %s isn't a usable PNG\n", name.c_str());
+        if (rgba) SDL_DestroySurface(rgba);
+        remove(png.c_str());
+        remove(tag.c_str());
+        return NULL;
+    }
+    pthread_mutex_lock(&g_banner_lock);
+    g_banner_px.resize((size_t)rgba->w * rgba->h * 4);
+    for (int y = 0; y < rgba->h; y++)
+        memcpy(g_banner_px.data() + (size_t)y * rgba->w * 4, (const uint8_t *)rgba->pixels + (size_t)y * rgba->pitch,
+               (size_t)rgba->w * 4);
+    g_banner_w = rgba->w, g_banner_h = rgba->h;
+    g_banner_link = link.compare(0, 8, "https://") == 0 ? link : "";  // (web pages only)
+    pthread_mutex_unlock(&g_banner_lock);
+    SDL_DestroySurface(rgba);
+    fprintf(stderr, "[launcher] banner: %s %dx%d%s%s\n", name.c_str(), g_banner_w, g_banner_h,
+            g_banner_link.empty() ? "" : ", link ", g_banner_link.c_str());
+    g_banner_ready = true;
+    return NULL;
+}
+
+static void banner_upload(GpuDevice dev) {  // (UI thread, outside a frame) once the thread has the picture
+    if (g_banner || !g_banner_ready) return;
+    pthread_mutex_lock(&g_banner_lock);
+#ifdef __APPLE__
+    MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                                  width:g_banner_w height:g_banner_h mipmapped:NO];
+    g_banner = [dev newTextureWithDescriptor:td];
+    [g_banner replaceRegion:MTLRegionMake2D(0, 0, g_banner_w, g_banner_h) mipmapLevel:0
+                  withBytes:g_banner_px.data() bytesPerRow:g_banner_w * 4];
+#else
+    (void)dev;
+    g_banner = vk_imgui_texture_rgba(g_banner_px.data(), g_banner_w, g_banner_h);
+#endif
+    pthread_mutex_unlock(&g_banner_lock);
+    if (!g_banner) g_banner_ready = false;  // (no texture: not tried again)
 }
 
 static void load_background(GpuDevice dev) {
@@ -1447,7 +1752,7 @@ static ImGuiKey launcher_pad_key(Uint8 b) {
 static void launcher_pad_open_all(void) {
     int n = 0;
     SDL_JoystickID *ids = SDL_GetGamepads(&n);
-    for (int i = 0; ids && i < n; i++) SDL_OpenGamepad(ids[i]);
+    for (int i = 0; ids && i < n; i++) if (input_pad_usable(ids[i])) SDL_OpenGamepad(ids[i]);
     SDL_free(ids);
 }
 
@@ -1456,6 +1761,7 @@ static bool launcher_pad_event(const SDL_Event &e) {
     ImGuiIO &io = ImGui::GetIO();
     switch (e.type) {
     case SDL_EVENT_GAMEPAD_ADDED:
+        if (!input_pad_usable(e.gdevice.which)) return true;  // (a fingerprint sensor, #477; from BOTWRecomp 0ea51bb)
         SDL_OpenGamepad(e.gdevice.which);
         io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
         return true;
@@ -1603,6 +1909,14 @@ static void prelaunch_tab(float sc) {
         ImGui::Separator();
         ImGui::Spacing();
     };
+    heading("Autoplay");
+    if (ImGui::Checkbox(tr("Start the game directly"), &g_settings.autoplay)) settings_save();
+    ImGui::PushTextWrapPos(0);
+    ImGui::TextDisabled("%s", tr("Once the game is set up, the start screen plays by itself after a short countdown. Touch "
+                                 "the screen or press a button during it to stay on the start screen."));
+    ImGui::PopTextWrapPos();
+    ImGui::Spacing();
+    ImGui::Spacing();
 #ifdef __ANDROID__
     heading("Vulkan driver");
     {
@@ -1648,8 +1962,8 @@ static void prelaunch_tab(float sc) {
     {   // (runtime/settings.h gpu_heap / inplace_reads / turnip_lrz / log_file: for GPUs where a Turnip path draws wrong;
         // LASRecompAndroid's, with BOTW's in-place reads of draw targets)
         bool changed = false;
-        const bool a8 = vk_lrz_auto(vk_gpu_name());  // (Automatic: on for the Adreno 8xx and the 740, device.c)
-        const bool lrz_auto = a8;
+        const bool a8 = vk_lrz_auto(vk_gpu_name());  // (heap and LRZ Automatic: the Adreno 8xx and the 740, device.c)
+        const bool a78 = vk_inplace_auto();  // (in-place reads: 7xx too, #48; Mali, #73)
         auto tri = [&](const char *id, int *v, bool auto_on) {  // Automatic / On / Off: -1 / 1 / 0
             bool ch = false;
             ImGui::PushID(id);
@@ -1674,23 +1988,39 @@ static void prelaunch_tab(float sc) {
         ImGui::TextDisabled("%s", tr("On: the game's memory is mapped straight into the GPU's, the fastest way. Off: what each "
                                   "frame uses is copied instead - it draws right where the fast way doesn't, but this game "
                                   "runs at about half the frame rate (15 fps instead of 35 on an Adreno 830). Automatic: on "
-                                  "for Adreno 8xx GPUs and the Adreno 740, off for the others - on another Adreno, try On "
-                                  "first. Applies when "
-                                  "the game starts."));
+                                  "for Adreno 8xx GPUs and the Adreno 740, off for the others. On holds over 2 GB of the GPU's memory at once: with 8 "
+                                  "GB of RAM or less the GPU may run out of it and close the game - then use Off. Applies "
+                                  "when the game starts."));
         ImGui::Spacing();
-        ImGui::Text("%s", tr("Draw-target reads in place (Turnip)"));
-        changed |= tri("inplace", &g_settings.inplace_reads, a8);
+        changed |= ImGui::Checkbox(tr("Game memory through a shared file (experimental)"), &g_settings.heap_file);
+        ImGui::TextDisabled("%s", tr("For GPUs where the option above can't work (Mali, Xclipse): the game's memory is shared "
+                                  "with the GPU through a file the driver exports, instead of being copied each frame - "
+                                  "possibly much faster, but untested on those GPUs: if the game draws wrong, runs slower "
+                                  "or closes, turn it off. Needs 8 GB of RAM or more. Applies when the game starts."));
+        if (!vk_heap_file_possible())
+            ImGui::TextDisabled("%s", tr("This driver can't export its memory: the option does nothing here."));
+        ImGui::Spacing();
+        ImGui::Text("%s", tr("Draw-target reads in place"));
+        changed |= tri("inplace", &g_settings.inplace_reads, a78);
         ImGui::TextDisabled("%s", tr("On: decals and effects read the image they draw on as it is, the fastest way. Off: a copy "
-                                  "of it each time, slower (fewer fps) but by the Vulkan rules. Automatic: on for Adreno 8xx "
-                                  "GPUs and the Adreno 740, off for the others. Applies when the game starts."));
+                                  "of it each time, slower (fewer fps) but by the Vulkan rules. Automatic: on for Adreno 7xx "
+                                  "and 8xx and Mali GPUs, off for the others. Applies when the game starts."));
         ImGui::Spacing();
         ImGui::Text("%s", tr("Turnip low-resolution Z (LRZ)"));
-        changed |= tri("lrz", &g_settings.turnip_lrz, lrz_auto);
+        changed |= tri("lrz", &g_settings.turnip_lrz, a8);
         ImGui::TextDisabled("%s", tr("Turnip's early depth test, a little faster. Off can fix missing or broken drawing on "
-                                  "some Adreno GPUs. Automatic: on for Adreno 8xx GPUs and the Adreno 740, off for the "
-                                  "others. Applies when TOTKDroid restarts."));
-        bool lrz_now = g_settings.turnip_lrz < 0 ? lrz_auto : g_settings.turnip_lrz != 0;
-        if (lrz_now != vk_lrz_at_start()) {  // (Turnip reads it once, when the app starts)
+                                  "some Adreno GPUs. Automatic: on for Adreno 8xx GPUs and the Adreno 740, off for the others. "
+                                  "Applies when TOTKDroid restarts."));
+        ImGui::Spacing();
+        ImGui::Text("%s", tr("Driver variables"));  // (#227: g_settings.driver_env, vulkan/device.c)
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        changed |= ImGui::InputTextWithHint("##driverenv", "FD_DEV_FEATURES=enable_tp_ubwc_flag_hint=1", g_settings.driver_env,
+                                            sizeof g_settings.driver_env);
+        ImGui::TextDisabled("%s", tr("Advanced: switches the Vulkan driver reads when it starts, as NAME=value, separated by "
+                                  "spaces. Leave it empty unless a guide for your phone tells you which ones. Applies when "
+                                  "TOTKDroid restarts."));
+        bool lrz_now = g_settings.turnip_lrz < 0 ? a8 : g_settings.turnip_lrz != 0;
+        if (lrz_now != vk_lrz_at_start() || strcmp(g_settings.driver_env, vk_driver_env_at_start())) {  // (read once, at the start)
             ImGui::Text("%s", tr("Restart TOTKDroid to apply it."));
             ImGui::SameLine();
             ImGui::PushID("lrz");  // (the driver's own Restart now may be showing too)
@@ -1887,6 +2217,12 @@ extern "C" void launcher_run(const char *root) {
         pthread_t t;
         if (pthread_create(&t, NULL, update_thread, NULL) == 0) pthread_detach(t);
     }
+    static bool banner_asked;  // (also once per launch)
+    if (!banner_asked && !getenv("LARECOMP_NO_BANNER")) {
+        banner_asked = true;
+        pthread_t t;
+        if (pthread_create(&t, NULL, banner_thread, NULL) == 0) pthread_detach(t);
+    }
     ui_window_init();
     SDL_Window *win = ui_window();
     g_launcher_win = win;
@@ -1951,7 +2287,6 @@ extern "C" void launcher_run(const char *root) {
 
 #ifdef __ANDROID__
     package_import_recover();  // (an NSP/XCI import the app was stopped in: finished, or its half removed)
-    lsfg_startup();            // (a Lossless.dll import the app was stopped in: its half removed)
 #endif
     std::string status = check_game_files(g_root);
 #ifdef __ANDROID__
@@ -1979,6 +2314,13 @@ extern "C" void launcher_run(const char *root) {
     static int runs;  // (test: =once - only the first time, so a "Title screen" reboot lands on the start screen)
     const char *ap = getenv("LARECOMP_LAUNCHER_AUTOPLAY");
     if (ap && status.empty() && !(runs && !strcmp(ap, "once"))) play = true;  // (test: PLAY at once)
+    // Autoplay (settings.autoplay, Settings > Prelaunch): once the game is set up and the first PLAY's questions were
+    // answered, PLAY by itself after a short countdown; a touch, click, key or button during it stays here (the way to
+    // the settings). Only the first start screen of a run: one reached from the game stays.
+    uint64_t autoplay_until = 0;
+    if (g_settings.autoplay && status.empty() && !runs && g_settings.aspect_asked && g_settings.menu_tip_seen && !shot_at &&
+        !getenv("LARECOMP_LAUNCHER_SETUP") && !getenv("LARECOMP_LAUNCHER_DELETE"))
+        autoplay_until = SDL_GetTicks() + 3000;
     runs++;
     if (const char *t = getenv("LARECOMP_LAUNCHER_EXTRACT")) {  // (test) <folder>: set the game files up, log, exit
         g_src = t;
@@ -2024,6 +2366,9 @@ extern "C" void launcher_run(const char *root) {
 #endif
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
+            if (autoplay_until && (e.type == SDL_EVENT_FINGER_DOWN || e.type == SDL_EVENT_MOUSE_BUTTON_DOWN ||
+                                   e.type == SDL_EVENT_KEY_DOWN || e.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN))
+                autoplay_until = 0;  // (the player is here: no autoplay)
             if (page == SETTINGS && bind_capture_event(&e)) continue;  // (waiting for a new binding: controls_ui.mm)
             if (!launcher_pad_event(e)) ImGui_ImplSDL3_ProcessEvent(&e);
             if (e.type == SDL_EVENT_QUIT) exit(0);
@@ -2049,6 +2394,13 @@ extern "C" void launcher_run(const char *root) {
             if (status.empty() && !g_switching_to && !failed) { load_background(dev); page = MAIN; }
         }
         was_busy = busy;
+        if (autoplay_until && (page != MAIN || busy || !status.empty())) autoplay_until = 0;
+        if (autoplay_until && SDL_GetTicks() >= autoplay_until) {
+            autoplay_until = 0;
+            fprintf(stderr, "[launcher] autoplay\n");
+            play = true;
+        }
+        banner_upload(dev);
 
 #ifdef __APPLE__
         int w, h;
@@ -2083,7 +2435,7 @@ extern "C" void launcher_run(const char *root) {
             // the backend (manual mode, no gamepads of its own) clears HasGamepad every frame, and ImGui then drops the
             // controller presses launcher_pad_event fed in and turns gamepad navigation off: set it again while a
             // controller is connected
-            if (SDL_HasGamepad()) io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
+            if (input_pad_present()) io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
             ImGui::NewFrame();
 
             ImVec2 ds = io.DisplaySize;
@@ -2194,6 +2546,21 @@ extern "C" void launcher_run(const char *root) {
                 ImGui::SetCursorPosX(x0);
                 if (menu_item("QUIT", true)) exit(0);
                 g_menu_gap = 0.35f;
+                if (autoplay_until) {  // (the countdown, at the bottom: a touch stays here)
+                    uint64_t now = SDL_GetTicks();
+                    int left = autoplay_until > now ? (int)((autoplay_until - now + 999) / 1000) : 0;
+                    char msg[256];
+                    snprintf(msg, sizeof msg, tr("Starting the game in %d s - touch the screen to stay here"), left);
+                    ImGui::PushFont(g_font_menu);
+                    ImVec2 ts = ImGui::CalcTextSize(msg);
+                    ImGui::PopFont();
+                    ImDrawList *fg = ImGui::GetForegroundDrawList();
+                    ImVec2 dsz = ImGui::GetIO().DisplaySize;
+                    float pad = 14 * s, x = (dsz.x - ts.x) * 0.5f, y = dsz.y - ts.y - 48 * s;
+                    fg->AddRectFilled(ImVec2(x - pad, y - pad * 0.6f), ImVec2(x + ts.x + pad, y + ts.y + pad * 0.6f),
+                                      IM_COL32(0, 0, 0, 160), 10 * s);
+                    fg->AddText(g_font_menu, g_font_menu->FontSize, ImVec2(x, y), IM_COL32(236, 194, 84, 255), msg);
+                }
             } else if (page == SETTINGS) {
                 // the in-game menu's tabs (runtime/ui/menu.mm), in a window like the in-game one; tabs that need a
                 // loaded game say so
@@ -2612,6 +2979,29 @@ extern "C" void launcher_run(const char *root) {
                 std::string ver = tag_label(LARECOMP_VERSION, true);
 #endif
                 float vs = fs * 1.4f, y = ImGui::GetWindowPos().y + ds.y - 134 * s;
+                if (g_banner) {  // the banner (banner/README.md) above the version: up to a third of the width, in the
+                                 // right half (clear of the menu), below the top margin, its corner on the version's
+                    float bw = fminf(ds.x / 3, ds.x * 0.5f - 60 * s), bh = bw * g_banner_h / g_banner_w;
+                    float bottom = y - 14 * s, max_h = bottom - (ImGui::GetWindowPos().y + 40 * s);
+                    if (bh > max_h) bh = max_h, bw = bh * g_banner_w / g_banner_h;
+                    if (bw > 120 * s) {
+                        ImVec2 b0(right - bw, bottom - bh), b1(right, bottom);
+                        float r = 12 * s;
+                        for (float d : {7.0f, 4.0f, 2.0f})  // (a soft shadow, as the text's)
+                            dl->AddRectFilled(ImVec2(b0.x + d * s, b0.y + d * s), ImVec2(b1.x + d * s, b1.y + d * s),
+                                              IM_COL32(4, 8, 30, 60), r + d * s);
+                        ImGui::SetCursorScreenPos(b0);
+                        ImGui::PushItemFlag(ImGuiItemFlags_NoNav, true);  // (not a stop for the controller's menu moves)
+                        bool click = ImGui::InvisibleButton("banner", ImVec2(bw, bh));
+                        ImGui::PopItemFlag();
+                        bool link = !g_banner_link.empty(), hover = link && ImGui::IsItemHovered();
+                        dl->AddImageRounded(BANNER_TEXID, b0, b1, ImVec2(0, 0), ImVec2(1, 1), IM_COL32_WHITE, r);
+                        dl->AddRect(b0, b1, hover ? IM_COL32(255, 214, 64, 255) : IM_COL32(236, 194, 84, 150), r, 0,
+                                    (hover ? 2.5f : 1.5f) * s);
+                        if (hover) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+                        if (click && link) SDL_OpenURL(g_banner_link.c_str());
+                    }
+                }
                 ImVec2 vsz = font->CalcTextSizeA(vs, FLT_MAX, 0, ver.c_str());
                 text(ImVec2(right - vsz.x, y), vs, IM_COL32(255, 255, 255, 255), ver.c_str(), false);
                 pthread_mutex_lock(&g_update_lock);
@@ -2687,5 +3077,6 @@ extern "C" void launcher_run(const char *root) {
     ImGui::SetCurrentContext(prev_ctx);
     g_bg = 0;
     g_logo = 0, g_logo_tried = false;
+    g_banner = 0;  // (its pixels stay: uploaded again by a later start screen)
     g_start_screen = 0;
 }

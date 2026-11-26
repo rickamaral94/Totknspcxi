@@ -1,8 +1,11 @@
 // User settings (totkrecompandroid.ini next to the executable's working directory), edited from the in-game menu.
 #pragma once
+// the performance overlay's items (Settings.overlay_items, ui/perf_overlay.mm)
+enum { OVERLAY_FPS = 1, OVERLAY_THROTTLE = 2, OVERLAY_GPU = 4, OVERLAY_CPU = 8, OVERLAY_BATTERY = 16, OVERLAY_MEMORY = 32,
+       OVERLAY_ALL = 63 };
 #include <stdbool.h>
 
-enum { ASPECT_UNLOCKED = 0, ASPECT_ORIGINAL = 1 };
+enum { ASPECT_UNLOCKED = 0, ASPECT_ORIGINAL = 1, ASPECT_STRETCH = 2 };
 enum { RES_MATCH = 0, /* 1..8 = 1x..8x */ RES_DYNAMIC = 9, RES_Q75 = 10, RES_Q25 = 11, RES_Q50 = 12 };
 // (11 was 67% of the display: larecomp.ini "67%" now loads as RES_Q75)
 enum { OUT_AUTO = -1 };  // (Settings.out_lines)
@@ -17,12 +20,13 @@ enum { AA_OFF = 0, AA_SMAA = 1, AA_FXAA = 2 };
 // System language served to the game (runtime/services/am.c GetDesiredLanguage, services/hid_set.c GetLanguageCode):
 // the game picks its text language from it, as it would from the Switch's own system setting. LANG_AUTO follows the
 // host locale ($LC_ALL / $LC_MESSAGES / $LANG); the rest are the codes of the languages the game has text for.
-enum { LANG_AUTO = 0, N_LANGUAGES = 13 };
+enum { LANG_AUTO = 0, N_LANGUAGES = 15 };
 extern const char *const g_language_codes[N_LANGUAGES];  // what the game is told: "ja", "en-US", "es", ...
 extern const char *const g_language_names[N_LANGUAGES];  // for the menu ("Auto", "Japanese", ..., "Spanish")
 
 typedef struct {
-    int aspect;          // ASPECT_*: unlocked = fill the window (wider/taller views), original = 16:9 with bars
+    int aspect;          // ASPECT_*: unlocked = fill the window (wider/taller views), original = 16:9 with bars,
+                         // stretch = the 16:9 image stretched to the window (#59: 4:3 screens)
     bool fullscreen;
     int res_mode;        // RES_MATCH, 1..4 (N x the Switch's 1080p), RES_DYNAMIC, RES_Q75/50/25 (share of the display)
     int upscaler;        // UPSCALE_*: how a lower internal resolution reaches the window (MetalFX: macOS, FSR 1: Windows)
@@ -34,37 +38,66 @@ typedef struct {
     bool reverb;         // room reverb effect
     bool movie_audio;
     bool show_fps;
+    // Frame generation (Lossless Scaling's LSFG, the player's own Lossless.dll: nvn/vulkan/framegen.c): on, images per
+    // game frame (2-4), the motion estimation's resolution (0 the game's own, or 25-100 %)
+    bool lsfg;
+    int lsfg_mult, lsfg_flow;
     bool motion;          // the phone's (or a controller's) gyroscope as the controller's motion sensor (hle/motion.c)
+    int rumble;           // the game's vibration, % strength (0 off) on the controller, or the phone without one (hle/input.c)
+    int shadow_res;       // the game's shadow map size: 0 its own, 288, 256 (native.c fix_shadow_size)
+    bool game_fxaa;       // the game's own FXAA pass (native.c fix_game_fxaa)
+    bool shadows;         // the game's shadows drawn (off: the depth-only passes outside the 3D scene's targets skipped -
+                          // a flatter picture, a little less GPU work; vulkan/exec.c)
+    int far_clip;         // the render far plane capped at this many metres, 0: the game's (native.c fix_far_clamp)
+    int shadow_cascades;  // the sun's shadow cascades capped at 1..3, 0: the game's (4; native.c fix_shadow_cascades)
+    int point_shadows;    // the point light shadows' pool capped at this many (1..64), 0: the game's (native.c fix_point_shadows)
+    int motion_source;    // whose: 0 automatic (a controller's once its gyroscope is alive), 1 the phone's, 2 a controller's
+    bool motion_flat;     // the phone's sensors as the Switch's screen in handheld mode, not a flat controller (hle/motion.c)
 #ifdef __ANDROID__
     bool touch_controls;  // on-screen controls while no controller is connected (ui/touch_controls.mm)
-    int overlay_style;    // Show FPS's overlay (ui/perf_overlay.mm): 0 full, 1 compact (one line)
+    int overlay_style;    // Show FPS's overlay (ui/perf_overlay.mm): 0 full, 1 compact (one line); a double tap switches
+    int overlay_scale, overlay_opacity;  // its size and opacity, % (40..150, 20..100): Swap2-Native's
+    int overlay_items;    // OVERLAY_* bits: what it shows (all by default)
     float overlay_pos[2]; // its top left, a share of the screen, dragged there with a finger (negative: the corner)
-    bool framegen;          // Video > Frame generation 2x (Lossless.dll's shaders): applies when the game starts (vulkan/framegen.cpp)
-    int fg_flow;            // its flow scale: 0 100%, 1 75%, 2 50% (the motion estimated at that share of the size)
-    bool fg_performance;    // its performance mode (LSFG 3.1P)
-    bool fg_hud;            // the HUD kept sharp in the generated frames: the real frame's pixels where the HUD is (framegen.c)
     int totk_step_smoothing; // 0 five real frames (default), 1 last real frame (experimental)
-    int fg_mult;            // its multiplier: 0 2x (30 -> 60), 1 3x (40 -> 120), 2 4x (30 -> 120), 3 2x (60 -> 120, experimental)
-    int fps_mode;         // 0: the game's own choice (30 / 60, the frame pacer), 1: 30 fps, 2: 60 fps
+    int fps_mode;         // 0 Auto, 1 30 fps, 2 60 fps, 3 20 fps, 4 40/45 fps (display dependent), 5 unlocked (TOTK on
+                          // Android: up to the screen's fastest refresh, at most 120 - nvn/objects.c, vulkan/device.c)
+    bool fps60_hysteresis;  // the game's frame controller drops to 30 after 7 late frames, not 3 (native.c fix_hyst_*): off
     bool shader_int32;    // shader address math in 32-bit words even where the driver offers 64-bit (vulkan/exec.c)
     bool files_in_place;  // Android: a setup reads the picked romfs/ where it is, no copy (services/fs.c); off by default
     bool native_code;     // Android: the game's own code on the CPU, no build of it (runtime/native.c); on by default for 1.4.3
     bool adpf_workers;    // Video > ADPF: the game's threads (experimental): the busiest join the hint session (platform/android.c)
     bool cbuf_inplace;    // Video > Constant buffers read in place (experimental; only with Sync lag off): vulkan/exec.c
     bool sync_lag;        // Android: the game's next frame overlaps the GPU's last (nvn/objects.c nvnSyncWait); on by default
+    int low_ram;          // RAM saving (vulkan/exec.c vk_low_ram): -1 automatic (devices up to 4 GB), 1 on, 0 off; read once,
+                          // as the app starts
     // Driver compatibility (the start screen's Settings > Prelaunch, ui/launcher.mm; from LASRecompAndroid), for GPUs
     // where a Turnip path draws wrong: read when the game starts (gpu_heap, inplace_reads) or when the app starts
     // (turnip_lrz, log_file). -1 Automatic: on for the Adreno 8xx GPUs these paths were made on and the Adreno 740, off elsewhere
     // (vulkan/device.c vk_adreno_8xx); 1 on, 0 off.
     int gpu_heap;         // Turnip: the game's memory mapped as GPU memory (vulkan/exec.c vk_heap_place); off: CPU copies
-    int inplace_reads;    // Turnip: draws sample targets they write as they are (vulkan/exec.c resolve_feedback); off: copies
+    bool heap_file;       // the game's memory as GPU memory through an exported file mapped at its address, where the driver
+                          // can't place it (Mali, Xclipse; experimental): vulkan/exec.c vk_heap_place, at the game's start
+    int inplace_reads;    // Turnip, Mali: draws sample targets they write as they are (vulkan/exec.c resolve_feedback); off: copies
+                          // (Automatic: Adreno 7xx too, #48, and Mali, #73 - vulkan/device.c vk_inplace_auto)
     int turnip_lrz;       // Turnip's low-resolution Z; off: TU_DEBUG=nolrz before the driver loads (vulkan/device.c)
     bool log_file;        // the log in a file as well (platform/android.c), to send with a report
     bool driver_logcat;   // the driver's and libc's own Android log lines copied into it too (platform/android.c); off:
                           // starting logcat once a second can disturb frame times (LARECOMP_DRIVER_LOGCAT=1 forces it)
     char gpu_model[64];   // the GPU of the last start ("Adreno (TM) 830v1"): turnip_lrz's Automatic, before the driver
+    char driver_env[256]; // the driver's own switches, NAME=value separated by spaces (Turnip's FD_DEV_FEATURES, TU_DEBUG;
+                          // #227): set when the app starts, before the driver loads (vulkan/device.c)
 #define TOUCH_NCTL 19  // (ui/touch_controls.mm: LAS's 12, then the right stick, L3 / R3 and the d-pad)
     float touch_pos[TOUCH_NCTL][2];  // each on-screen control's place, a share of the screen (negative: default)
+    // The icon layout (ui/touch_controls.mm), in the world only - the classic one above stays in the game's menus:
+    // touch_scheme 1 (0: the classic one everywhere), its controls' places of their own
+#define TOUCH_NCTL2 22
+    int touch_scheme;
+    float touch_pos2[TOUCH_NCTL2][2];
+    float touch_size[TOUCH_NCTL], touch_size2[TOUCH_NCTL2];  // each control's own size (times touch_scale; 0: 1)
+    float touch_aim_sens;  // the icon layout's bow / throw drag: how fast it turns the aim (1: the default)
+    bool touch_minimap_top;  // the minimap group up at the top while the touch controls are up (#254: off keeps it in place)
+    bool touch_talk;       // the icon layout gives way to a talk: only the stick, A and B (false: all its controls stay)
     float touch_scale, touch_opacity;
     // FPS-style touch play (ui/touch_controls.mm): the camera by dragging a finger (its speed tilts the right stick)
     // instead of holding a stick, at touch_drag_sens; the sticks drawn only while a finger holds them; each stick's
@@ -77,6 +110,8 @@ typedef struct {
     int language;        // LANG_AUTO or an index into g_language_codes: the game's text language
     bool aspect_asked;   // the start screen's one-time "authentic 16:9 or unlocked?" question was answered
     bool menu_tip_seen;  // the start screen's one-time "how to open the menu" note was shown (first PLAY ever)
+    bool autoplay;       // the start screen plays by itself after a short countdown once the game is set up (a touch or
+                         // a key during it stays on the start screen; ui/launcher.mm)
     char mods_off[512];  // game mods turned off (runtime/mods.c: their folder names, separated by '|')
 } Settings;
 

@@ -32,3 +32,7 @@ registro no Amaral Adreno Tools e o próximo teste para a revisão do driver.
 Use o [roteiro de implementação e build](docs/PORTS-PC-PENDENCIAS.md) ao preparar
 uma candidata Android com ajustes dos ports de PC. O roteiro indica a base
 amaral.22, as hipóteses em aberto e as verificações para entregar o APK.
+## Roteamento de modelos para subagentes
+- Busca, grep, leitura e mapeamento do código: haiku
+- Implementação e testes: sonnet
+- Arquitetura, revisão crítica e decisões difíceis: opus
