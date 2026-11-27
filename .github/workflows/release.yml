@@ -49,6 +49,8 @@ jobs:
           fi
 
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # tools/test_romfs_build.py compares against an older commit
 
       - name: Submódulos (dxbc da cópia em third_party/vendor - a origem deixou de ser pública)
         run: |
@@ -103,6 +105,7 @@ jobs:
           python3 tools/test_romfs_build.py
           python3 tools/test_android_log_policy.py
           python3 tools/test_native_fg_policy.py
+          python3 tools/test_render_sigs.py
           gcc -O1 -Iruntime -Iruntime/nvn/vulkan -o /tmp/fgp tools/test_fg_pacing.c -lm && /tmp/fgp
 
       - name: Chave fora do repositório
