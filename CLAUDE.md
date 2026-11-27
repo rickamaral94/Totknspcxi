@@ -27,6 +27,11 @@ checkpoint, o APK, o Mesa/patchset, os hashes e a evidência de cada braço.
 Quando houver um resultado reproduzível, deixe a referência cruzada com o
 registro no Amaral Adreno Tools e o próximo teste para a revisão do driver.
 
+**Acione o agente do Turnip (Rick, 27/11/2026)** sempre que um log apontar gargalo ou erro
+de driver: comentário na PR #4 deste repositório (campainha), começando com `[totk]`, com o
+APK, o driver/Mesa, o trecho do log, o registro em `docs/logs/TURNIP.md` (commit) e o teste
+que você precisa que ele rode. Não espere o Rick pedir.
+
 ## Regra de merge com o upstream e outros ports (Rick, 27/11/2026)
 
 Ao integrar o upstream (TOTKDroid) ou trazer algo de outro port, **só troque o que é nosso
