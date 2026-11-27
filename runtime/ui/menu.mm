@@ -69,8 +69,9 @@ static void push(const QEvent &e) {
 bool menu_is_open(void) { return g_open.load(); }
 #ifdef __ANDROID__
 extern "C" bool touch_controls_visible(void);  // ui/touch_controls.mm
-extern "C" const char *vk_fg_status(void);      // nvn/vulkan/framegen.c
-extern "C" bool vk_fg_built(void);
+#include "lsfg_extract.h"  // (android/totkrecompandroid/app/src/main/cpp)
+extern "C" void launcher_pick_lossless_dll(void);  // (launcher.mm)
+extern "C" int fg_status(char *why, size_t n);       // (nvn/vulkan/framegen.c)
 extern "C" void touch_controls_draw(ImVec2 display, ImFont *font);
 #endif
 static void set_open(bool open);
@@ -627,37 +628,50 @@ static void tab_display(void) {
     if (g_settings.fps_mode == 5)
         ImGui::TextWrapped("%s", tr("As fast as your device draws, up to the screen's fastest refresh (at most 120 fps). The game's clock "
                                     "stays right. Cutscenes stay at 30. The phone works harder and heats more."));
-    {   // Frame generation (Lossless Scaling's LSFG with the player's own Lossless.dll: nvn/vulkan/framegen.c)
-        static const char *fg[] = {"Off", "2x", "3x", "4x"};
-        int v = g_settings.lsfg ? g_settings.lsfg_mult - 1 : 0;
-        if (opt_choice("Frame generation (LSFG)", &v, fg, 4, 0,
-                       "Shows frames made between the game's own, for smoother motion (Lossless Scaling's frame "
-                       "generation). Needs your own Lossless.dll from Lossless Scaling: put it in the LSFG or Download folder "
-                       "of the phone's storage. Adds a little delay and needs a spare GPU; 2x on 30 fps shows 60.")) {
-            g_settings.lsfg = v > 0;
-            if (v > 0) g_settings.lsfg_mult = v + 1;
+    {   // Frame generation's shaders from the user's own Lossless.dll (docs/FRAMEGEN.md: B1 - the generation itself comes later)
+        opt_section("Frame generation (Lossless Scaling)");
+        char line[512];
+        int st = lsfg_state(line, sizeof line);
+        std::string value = st == 2 ? tr("Importing...") : st == 1 ? tr("Shaders ready") : line[0] ? tr("Not compatible") : tr("Not imported");
+        if (st == 1 || (st == 0 && line[0])) value += std::string(" - ") + line;
+        if (opt_action("Lossless.dll", value.c_str(),
+                       "Your own Lossless.dll from Lossless Scaling (bought on Steam): its frame generation shaders are "
+                       "translated and kept in the app's private storage; the DLL itself is not kept. A Lossless.dll that "
+                       "doesn't fit this version of TOTKDroid is refused: use a compatible version of Lossless "
+                       "Scaling.",
+                       false) && st != 2) {
+            launcher_pick_lossless_dll();
         }
-        if (g_settings.lsfg) {
-            static const char *fl[] = {"Auto", "25%", "50%", "75%", "100%"};
-            static const int flv[] = {0, 25, 50, 75, 100};
-            int k = 0;
-            for (int i = 0; i < 5; i++) if (flv[i] == g_settings.lsfg_flow) k = i;
-            if (opt_choice("Motion estimation", &k, fl, 5, 3,
-                           "The resolution the motion between frames is measured at: lower is faster, higher looks cleaner. "
-                           "Auto: the game's own."))
-                g_settings.lsfg_flow = flv[k];
-            ImGui::TextWrapped("%s", vk_fg_built() ? vk_fg_status() : tr("Not in this build."));
-            if (vk_fg_built()) {  // (a copy in the app's own files: read without All files access; BOTWRecomp e3ccd7a)
-                void launcher_pick_lsfg_dll(void);
-                std::string launcher_lsfg_import_msg(void);
-                std::string m = launcher_lsfg_import_msg();
-                char id[900];
-                snprintf(id, sizeof id, "%s%s%s", tr("Picks your Lossless.dll with Android's file picker and keeps a copy "
-                         "in the app's own files, which the app can always read - for when it says it can't open the "
-                         "file where you put it."), m.empty() ? "" : "\n\n", m.c_str());
-                if (opt_button("Import Lossless.dll", id)) launcher_pick_lsfg_dll();
-            }
+        if (st == 1) {
+            char why[256];
+            int fs = fg_status(why, sizeof why);
+            std::string desc = tr("Shows frames made by Lossless Scaling's frame generation between the game's own (the multiplier "
+                                  "below). Input feels about one frame later; the menus, "
+                                  "events and movies show the real frames. Turning it on takes effect when TOTKDroid "
+                                  "starts again; off, at once.");
+            desc += "\n\n";
+            desc += fs == 1 ? tr("On.") : fs == 2 ? tr("On when TOTKDroid starts again.") : fs == 3 ? tr("Unavailable: ") : tr("Off.");
+            if (fs == 3 || (fs == 1 && why[0])) desc += std::string(fs == 1 ? "\n" : "") + why;
+            opt_toggle("Frame generation", &g_settings.framegen, false, desc.c_str());
+            static const char *mults[] = {"2x (30 -> 60)", "3x (40 -> 120)", "4x (30 -> 120)", "2x (60 -> 120, experimental)"};
+            opt_choice("Frame generation multiplier", &g_settings.fg_mult, mults, 4, 0,
+                       "How many frames are shown for each of the game's. 2x: the game at 30, 60 shown. 3x and 4x need a "
+                       "120 Hz screen (the Odin 2 Portal's, for one): the game at 40 or 30, 120 shown - each generated frame costs the "
+                       "GPU, input feels a little later. Where the screen can't, 2x. Applies at once.");
+            ImGui::TextWrapped("%s", tr("60 -> 120 is experimental: requires 60 real FPS and a 120 Hz display. It does not make rendering faster. Cutscenes remain at 30 real FPS."));
+            static const char *flows[] = {"100%", "75%", "50%"};
+            opt_choice("Frame generation flow scale", &g_settings.fg_flow, flows, 3, 2,
+                       "The size at which the motion between two frames is estimated, a share of the screen's. Lower: the "
+                       "generation costs the GPU much less, with more mistakes on small moving details. Applies at once.");
+            opt_toggle("Frame generation performance mode", &g_settings.fg_performance, false,
+                       "Lossless Scaling's lighter frame generation: cheaper on the GPU, a little less accurate. Applies at once.");
+            opt_toggle("Frame generation HUD mask", &g_settings.fg_hud, true,
+                       "Keeps the game's HUD (hearts, map, text) sharp in the generated frames: where it is, they show the real "
+                       "frame's pixels instead of the interpolated ones, which bend and smear it. Costs the GPU about 1 ms a "
+                       "frame. Applies at once.");
         }
+        if (st == 1 && opt_button("Remove shaders", "Deletes the shaders translated from your Lossless.dll."))
+            lsfg_remove();
     }
 #endif
     opt_section("Rendering");

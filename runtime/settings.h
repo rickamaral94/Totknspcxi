@@ -38,10 +38,11 @@ typedef struct {
     bool reverb;         // room reverb effect
     bool movie_audio;
     bool show_fps;
-    // Frame generation (Lossless Scaling's LSFG, the player's own Lossless.dll: nvn/vulkan/framegen.c): on, images per
-    // game frame (2-4), the motion estimation's resolution (0 the game's own, or 25-100 %)
-    bool lsfg;
-    int lsfg_mult, lsfg_flow;
+    bool framegen;          // Video > Frame generation 2x (Lossless.dll's shaders): applies when the game starts (vulkan/framegen.c)
+    int fg_flow;            // its flow scale: 0 100%, 1 75%, 2 50% (the motion estimated at that share of the size)
+    bool fg_performance;    // its performance mode (LSFG 3.1P)
+    bool fg_hud;            // the HUD kept sharp in the generated frames: the real frame's pixels where the HUD is (framegen.c)
+    int fg_mult;            // its multiplier: 0 2x (30 -> 60), 1 3x (40 -> 120), 2 4x (30 -> 120), 3 2x (60 -> 120, experimental)
     bool motion;          // the phone's (or a controller's) gyroscope as the controller's motion sensor (hle/motion.c)
     int rumble;           // the game's vibration, % strength (0 off) on the controller, or the phone without one (hle/input.c)
     int shadow_res;       // the game's shadow map size: 0 its own, 288, 256 (native.c fix_shadow_size)

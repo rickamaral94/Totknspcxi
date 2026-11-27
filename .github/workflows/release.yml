@@ -50,8 +50,19 @@ jobs:
 
       - uses: actions/checkout@v4
 
-      - name: Submódulos
-        run: git submodule update --init --recursive third_party/libadrenotools third_party/mbedtls
+      - name: Submódulos (dxbc da cópia em third_party/vendor - a origem deixou de ser pública)
+        run: |
+          git submodule update --init --recursive third_party/libadrenotools third_party/mbedtls
+          git submodule update --init third_party/lsfg-vk-android
+          cd third_party/lsfg-vk-android
+          git submodule init
+          git config submodule.thirdparty/dxbc.update none
+          git submodule update --init --recursive
+          rm -rf thirdparty/dxbc && mkdir -p thirdparty/dxbc
+          cp -r ../vendor/dxbc-78ab59a/. thirdparty/dxbc/
+          t=$(mktemp -d) && cp -r ../vendor/dxbc-78ab59a/. "$t"/ && got=$(cd "$t" && git init -q && git add -A && git write-tree)
+          echo "dxbc tree: $got"
+          [ "$got" = f19b5a7a5c0e509f62c5d3518490e2f4a9367fdd ] || { echo "::error::a cópia do dxbc não é o commit 78ab59a"; exit 1; }
 
       - name: Liberar disco
         run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost /opt/hostedtoolcache/CodeQL && df -h /
@@ -91,6 +102,8 @@ jobs:
           python3 tools/test_native_timing_fixes.py
           python3 tools/test_romfs_build.py
           python3 tools/test_android_log_policy.py
+          python3 tools/test_native_fg_policy.py
+          gcc -O1 -Iruntime -Iruntime/nvn/vulkan -o /tmp/fgp tools/test_fg_pacing.c -lm && /tmp/fgp
 
       - name: Chave fora do repositório
         env:

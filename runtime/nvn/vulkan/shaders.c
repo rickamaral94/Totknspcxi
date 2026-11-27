@@ -385,6 +385,45 @@ static const char *builtin_src(const char *name, int *stage) {
                "  o = vec4(at(uv + (isH ? vec2(0.0, stepLen * f) : vec2(stepLen * f, 0.0))), 1.0);\n"
                "}\n";
     }
+    // Frame generation's HUD mask (vulkan/framegen.c, exec.c vk_fg_hud_*). fg_hud_mask: where the final image (t0)
+    // differs from its copy taken before the HUD's first draw (t1) - the HUD's pixels - widened by 2 texels each way
+    // (the generated frames smear the HUD's edges a little), soft: a faint, see-through pane gets a faint weight. In
+    // red, at the game image's size. fg_hud: a generated frame (t0) with the real frame's pixels (t1) where the mask
+    // (t2) says HUD, all three at the window's size.
+    if (!strcmp(name, "fg_hud_mask.frag")) {
+        *stage = STAGE_FRAGMENT;
+        return "#version 450\n"
+               "layout(set = 0, binding = 0) uniform sampler2D t0;\n"
+               "layout(set = 0, binding = 1) uniform sampler2D t1;\n"
+               "layout(push_constant) uniform P { vec4 a; vec4 b; } pc;\n"
+               "layout(location = 0) out vec4 o;\n"
+               "float d(ivec2 p) {\n"
+               "  p = clamp(p, ivec2(0), ivec2(pc.a.zw) - 1);\n"
+               "  vec3 e = abs(texelFetch(t0, p, 0).rgb - texelFetch(t1, p, 0).rgb);\n"
+               "  return max(e.r, max(e.g, e.b));\n"
+               "}\n"
+               "void main() {\n"
+               "  ivec2 p = ivec2(gl_FragCoord.xy);\n"
+               "  float m = 0.0;\n"
+               "  for (int y = -2; y <= 2; y += 2)\n"
+               "    for (int x = -2; x <= 2; x += 2) m = max(m, d(p + ivec2(x, y)));\n"
+               "  o = vec4(smoothstep(pc.b.x, pc.b.y, m), 0.0, 0.0, 1.0);\n"
+               "}\n";
+    }
+    if (!strcmp(name, "fg_hud.frag")) {
+        *stage = STAGE_FRAGMENT;
+        return "#version 450\n"
+               "layout(set = 0, binding = 0) uniform sampler2D t0;\n"
+               "layout(set = 0, binding = 1) uniform sampler2D t1;\n"
+               "layout(set = 0, binding = 2) uniform sampler2D t2;\n"
+               "layout(push_constant) uniform P { vec4 a; vec4 b; } pc;\n"
+               "layout(location = 0) out vec4 o;\n"
+               "void main() {\n"
+               "  vec2 uv = gl_FragCoord.xy * pc.a.xy;\n"
+               "  float m = textureLod(t2, uv, 0.0).r;\n"
+               "  o = vec4(mix(textureLod(t0, uv, 0.0).rgb, textureLod(t1, uv, 0.0).rgb, m), 1.0);\n"
+               "}\n";
+    }
     if (!strcmp(name, "fxaa.frag")) {
         *stage = STAGE_FRAGMENT;
         return "#version 450\n"

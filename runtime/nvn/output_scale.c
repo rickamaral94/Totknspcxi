@@ -63,6 +63,11 @@ static void dyn_update(double now, double gpu_ms) {
     if (g_settings.fps_mode == 3) want = 50.0;
     else if (g_settings.fps_mode == 4) { extern int vk_between_fps(void); want = 1000.0 / vk_between_fps(); }
     else if (g_settings.fps_mode == 5) { extern int vk_unlocked_fps(void); want = 1000.0 / vk_unlocked_fps(); }
+    {   // Frame generation holds the real game at its own base rate, independently of the NVN interval (vulkan/framegen.c)
+        extern int fg_base_fps(void);
+        int base = fg_base_fps();
+        if (base > 0) want = 1000.0 / base;
+    }
 #endif
     g_dyn_dt_sum += dt;
     g_dyn_n++;
@@ -85,6 +90,13 @@ static void dyn_update(double now, double gpu_ms) {
     // comes out of the frame's budget too - the real frame has to leave it room, or it misses its slot and the screen
     // shows an image twice (vulkan/framegen.c)
     double want_gpu = want;
+#ifdef __ANDROID__
+    {
+        extern double fg_gpu_ms_per_real(void);
+        double fg = fg_gpu_ms_per_real();
+        if (fg > 0) want_gpu = fmax(want * 0.5, want - fg);
+    }
+#endif
     // With the GPU's time: slow frames lower the scale only while the GPU is busy most of them - else the CPU holds
     // them, and a smaller image doesn't help (on BOTW's POCO 36 ms frames with 25 ms of GPU kept lowering it; TOTK's
     // render thread is its limit, docs/TOTK-PORT.md)

@@ -86,8 +86,9 @@ public class TOTKRecompAndroidActivity extends SDLActivity {
     private static native String nativeSaveDir();  // (this version's save_0, absolute)
     private static native void nativeSaveDone(int result, String detail);
     private static final int REQ_GAME = 0x4c41, REQ_DRIVER = 0x4c42, REQ_MOD = 0x4c46, REQ_LOG = 0x4c47,
-            REQ_DRIVER_RECOVER = 0x4c48, REQ_SAVE_IN = 0x4c49, REQ_SAVE_OUT = 0x4c4a, REQ_SAVE_IN_TREE = 0x4c4c, REQ_LSFG = 0x4c4e;
-    private static native void nativeLsfgImported(int result, String detail);  // (0 imported, 1 cancelled, 2 failed)
+            REQ_DRIVER_RECOVER = 0x4c48, REQ_SAVE_IN = 0x4c49, REQ_SAVE_OUT = 0x4c4a, REQ_SAVE_IN_TREE = 0x4c4c;
+    private static native String nativeLsfgImport(int fd);
+    private static final int REQ_LSFG = 0x4c60;  // (clear of REQ_PKG + 0..3, 0x4c50-0x4c53)
     // Import from NSP/XCI (runtime/ui/launcher.mm, package_import.cpp; docs/IMPORT-NSP-XCI.md)
     private static native void nativePackagePicked(int slot, String name);
     private static native void nativeKeysRemembered(boolean on);
@@ -441,8 +442,7 @@ public class TOTKRecompAndroidActivity extends SDLActivity {
         }
         if (req == REQ_LSFG) {
             Uri f = result == Activity.RESULT_OK && data != null ? data.getData() : null;
-            if (f == null) nativeLsfgImported(1, "");
-            else new Thread(() -> importLsfgDll(f), "lsfg-dll").start();
+            if (f != null) new Thread(() -> importLosslessDll(f), "lsfg-dll").start();
             return;
         }
         if (req == REQ_LOG) {
@@ -611,39 +611,27 @@ public class TOTKRecompAndroidActivity extends SDLActivity {
         });
     }
 
-    // ---- frame generation's Lossless.dll (Video > Frame generation > Import Lossless.dll): a copy in the app's own
-    // files, which the runtime reads without All files access (nvn/vulkan/framegen.c find_dll; BOTWRecomp e3ccd7a)
-    public static void pickLsfgDll() {
+    // The user's own Lossless.dll (Video > Frame generation): read through its descriptor by the native side, which keeps
+    // only the shaders translated from it (filesDir/lsfg/spirv) - the DLL is never copied
+    public static void pickLosslessDll() {
         self.runOnUiThread(() -> {
+            Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+            i.addCategory(Intent.CATEGORY_OPENABLE);
+            i.setType("*/*");
             try {
-                Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
-                i.addCategory(Intent.CATEGORY_OPENABLE);
-                i.setType("*/*");
                 self.startActivityForResult(i, REQ_LSFG);
             } catch (Exception e) {
                 Log.e(TAG, "Lossless.dll picker", e);
-                nativeLsfgImported(2, e.toString());
             }
         });
     }
 
-    private void importLsfgDll(Uri u) {
-        File dir = getExternalFilesDir(null), tmp = new File(dir, "Lossless.dll.tmp"), dst = new File(dir, "Lossless.dll");
-        try (InputStream in = getContentResolver().openInputStream(u)) {
-            if (in == null) throw new IOException("can't open the file");
-            copy(in, tmp);
-            byte[] head = new byte[2];
-            try (InputStream h = new java.io.FileInputStream(tmp)) {
-                if (h.read(head) != 2 || head[0] != 'M' || head[1] != 'Z') throw new IOException("not a Windows DLL - pick Lossless.dll");
-            }
-            if (dst.exists() && !dst.delete()) throw new IOException("can't replace the copy before");
-            if (!tmp.renameTo(dst)) throw new IOException("can't put the copy in place");
-            Log.i(TAG, "Lossless.dll imported into " + dst + " (" + dst.length() + " bytes)");
-            nativeLsfgImported(0, dst.getAbsolutePath());
+    private void importLosslessDll(Uri u) {
+        try {
+            String r = nativeLsfgImport(openFd(u));
+            Log.i(TAG, "Lossless.dll: " + r);
         } catch (Exception e) {
-            tmp.delete();
-            Log.w(TAG, "Lossless.dll import", e);
-            nativeLsfgImported(2, e.getMessage() != null ? e.getMessage() : e.toString());
+            Log.e(TAG, "Lossless.dll import", e);
         }
     }
 

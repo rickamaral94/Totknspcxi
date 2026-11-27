@@ -4,3 +4,6 @@
 [submodule "third_party/mbedtls"]
 	path = third_party/mbedtls
 	url = https://github.com/Mbed-TLS/mbedtls
+[submodule "third_party/lsfg-vk-android"]
+	path = third_party/lsfg-vk-android
+	url = https://github.com/GameNative/lsfg-vk-android.git

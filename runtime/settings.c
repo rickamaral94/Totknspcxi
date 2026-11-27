@@ -32,8 +32,11 @@ Settings g_settings = {
     .rumble = 100,
     .game_fxaa = 1,
     .shadows = true,
-    .lsfg_mult = 2,
-    .lsfg_flow = 75,
+    .framegen = false,
+    .fg_flow = 2,
+    .fg_performance = false,
+    .fg_hud = true,
+    .fg_mult = 0,
 #ifdef __ANDROID__
     .show_fps = true,  // (the performance overlay, ui/perf_overlay.mm: on until turned off in the menu)
     .touch_controls = true,
@@ -218,9 +221,11 @@ void settings_reset_defaults(void) {
     g_settings.reverb = d->reverb;
     g_settings.movie_audio = d->movie_audio;
     g_settings.show_fps = d->show_fps;
-    g_settings.lsfg = d->lsfg;
-    g_settings.lsfg_mult = d->lsfg_mult;
-    g_settings.lsfg_flow = d->lsfg_flow;
+    g_settings.framegen = d->framegen;
+    g_settings.fg_flow = d->fg_flow;
+    g_settings.fg_performance = d->fg_performance;
+    g_settings.fg_hud = d->fg_hud;
+    g_settings.fg_mult = d->fg_mult;
     g_settings.motion = d->motion;
     g_settings.rumble = d->rumble;
     g_settings.shadow_res = d->shadow_res;
@@ -279,9 +284,11 @@ void settings_load(void) {
         else if (!strcmp(key, "reverb")) g_settings.reverb = atoi(val) != 0;
         else if (!strcmp(key, "movie_audio")) g_settings.movie_audio = atoi(val) != 0;
         else if (!strcmp(key, "show_fps")) g_settings.show_fps = atoi(val) != 0;
-        else if (!strcmp(key, "lsfg")) g_settings.lsfg = atoi(val) != 0;
-        else if (!strcmp(key, "lsfg_mult")) g_settings.lsfg_mult = atoi(val) < 2 ? 2 : atoi(val) > 4 ? 4 : atoi(val);
-        else if (!strcmp(key, "lsfg_flow")) g_settings.lsfg_flow = atoi(val) <= 0 ? 0 : atoi(val) < 25 ? 25 : atoi(val) > 100 ? 100 : atoi(val);
+        else if (!strcmp(key, "framegen")) g_settings.framegen = atoi(val) != 0;
+        else if (!strcmp(key, "framegen_flow")) g_settings.fg_flow = atoi(val) >= 0 && atoi(val) <= 2 ? atoi(val) : 2;
+        else if (!strcmp(key, "framegen_performance")) g_settings.fg_performance = atoi(val) != 0;
+        else if (!strcmp(key, "framegen_hud_mask")) g_settings.fg_hud = atoi(val) != 0;
+        else if (!strcmp(key, "framegen_multiplier")) g_settings.fg_mult = !strcmp(val, "2x60") ? 3 : atoi(val) == 3 ? 1 : atoi(val) == 4 ? 2 : 0;
         else if (!strcmp(key, "motion")) g_settings.motion = atoi(val) != 0;
         else if (!strcmp(key, "rumble")) g_settings.rumble = atoi(val) >= 0 && atoi(val) <= 300 ? atoi(val) : 100;
         else if (!strcmp(key, "shadow_res")) g_settings.shadow_res = atoi(val) == 288 || atoi(val) == 256 ? atoi(val) : 0;
@@ -408,7 +415,8 @@ void settings_save(void) {
     fprintf(f, "reverb = %d\n", g_settings.reverb);
     fprintf(f, "movie_audio = %d\n", g_settings.movie_audio);
     fprintf(f, "show_fps = %d\n", g_settings.show_fps);
-    fprintf(f, "lsfg = %d\nlsfg_mult = %d\nlsfg_flow = %d\n", g_settings.lsfg, g_settings.lsfg_mult, g_settings.lsfg_flow);
+    fprintf(f, "framegen = %d\nframegen_flow = %d\nframegen_performance = %d\nframegen_multiplier = %s\nframegen_hud_mask = %d\n",
+            g_settings.framegen, g_settings.fg_flow, g_settings.fg_performance, g_settings.fg_mult == 3 ? "2x60" : g_settings.fg_mult == 2 ? "4" : g_settings.fg_mult == 1 ? "3" : "2", g_settings.fg_hud);
     fprintf(f, "rumble = %d\n", g_settings.rumble);
     fprintf(f, "shadow_res = %d\n", g_settings.shadow_res);
     fprintf(f, "game_fxaa = %d\n", g_settings.game_fxaa);

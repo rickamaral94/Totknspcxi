@@ -509,6 +509,7 @@ done:
 #include <fcntl.h>
 #include <jni.h>
 #include "package_import.h"  // (android/totkrecompandroid/app/src/main/cpp: Import from NSP/XCI)
+#include "lsfg_extract.h"     // (the same: frame generation's shaders from Lossless.dll)
 std::atomic<bool> g_android_imported{false};
 static std::string g_driver_msg;
 static bool g_driver_restart;  // (the message asks for a restart: a Restart now button beside it)
@@ -531,32 +532,8 @@ void launcher_restart_app(void) {
     android_call("restartApp");
 }
 
-// Video > Frame generation > Import Lossless.dll: the system's file picker, a copy into the app's files
-// (TOTKRecompAndroidActivity importLsfgDll), then nativeLsfgImported - the result for the menu (BOTWRecomp e3ccd7a)
-extern "C" void vk_fg_dll_imported(void);  // (nvn/vulkan/framegen.c)
-static std::string g_lsfg_msg;  // (g_lock)
-void launcher_pick_lsfg_dll(void) { android_call("pickLsfgDll"); }
-std::string launcher_lsfg_import_msg(void) {
-    pthread_mutex_lock(&g_lock);
-    std::string m = g_lsfg_msg;
-    pthread_mutex_unlock(&g_lock);
-    return m;
-}
-extern "C" JNIEXPORT void JNICALL Java_com_totkrecompandroid_TOTKRecompAndroidActivity_nativeLsfgImported(JNIEnv *env, jclass,
-                                                                                                        jint result, jstring detail) {
-    const char *t = env->GetStringUTFChars(detail, NULL);
-    std::string d = t ? t : "";
-    if (t) env->ReleaseStringUTFChars(detail, t);
-    char msg[700];
-    if (result == 0) snprintf(msg, sizeof msg, tr("Lossless.dll imported: %s"), d.c_str());
-    else if (result == 1) msg[0] = 0;
-    else snprintf(msg, sizeof msg, tr("That didn't work: %s"), d.c_str());
-    fprintf(stderr, "[lsfg] import: %s\n", result == 0 ? d.c_str() : result == 1 ? "cancelled" : msg);
-    if (result == 0) vk_fg_dll_imported();
-    pthread_mutex_lock(&g_lock);
-    g_lsfg_msg = msg;
-    pthread_mutex_unlock(&g_lock);
-}
+// (menu.mm, Video > Frame generation) the system's file picker for the user's Lossless.dll
+extern "C" void launcher_pick_lossless_dll(void) { android_call("pickLosslessDll"); }
 
 static void android_call_int(const char *method, int v) {  // (one int argument)
     JNIEnv *env = (JNIEnv *)SDL_GetAndroidJNIEnv();
@@ -994,6 +971,16 @@ extern "C" JNIEXPORT void JNICALL Java_com_totkrecompandroid_TOTKRecompAndroidAc
     else if (result == 5 && detail.find("can't be used in place") != std::string::npos)  // (nothing copied: not the space, #16)
         set_job("Setup didn't finish", true, "These files can't be read where they are. Choose Copy them, or a folder on the phone's storage.");
     set_job_detail(detail);
+}
+
+// The user's Lossless.dll, picked under Video > Frame generation (TOTKRecompAndroidActivity importLosslessDll): its shaders
+// into filesDir/lsfg/spirv (lsfg_extract.cpp), read through the descriptor - the DLL itself is never stored. The
+// descriptor is owned from here on. Returns "<lsfg::Result>|<detail>"; the menu shows the state (lsfg_state).
+extern "C" JNIEXPORT jstring JNICALL Java_com_totkrecompandroid_TOTKRecompAndroidActivity_nativeLsfgImport(JNIEnv *env, jclass,
+                                                                                                         jint fd) {
+    char detail[512] = "";
+    int r = lsfg_import_fd(fd, detail, sizeof detail);
+    return env->NewStringUTF((std::to_string(r) + "|" + detail).c_str());
 }
 
 // ------------------------------------------------------------------ Android: Import from NSP/XCI
@@ -2287,6 +2274,7 @@ extern "C" void launcher_run(const char *root) {
 
 #ifdef __ANDROID__
     package_import_recover();  // (an NSP/XCI import the app was stopped in: finished, or its half removed)
+    lsfg_startup();            // (a Lossless.dll import the app was stopped in: its half removed)
 #endif
     std::string status = check_game_files(g_root);
 #ifdef __ANDROID__
