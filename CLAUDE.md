@@ -27,6 +27,13 @@ checkpoint, o APK, o Mesa/patchset, os hashes e a evidência de cada braço.
 Quando houver um resultado reproduzível, deixe a referência cruzada com o
 registro no Amaral Adreno Tools e o próximo teste para a revisão do driver.
 
+## Regra de merge com o upstream e outros ports (Rick, 27/11/2026)
+
+Ao integrar o upstream (TOTKDroid) ou trazer algo de outro port, **só troque o que é nosso
+se o nosso for pior**. Se o nosso for melhor, mantenha o nosso. "Pior" precisa de motivo
+concreto: medição, bug, recurso que falta, ou o nosso estar desligado/abandonado. Na dúvida,
+fica o nosso. Em cada versão, registre nas notas o que foi trocado e por quê.
+
 ## Pendências dos ports de PC
 
 Use o [roteiro de implementação e build](docs/PORTS-PC-PENDENCIAS.md) ao preparar
