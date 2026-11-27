@@ -54,7 +54,8 @@ class Module:
     def __init__(self, name, path, base, simd='asm'):
         self.name = name
         self.nso = Nso(path)
-        self.patches = patches_for(self.nso.build_id)  # (tools/patches.py: this build's, by its build id)
+        self.patches = patches_for(self.nso.build_id, self.nso)  # (tools/patches.py: this build's, by its build id;
+        # the rendering reductions found by signature in its code)
         self.base = base
         n = self.nso
         self.lo = base + n.text[0]

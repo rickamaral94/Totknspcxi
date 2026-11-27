@@ -108,6 +108,14 @@ endif()
 target_compile_options(main PRIVATE -O2 -g -fno-strict-aliasing -Wall -Wno-unused-function -Wno-format  # (as on Linux: %llx for uint64_t)
     $<$<COMPILE_LANGUAGE:CXX>:-std=c++17>)
 target_link_libraries(main PRIVATE SDL3 shaderc_shared adrenotools nximport lsfg_deps lsfg_framegen android nativewindow log dl m)
+# ThinLTO across the runtime (amaral.27, from SpartanPort: LTO + PGO took its GPU command thread's CPU per draw down
+# 1.8% / 4.8%). The tables the linker gathers by section (hle_impls, services, resets) are all `used`.
+# -DTOTK_LTO=OFF (Gradle -PtotkLto=false) builds without it, for an A/B on [diag]'s "per draw" line.
+option(TOTK_LTO "ThinLTO for libmain" ON)
+if(TOTK_LTO)
+    target_compile_options(main PRIVATE -flto=thin)
+    target_link_options(main PRIVATE -flto=thin -Wl,--thinlto-jobs=0)
+endif()
 # (runtime/hle.h, ipc.h, main.c: tables in named sections found through __start_ / __stop_ symbols)
 target_link_options(main PRIVATE -Wl,-z,nostart-stop-gc)
 # MW_TRANSLATOR_ID (the translator's sources hashed; runtime/nvn/vulkan/exec.c keys its .smeta files with it), asked on every

@@ -425,11 +425,23 @@ static int shadow_cap_env(const char *name, int *cache) {
     }
     return *cache;
 }
-static int fix_shadow_cascades(Cpu *c) {  // mov w6, #0xbb0
+// The caps now (0: the game's), for the native hooks below and for the recompiled game's patches (tools/patches.py
+// render_sites, found by signature: 1.4.2 too)
+int rt_shadow_cascades_cap(void) {
     static int env = -2;
     int e = shadow_cap_env("LARECOMP_SHADOW_CASCADES", &env);
     int n = e >= 0 ? e : g_settings.shadow_cascades;
-    if (n < 1 || n > 3) return 0;
+    return n >= 1 && n <= 3 ? n : 0;
+}
+int rt_point_shadows_cap(void) {
+    static int env = -2;
+    int e = shadow_cap_env("LARECOMP_POINT_SHADOWS", &env);
+    int n = e >= 0 ? e : g_settings.point_shadows;
+    return n >= 1 && n <= 64 ? n : 0;
+}
+static int fix_shadow_cascades(Cpu *c) {  // mov w6, #0xbb0
+    int n = rt_shadow_cascades_cap();
+    if (!n) return 0;
     int32_t w15 = (int32_t)c->x[15], w16 = (int32_t)c->x[16];
     if (w15 <= n && w16 <= n) return 0;
     static int logged;
@@ -443,10 +455,8 @@ static int fix_shadow_cascades(Cpu *c) {  // mov w6, #0xbb0
     return 0;
 }
 static int fix_point_shadows(Cpu *c) {  // ldr w1, [x0]
-    static int env = -2;
-    int e = shadow_cap_env("LARECOMP_POINT_SHADOWS", &env);
-    int n = e >= 0 ? e : g_settings.point_shadows;
-    if (n < 1 || n > 64) return 0;
+    int n = rt_point_shadows_cap();
+    if (!n) return 0;
     int32_t budget;
     memcpy(&budget, (const void *)(uintptr_t)c->x[0], 4);
     if (budget <= n) return 0;
@@ -656,4 +666,6 @@ void native_prepare(void) {}
 void native_call(Cpu *c, uint64_t addr) { (void)c; (void)addr; }
 void native_thread_end(void) {}
 uint64_t native_ticks(void) { return 0; }
+int rt_shadow_cascades_cap(void) { return 0; }  // (the recompiled game's patches: tools/patches.py render_sites)
+int rt_point_shadows_cap(void) { return 0; }
 #endif

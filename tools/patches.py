@@ -275,6 +275,108 @@ for _a, _old, _new in ((0x70002d4ee0, 0x6b08015f, 0x7100055f),
     PATCHES_142[_a] = _fps60(_old, _new)
 
 
-def patches_for(build_id):
-    """The patches for a module, by its build id (sdk and anything unknown: none)."""
-    return {BUILD_TOTK_1_4_3: PATCHES_143, BUILD_TOTK_1_4_2: PATCHES_142}.get(build_id[:16], {})
+# ---- Optional rendering reductions in the recompiled game code, found by signature (amaral.27)
+# Video > Draw distance, Sun shadow cascades and Point light shadows were hooks of the native mode only (runtime/native.c,
+# 1.4.3's addresses, after totk-android's game_patches_v143.c). The recompiled game (1.4.2, the one most players without the
+# 1.4.3 update have) is built on the phone from the player's own main, so its sites are looked for there: a site is
+# patched only when its whole signature - the site's word and the words around it that 1.4.3 has (the native mode's
+# guards) - matches exactly once in the code. No match, or more than one: that option stays off for this build, said in
+# the build's log. In 1.4.3 the signature must land on the native mode's address (a self-check). The game's FXAA (one
+# lone word) and the shadow map size (a jump over code the recompiled function can't take) stay 1.4.3 native only.
+MAIN_BASE = 0x7000000000  # (main's canonical addresses: MAIN_BASE + its offset)
+
+
+def _find_all(text, word):
+    """Offsets (4-aligned, into text) of a 32-bit word."""
+    pat, out, i = struct.pack('<I', word), [], text.find(struct.pack('<I', word))
+    while i >= 0:
+        if not i & 3:
+            out.append(i)
+        i = text.find(pat, i + 1)
+    return out
+
+
+def _w(text, off):
+    return struct.unpack_from('<I', text, off)[0] if 0 <= off <= len(text) - 4 else None
+
+
+def _near(text, off, word, lo, hi):
+    """The word somewhere in [off + lo, off + hi] (4-aligned)."""
+    return any(_w(text, off + d) == word for d in range(lo, hi + 1, 4))
+
+
+# Each: (name, site word, check(text, off), the 1.4.3 offset of the site in main)
+_RENDER_SIGS = (
+    # the cascade update's rejoin: ldr w15,[x0,#0xfc] .. mov w16,w15; mov x17,x9; [mov w6,#0xbb0]; strb w16,[x17,#0xc]! ..
+    # cmp w4,w1; csel w4,w1,wzr,hi .. str w15,[x16,#0x4d8]
+    ('shadow cascades', 0x52817606, lambda t, o: _w(t, o - 8) == 0x2a0f03f0 and _w(t, o - 4) == 0xaa0903f1 and
+     _w(t, o + 4) == 0x3800ce30 and _w(t, o + 0x18) == 0x6b01009f and _w(t, o + 0x1c) == 0x1a9f8024 and
+     _near(t, o, 0xb904da0f, 0xec, 0x16c) and _near(t, o, 0xb940fc0f, -0x128, -0xa8), 0x683500),
+    # the point shadow pool's budget: bl <accessor>; [ldr w1,[x0]]; mov x0,x23; mov x2,x20; mov x3,x19; bl <pool init>
+    ('point shadows', 0xb9400001, lambda t, o: (_w(t, o - 4) or 0) >> 26 == 0x25 and _w(t, o + 4) == 0xaa1703e0 and
+     _w(t, o + 8) == 0xaa1403e2 and _w(t, o + 0xc) == 0xaa1303e3 and (_w(t, o + 0x10) or 0) >> 26 == 0x25, 0xb866b4),
+    # the render camera's far plane: [ldr s0,[x19,#0x138]] .. ldr s0,[x19,#0x140] (its aspect, 0x44 on in 1.4.3)
+    ('far plane', 0xbd413a60, lambda t, o: _near(t, o, 0xbd414260, 0x24, 0x64), 0x628c30),
+)
+
+
+def _patch_cascades(gen, a):
+    _expect(gen, a, 0x52817606)  # mov w6, #0xbb0
+    return ('{ extern int rt_shadow_cascades_cap(void); int n_ = rt_shadow_cascades_cap(); '
+            'if (n_ > 0) { if ((int32_t)c->x[15] > n_) c->x[15] = (uint32_t)n_; '
+            'if ((int32_t)c->x[16] > n_) c->x[16] = (uint32_t)n_; } c->x[6] = 0xbb0; }'
+            f'  /* {a:#x}: mov w6, #0xbb0 (Video > Sun shadow cascades: w15 / w16 capped) */')
+
+
+def _patch_point_shadows(gen, a):
+    _expect(gen, a, 0xb9400001)  # ldr w1, [x0]
+    return ('{ extern int rt_point_shadows_cap(void); int32_t b_ = (int32_t)LD32(c->x[0]); int n_ = rt_point_shadows_cap(); '
+            'if (n_ > 0 && b_ > n_) b_ = n_; c->x[1] = (uint32_t)b_; }'
+            f'  /* {a:#x}: ldr w1, [x0] (Video > Point light shadows: the pool budget capped) */')
+
+
+def _patch_far(gen, a):
+    _expect(gen, a, 0xbd413a60)  # ldr s0, [x19, #0x138]
+    return ('{ extern void rt_render_opts(int *, int *, float *); int s_, f_; float cap_, far_; rt_render_opts(&s_, &f_, &cap_); '
+            'uint32_t b_ = LD32(c->x[19] + 0x138ull); memcpy(&far_, &b_, 4); '
+            'if (cap_ > 0 && far_ > cap_) { far_ = cap_; memcpy(&b_, &far_, 4); ST32(c->x[19] + 0x138ull, b_); } '
+            'c->v[0] = 0; memcpy(&c->v[0], &far_, 4); }'
+            f'  /* {a:#x}: ldr s0, [x19, #0x138] (Video > Draw distance: the far plane capped) */')
+
+
+_RENDER_PATCH = {'shadow cascades': _patch_cascades, 'point shadows': _patch_point_shadows, 'far plane': _patch_far}
+
+
+def render_sites(nso, log=print):
+    """{name: canonical address} of the rendering reductions found by signature in this main (unique matches only)."""
+    off0, size = nso.text
+    text = bytes(nso.image[off0:off0 + size])
+    found = {}
+    for name, word, check, off143 in _RENDER_SIGS:
+        hits = [o for o in _find_all(text, word) if check(text, o)]
+        if len(hits) != 1:
+            log(f'[patches] {name}: {len(hits)} matches of its signature - left off in this build')
+            continue
+        found[name] = MAIN_BASE + off0 + hits[0]
+        log(f'[patches] {name}: found at main+{off0 + hits[0]:#x}' +
+            ('' if nso.build_id[:16] != BUILD_TOTK_1_4_3 else f' (1.4.3 native mode: {off143:#x})'))
+    return found
+
+
+def patches_for(build_id, nso=None):
+    """The patches for a module, by its build id (sdk and anything unknown: none). With its NSO, also the rendering
+    reductions found by signature (render_sites) - in 1.4.3 only where they land on the native mode's address."""
+    base = {BUILD_TOTK_1_4_3: PATCHES_143, BUILD_TOTK_1_4_2: PATCHES_142}.get(build_id[:16], {})
+    if nso is None or build_id[:16] not in (BUILD_TOTK_1_4_3, BUILD_TOTK_1_4_2):
+        return base
+    out = dict(base)
+    off143 = {name: o for name, _, _, o in _RENDER_SIGS}
+    for name, a in render_sites(nso).items():
+        if build_id[:16] == BUILD_TOTK_1_4_3 and a != MAIN_BASE + off143[name]:
+            print(f'[patches] {name}: 1.4.3 signature at {a:#x}, not the native mode\'s - left off')
+            continue
+        if a in out:
+            print(f'[patches] {name}: {a:#x} already patched - left off')
+            continue
+        out[a] = _RENDER_PATCH[name]
+    return out

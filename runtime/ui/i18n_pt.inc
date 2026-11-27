@@ -416,6 +416,8 @@
  "Analógico direito"},
 {"Russian",
  "Russo"},
+{"On this version: Shadows, Draw distance, Sun shadow cascades and Point light shadows. Shadow quality and the game's anti-aliasing work on 1.4.3 only.",
+ "Nesta versão: Sombras, Distância de desenho, Cascatas de sombra do sol e Sombras de luzes pontuais. Qualidade das sombras e o anti-aliasing do jogo só funcionam na 1.4.3."},
 {"Save a log file",
  "Salvar arquivo de log"},
 {"Driver messages in the log",

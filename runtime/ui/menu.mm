@@ -765,6 +765,15 @@ static void tab_display(void) {
                "blends only along them, so textures stay sharp. FXAA: a single, cheaper pass that also softens the image "
                "a little. Most useful at a lower internal resolution.");
     {   // The game's own rendering costs (runtime/native.c: shadow map size, its FXAA, the far plane). They apply at once.
+        {   // (1.4.2, recompiled: the draw distance and the shadow caps found by signature in its code - tools/patches.py
+            // render_sites, the build's log says which; the shadow map size and the game's FXAA are 1.4.3's only)
+            extern int g_game_version;
+            extern int rt_game_version(void);
+            int v = g_game_version ? g_game_version : rt_game_version();
+            if (v && v != 143)
+                ImGui::TextWrapped("%s", tr("On this version: Shadows, Draw distance, Sun shadow cascades and Point light shadows. "
+                                            "Shadow quality and the game's anti-aliasing work on 1.4.3 only."));
+        }
         static const char *shadows[] = {"Game", "Lower", "Lowest"};
         static const int shadow_px[] = {0, 288, 256};
         int si = g_settings.shadow_res == 288 ? 1 : g_settings.shadow_res == 256 ? 2 : 0;

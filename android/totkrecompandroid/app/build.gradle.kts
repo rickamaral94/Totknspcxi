@@ -24,14 +24,16 @@ android {
         applicationId = "com.totkrecompandroid"
         minSdk = 30
         targetSdk = 36
-        versionCode = 29
-        versionName = "0.4.0-beta-amaral.26"
+        versionCode = 30
+        versionName = "0.4.0-beta-amaral.27"
         ndk {
             abiFilters += "arm64-v8a"
         }
         externalNativeBuild {
             cmake {
                 arguments += "-DTOTK_GEN_DIR=${gen.get().asFile.resolve("inc").absolutePath.replace('\\', '/')}"
+                // (ThinLTO for libmain: -PtotkLto=false builds without it, an A/B on [diag]'s "per draw" line)
+                arguments += "-DTOTK_LTO=${if (providers.gradleProperty("totkLto").getOrElse("true") != "false") "ON" else "OFF"}"
             }
         }
     }

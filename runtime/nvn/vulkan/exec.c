@@ -50,6 +50,8 @@ int vk_ab(const char *what);
 #define AB(what) (ab_n == 0 ? -1 : vk_ab(what))
 static uint64_t hash_words(uint64_t h, const void *p, size_t n);
 
+static uint64_t g_draws_total;  // (all draws recorded so far: diag.c, the render thread's CPU time per draw)
+uint64_t vk_draws_total(void) { return __atomic_load_n(&g_draws_total, __ATOMIC_RELAXED); }
 static uint64_t stat_draws, stat_skipped, stat_passes, stat_dispatches, stat_wait_ns, stat_flushes, stat_feedback_copies;
 static uint64_t stat_dchained;  // (dispatches with no barrier before them: dchain)
 static uint64_t stat_feedback_reads;  // (attachments sampled as they are: only read, resolve_feedback)
@@ -9838,6 +9840,7 @@ static void draw_(CmdRec *r, bool indexed) {
     if (g_debug_frame) pick_after_draw();
     pass_written |= draw_w;
     stat_draws++;
+    __atomic_store_n(&g_draws_total, g_draws_total + 1, __ATOMIC_RELAXED);  // (the render thread only writes it)
     cum_draws++;
     if (g_gpuprof_frame && gp_n) {
         if (!gp_draws[gp_n - 1]) {  // first draw of the row: its fragment shader hash

@@ -266,6 +266,8 @@ static uint64_t g_ts0[6];  // (vulkan/exec.c diag_gpu_ts_health at the window's 
 static uint8_t f_flags[FMAX];  // 1 gameplay, 2 sampler on, 4 the compared feature on (diag_request_ab)
 static uint64_t f_rcpu[FMAX], f_mcpu[FMAX];  // the render thread's and the main thread's own CPU time per interval
 static int f_n, f_ncomp, f_nmenu;
+static uint64_t g_draws0, g_draws1;  // (vk_draws_total at the window's start and end: the render thread's CPU per draw)
+
 static uint64_t f_last, f_last_gpu, f_next_stats, f_next_block;
 static uint64_t f_checkpoint_next, f_checkpoint_real, f_checkpoint_ns;
 #define CL 8
@@ -525,6 +527,9 @@ void diag_present(uint64_t acquire_ns, uint64_t present_ns) {
         { extern void diag_gpu_ts_health(uint64_t *, uint64_t *, uint64_t *, uint64_t *, uint64_t *, uint64_t *);
           diag_gpu_ts_health(&g_ts0[0], &g_ts0[1], &g_ts0[2], &g_ts0[3], &g_ts0[4], &g_ts0[5]); }
 #endif
+#if defined(__ANDROID__) && !defined(DIAG_TESTING)
+        { extern uint64_t vk_draws_total(void); g_draws0 = g_draws1 = vk_draws_total(); }
+#endif
         if (g_ab_want) g_diag_ab = 1, f_next_ab = now + 10000000000ull;
         f_last_rcpu = thread_cpu(), f_last_mcpu = tid_cpu(atomic_load(&g_main_tid));
         atomic_store(&g_state, 2);
@@ -601,6 +606,9 @@ void diag_present(uint64_t acquire_ns, uint64_t present_ns) {
         int n = atomic_load(&g_nslots);
         for (int i = 0; i < n && i < SLOTS; i++) if (g_slots[i].live) arm_timer(g_slots[i].timer, false);
         g_diag_ab = -1;  // (the feature back to its normal state)
+#if defined(__ANDROID__) && !defined(DIAG_TESTING)
+        { extern uint64_t vk_draws_total(void); g_draws1 = vk_draws_total(); }
+#endif
         atomic_store(&g_state, 3);
         report_start();
     }
@@ -806,6 +814,14 @@ static void thread_lines(DiagT *d, uint64_t t0, uint64_t t1, int frames) {
             "runnable but not running (preemption, migration)",
             100.0 * (d->last_cpu - d->first_cpu) / (d->last_wall - d->first_wall), (d->last_wall - d->first_wall) / 1e9,
             frames ? (d->last_cpu - d->first_cpu) / 1e6 / frames * ((double)wall / (d->last_wall - d->first_wall)) : 0);
+    if (!strcmp(d->name, "render") && g_draws1 > g_draws0 && d->last_cpu > d->first_cpu) {
+        // (from SpartanPort's "GPU thread us/draw": the render thread's own CPU time per draw it translated - unlike the
+        // frame rate, it holds across scenes with more or fewer draws, so builds compare on it: LTO, PGO, a change)
+        uint64_t nd = g_draws1 - g_draws0;
+        double cpu = (double)(d->last_cpu - d->first_cpu) * ((double)wall / (d->last_wall - d->first_wall));
+        out("  per draw: %.2f us of its own CPU (%llu draws, %.0f a frame)", cpu / 1e3 / (double)nd, (unsigned long long)nd,
+            frames ? (double)nd / frames : 0.0);
+    }
     if (d->cat_ns[DG_SVC_BLOCK]) {
         o = snprintf(line, sizeof line, "  blocking SVCs:");
         for (int pass = 0; pass < 6; pass++) {  // (the six longest)
