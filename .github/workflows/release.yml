@@ -1,0 +1,142 @@
+# Release Totknspcxi (TOTKDroid Amaral): the APK built from this commit (no game file, no keys, no Lossless.dll in any
+# step), signed with the project's fixed key and published with SHA256SUMS. Same pipeline as the BOTW and GTA V ports
+# (rickamaral94/Botwnspxci, rickamaral94/Gtavport).
+#
+# Run: Actions > release > Run workflow (tag, e.g. v0.4.0-beta-amaral.25).
+# The fixed key (docs/SIGNING-AMARAL.md, the one since amaral.24) in the repository's secrets:
+#   TOTK_KEYSTORE_B64  the .p12 in base64 (base64 -w0 totkrecompandroid-release.p12)
+#   TOTK_KS_PASS       the keystore's password (the key's too)
+#   TOTK_KEY_ALIAS     the alias (totkrecomp-amaral)
+# Without them the job fails: there is no temporary key. The APK's certificate is checked against the SHA-256 recorded
+# in docs/SIGNING-AMARAL.md before anything is published.
+name: release
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag da release (ex.: v0.4.0-beta-amaral.25)"
+        required: true
+      notes:
+        description: "Arquivo de notas no repositório (ex.: docs/releases/v0.4.0-beta-amaral.25.md); vazio: texto padrão"
+        required: false
+        default: ""
+      prerelease:
+        description: "Pre-release (false: release normal, a versão para jogar)"
+        required: false
+        default: "true"
+
+permissions:
+  contents: write
+
+env:
+  NDK_VERSION: "30.0.16248370"
+  CMAKE_VERSION: "3.30.4"
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    steps:
+      - name: A chave fixa está cadastrada
+        env:
+          KS: ${{ secrets.TOTK_KEYSTORE_B64 }}
+          PASS: ${{ secrets.TOTK_KS_PASS }}
+          ALIAS: ${{ secrets.TOTK_KEY_ALIAS }}
+        run: |
+          if [ -z "$KS" ] || [ -z "$PASS" ] || [ -z "$ALIAS" ]; then
+            echo "::error::Faltam os secrets TOTK_KEYSTORE_B64 / TOTK_KS_PASS / TOTK_KEY_ALIAS (docs/SIGNING-AMARAL.md)"
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+
+      - name: Submódulos
+        run: git submodule update --init --recursive third_party/libadrenotools third_party/mbedtls
+
+      - name: Liberar disco
+        run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost /opt/hostedtoolcache/CodeQL && df -h /
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: SDK, NDK e CMake
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36" "build-tools;35.0.0" \
+            "ndk;$NDK_VERSION" "cmake;$CMAKE_VERSION" > /dev/null
+          echo "sdk.dir=$ANDROID_HOME" > android/totkrecompandroid/local.properties
+
+      - uses: actions/cache@v4
+        id: deps
+        with:
+          path: |
+            android/deps/out
+            android/deps/ffmpeg
+          key: deps-${{ env.NDK_VERSION }}-${{ hashFiles('android/deps/*.sh', 'android/deps/*.patch', 'android/gen/**') }}
+
+      - name: Dependências nativas (SDL3, shaderc, FFmpeg, Unicorn, Python/Zig do gerador)
+        if: steps.deps.outputs.cache-hit != 'true'
+        run: |
+          export ANDROID_NDK="$ANDROID_HOME/ndk/$NDK_VERSION" ANDROID_NDK_LINUX="$ANDROID_HOME/ndk/$NDK_VERSION"
+          sudo apt-get install -y --no-install-recommends ninja-build nasm > /dev/null
+          for s in build_deps.sh build_ffmpeg.sh build_gen_deps.sh; do
+            echo "== $s"; bash android/deps/$s
+          done
+
+      - name: Testes de host
+        run: |
+          pip install -q lz4
+          bash tools/test_translate_ops.sh
+          python3 tools/test_native_timing_fixes.py
+          python3 tools/test_romfs_build.py
+          python3 tools/test_android_log_policy.py
+
+      - name: Chave fora do repositório
+        env:
+          KS: ${{ secrets.TOTK_KEYSTORE_B64 }}
+          PASS: ${{ secrets.TOTK_KS_PASS }}
+          ALIAS: ${{ secrets.TOTK_KEY_ALIAS }}
+        run: |
+          mkdir -p ~/.totkrecompandroid && chmod 700 ~/.totkrecompandroid
+          printf '%s' "$KS" | base64 -d > ~/.totkrecompandroid/release.p12
+          { echo "storeFile=$HOME/.totkrecompandroid/release.p12"; echo "storePassword=$PASS"; echo "keyAlias=$ALIAS";
+            echo "keyPassword=$PASS"; } > ~/.totkrecompandroid/keystore.properties
+          chmod 600 ~/.totkrecompandroid/*
+
+      - name: assembleRelease
+        working-directory: android/totkrecompandroid
+        run: bash ./gradlew assembleRelease --no-daemon -x lintVitalAnalyzeRelease -x lintVitalReportRelease -x lintVitalRelease
+
+      - name: Assinatura e certificado conferido
+        run: |
+          BT="$ANDROID_HOME/build-tools/35.0.0"
+          src=$(ls android/totkrecompandroid/app/build/outputs/apk/release/*.apk | head -1)
+          ver=$(grep -oP 'versionName = "\K[^"]+' android/totkrecompandroid/app/build.gradle.kts)
+          mkdir -p out
+          apk="out/Totknspcxi-$ver-v142.apk"
+          cp "$src" "$apk"
+          "$BT/apksigner" verify --verbose "$apk" | grep -E "Verifies"
+          "$BT/zipalign" -c -P 16 4 "$apk"
+          got=$("$BT/apksigner" verify --print-certs "$apk" | grep -oP 'SHA-256 digest: \K[0-9a-f]+' | head -1)
+          want=$(grep -oP 'Certificado SHA-256: `\K[0-9a-f]{64}' docs/SIGNING-AMARAL.md | head -1)
+          echo "certificado: $got (registrado: $want)"
+          [ -n "$got" ] && [ "$got" = "$want" ] || { echo "::error::certificado diferente do registrado"; exit 1; }
+          # (the runtime's library with its symbols, for tools/diag_symbolize.py: our code only, the APK's build id)
+          sym=android/totkrecompandroid/app/build/intermediates/merged_native_libs/release/mergeReleaseNativeLibs/out/lib/arm64-v8a/libmain.so
+          [ -f "$sym" ] && gzip -9c "$sym" > "out/libmain-symbols-$ver.so.gz"
+          (cd out && sha256sum *.apk *.gz 2>/dev/null > SHA256SUMS && cat SHA256SUMS)
+          rm -rf ~/.totkrecompandroid
+
+      - name: Publicar
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+          NOTES: ${{ inputs.notes }}
+          PRE: ${{ inputs.prerelease }}
+        run: |
+          if [ -n "$NOTES" ] && [ -f "$NOTES" ]; then cp "$NOTES" body.md
+          else echo "Totknspcxi (TOTKDroid Amaral) $TAG. Nenhum arquivo do jogo incluído: use os seus. Certificado SHA-256 em docs/SIGNING-AMARAL.md; confira com SHA256SUMS." > body.md; fi
+          KIND=--prerelease
+          if [ "$PRE" = "false" ]; then KIND=--latest; fi
+          gh release create "$TAG" out/*.apk out/*.gz out/SHA256SUMS "$KIND" --target "$GITHUB_SHA" --title "$TAG" --notes-file body.md
