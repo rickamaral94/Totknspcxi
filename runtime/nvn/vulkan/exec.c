@@ -5924,7 +5924,7 @@ static bool gpu_buffer_copy(uint64_t src, uint64_t dst, uint64_t size) {
 // this one's (BOTW 2026-10-27: white water, terrain "curtains"). Saves the render thread its copies (BOTW on the Odin 2:
 // render thread -11%). Off by default; Settings > Files > Measure and compare alternates it (diag.c g_diag_ab).
 // LARECOMP_INPLACE_CBUF=0: never, 1: always (also with the lag); LARECOMP_AB=<frames>:inplace alternates it.
-// (The per-draw window, cbwin_bind, is upstream's: on whenever the heap is GPU memory.)
+// (The per-draw window, cbwin_bind, goes with it: cbwin_now, below.)
 extern volatile bool g_sync_lag_now;  // (nvn/objects.c nvnSyncWait)
 static bool inplace_cbufs(void) {
     static int env = -2;
@@ -5969,10 +5969,20 @@ static bool ubo_direct(uint64_t addr, uint64_t size, VkDescriptorBufferInfo *out
 // Off by default since 2026-10-27: in play (1.9.0) the water turned white and the terrain showed stretched "curtains",
 // and objects far away grew spikes on a hit - the buffer read in place while the CPU already writes the next frame's
 // rows there (the sync lag lets the CPU run a frame ahead). LARECOMP_CB_WINDOW=1: on (a test).
-static bool cbwin_wanted(void) {
+static bool cbwin_wanted(void) {  // (the shaders' test: compiled in whenever the heap is GPU memory - amaral.24's)
     static int on = -1;
-    if (on < 0) on = getenv("LARECOMP_CB_WINDOW") && atoi(getenv("LARECOMP_CB_WINDOW"));
+    if (on < 0) on = getenv("LARECOMP_CB_WINDOW") ? atoi(getenv("LARECOMP_CB_WINDOW")) : 1;
     return on && gmem_placed;
+}
+// The window used (cbwin_bind) only where the buffer may be read in place: LARECOMP_CB_WINDOW=1, or Constant buffers
+// read in place on (inplace_cbufs: never with the sync lag). amaral.28: the upstream merge (.25) had it on whenever
+// the heap was GPU memory, with the sync lag and without the shaders' test (upstream turns the heap on by default on
+// Adreno 8xx only; ours also on the 740) - on the Odin 2 the whole picture washed out to white (2026-11-28 log, both
+// Turnip and Qualcomm's driver), the BOTW's 2026-10-27 symptom.
+static bool cbwin_now(void) {
+    static int forced = -1;
+    if (forced < 0) forced = getenv("LARECOMP_CB_WINDOW") && atoi(getenv("LARECOMP_CB_WINDOW")) == 1;
+    return forced || inplace_cbufs();
 }
 // (the update marks are guest addresses: a reboot's game puts other things there)
 RT_ON_RESET(ubo_inline_reset) {
@@ -6010,7 +6020,7 @@ static uint64_t cbwin_rows(uint64_t addr, uint64_t size) {
 }
 
 static bool cbwin_bind(int stage, int k, uint64_t addr, uint64_t size, VkDescriptorBufferInfo *out) {
-    if ((stage != 0 && stage != 1) || !gmem_placed || cbw_patch[stage].m[0] || AB("cbwin") == 1) return false;
+    if ((stage != 0 && stage != 1) || !gmem_placed || cbw_patch[stage].m[0] || AB("cbwin") == 1 || !cbwin_now()) return false;
     if (addr < HEAP_BASE || addr + size > HEAP_BASE + gmem_size) return false;
     uint64_t off = addr - HEAP_BASE;
     if ((off & (g_vk.props.limits.minUniformBufferOffsetAlignment - 1)) || size > g_vk.props.limits.maxUniformBufferRange ||
